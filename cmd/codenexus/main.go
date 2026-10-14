@@ -9,11 +9,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
-	"github.com/ZicongCheung/CodeNexus/internal/account"
 	"github.com/ZicongCheung/CodeNexus/internal/api"
+	"github.com/ZicongCheung/CodeNexus/internal/authstore"
 	"github.com/ZicongCheung/CodeNexus/internal/config"
 	"github.com/ZicongCheung/CodeNexus/internal/logx"
 	"github.com/ZicongCheung/CodeNexus/internal/panel"
@@ -55,19 +56,32 @@ func run(configPath string) error {
 		logx.Infof("created %s with a new api_key (shown once): %s", configPath, cfg.APIKey)
 	}
 
-	p := pool.New()
-	accts, err := account.LoadDir(cfg.AuthDir)
+	p := buildPool(cfg)
+
+	store := authstore.New(cfg.AuthDir)
+	accts, err := store.Load()
 	if err != nil {
 		logx.Warnf("load accounts: %v", err)
 	}
 	p.Replace(accts)
+	if err := p.LoadState(); err != nil {
+		logx.Warnf("load pool state: %v", err)
+	}
+	p.StartFlusher(5 * time.Second)
+	defer func() {
+		if err := p.Close(); err != nil {
+			logx.Warnf("flush pool state: %v", err)
+		}
+	}()
 	logx.Infof("loaded %d account(s) from %s", len(accts), cfg.AuthDir)
 
 	if cfg.Upstreams.WorkBuddy.Enabled {
 		upstream.Register(workbuddy.New(workbuddy.Config{
-			BaseURL:        cfg.Upstreams.WorkBuddy.BaseURL,
-			UserAgent:      cfg.Upstreams.WorkBuddy.UserAgent,
-			TimeoutSeconds: cfg.Upstreams.WorkBuddy.TimeoutSeconds,
+			BaseURL:             cfg.Upstreams.WorkBuddy.BaseURL,
+			UserAgent:           cfg.Upstreams.WorkBuddy.UserAgent,
+			TimeoutSeconds:      cfg.Upstreams.WorkBuddy.TimeoutSeconds,
+			DisableSanitize:     !cfg.Features.SanitizeFingerprints,
+			DisableMarkupRepair: !cfg.Features.RepairToolMarkup,
 		}))
 	}
 	// Trae CN upstream is registered in a later phase.
@@ -101,4 +115,25 @@ func run(configPath string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return httpSrv.Shutdown(ctx)
+}
+
+// buildPool translates configuration into pool options.
+func buildPool(cfg *config.Config) *pool.Pool {
+	p := pool.New(pool.Options{
+		MaxInFlight:      cfg.Pool.MaxInFlight,
+		CreditFloor:      int64(cfg.Pool.CreditFloor),
+		CooldownBase:     time.Duration(cfg.Pool.CooldownSeconds) * time.Second,
+		CooldownMax:      time.Duration(cfg.Pool.CooldownMaxSeconds) * time.Second,
+		BreakerThreshold: cfg.Pool.BreakerThreshold,
+		BreakerFor:       time.Duration(cfg.Pool.BreakerSeconds) * time.Second,
+		WaitMax:          time.Duration(cfg.Pool.WaitMaxSeconds) * time.Second,
+		StickyEnabled:    cfg.SessionSticky.Enabled,
+		StickyTTL:        time.Duration(cfg.SessionSticky.TTLSeconds) * time.Second,
+		WeightCredit:     cfg.Pool.WeightCredit,
+		WeightIdle:       cfg.Pool.WeightIdle,
+		WeightSuccess:    cfg.Pool.WeightSuccess,
+	})
+	p.SetStatePath(filepath.Join(cfg.DataDir, "pool-state.json"))
+	p.SetErrorHandler(func(err error) { logx.Warnf("flush pool state: %v", err) })
+	return p
 }

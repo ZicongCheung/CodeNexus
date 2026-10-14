@@ -1,68 +1,161 @@
 // Package pool holds the unified account pool and selects accounts for requests.
+//
+// Selection is health-aware: accounts sit in one of a few orthogonal states
+// (enabled, cooling, circuit-broken, model-cooled, in-flight-saturated) and a
+// composite weight decides which healthy account serves the next request.
 package pool
 
 import (
-	"errors"
+	"context"
+	"math"
+	"math/rand"
+	"sort"
 	"sync"
+	"time"
 
 	"github.com/ZicongCheung/CodeNexus/internal/account"
 	"github.com/ZicongCheung/CodeNexus/internal/upstream"
 )
 
-// ErrNoAccount is returned when no enabled account matches the request.
-var ErrNoAccount = errors.New("pool: no available account")
+// TopK is how many of the heaviest candidates enter the weighted draw.
+const TopK = 5
 
-// Pool is a concurrency-safe holder of accounts with a simple round-robin pick.
+// pollInterval is how long to wait when every account is merely busy (rather
+// than cooling) so a freed in-flight slot can be picked up.
+const pollInterval = 200 * time.Millisecond
+
+// Options configures pool behavior. Zero values fall back to defaults.
+type Options struct {
+	MaxInFlight      int
+	CreditFloor      int64
+	CooldownBase     time.Duration
+	CooldownMax      time.Duration
+	BreakerThreshold int
+	BreakerFor       time.Duration
+	WaitMax          time.Duration
+	StickyEnabled    bool
+	StickyTTL        time.Duration
+	WeightCredit     float64
+	WeightIdle       float64
+	WeightSuccess    float64
+	// Seed makes the weighted draw reproducible in tests. Zero means time-based.
+	Seed int64
+	// Clock overrides the time source in tests.
+	Clock func() time.Time
+}
+
+func (o Options) withDefaults() Options {
+	if o.MaxInFlight <= 0 {
+		o.MaxInFlight = 3
+	}
+	if o.CooldownBase <= 0 {
+		o.CooldownBase = 30 * time.Second
+	}
+	if o.CooldownMax <= 0 {
+		o.CooldownMax = time.Hour
+	}
+	if o.BreakerThreshold <= 0 {
+		o.BreakerThreshold = 5
+	}
+	if o.BreakerFor <= 0 {
+		o.BreakerFor = 2 * time.Minute
+	}
+	if o.WaitMax <= 0 {
+		o.WaitMax = 8 * time.Second
+	}
+	if o.StickyTTL <= 0 {
+		o.StickyTTL = 30 * time.Minute
+	}
+	if o.WeightCredit == 0 && o.WeightIdle == 0 && o.WeightSuccess == 0 {
+		o.WeightCredit, o.WeightIdle, o.WeightSuccess = 0.4, 0.3, 0.3
+	}
+	if o.Clock == nil {
+		o.Clock = time.Now
+	}
+	return o
+}
+
+// stickyBinding pins a session key to an account until it expires.
+type stickyBinding struct {
+	key   string
+	until time.Time
+}
+
+// Pool is a concurrency-safe account pool with health-aware selection.
 type Pool struct {
-	mu       sync.RWMutex
-	accounts []*account.Account
-	rr       int
+	mu      sync.Mutex
+	opts    Options
+	entries map[string]*entry
+	order   []string
+	sticky  map[string]stickyBinding
+	rnd     *rand.Rand
+
+	statePath string
+	dirty     bool
+	stopCh    chan struct{}
+	stopped   bool
+	errFn     func(error)
 }
 
 // New returns an empty pool.
-func New() *Pool { return &Pool{} }
+func New(opts Options) *Pool {
+	opts = opts.withDefaults()
+	seed := opts.Seed
+	if seed == 0 {
+		seed = time.Now().UnixNano()
+	}
+	return &Pool{
+		opts:    opts,
+		entries: map[string]*entry{},
+		sticky:  map[string]stickyBinding{},
+		rnd:     rand.New(rand.NewSource(seed)),
+		stopCh:  make(chan struct{}),
+	}
+}
 
-// Replace swaps the whole account set.
+func (p *Pool) now() time.Time { return p.opts.Clock() }
+
+// Replace swaps the whole account set, preserving runtime state for accounts
+// that survive the swap.
 func (p *Pool) Replace(accts []*account.Account) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.accounts = accts
+
+	next := make(map[string]*entry, len(accts))
+	order := make([]string, 0, len(accts))
+	for _, a := range accts {
+		key := a.Key()
+		if prev, ok := p.entries[key]; ok {
+			prev.acc = a
+			next[key] = prev
+		} else {
+			next[key] = newEntry(a)
+		}
+		order = append(order, key)
+	}
+	p.entries = next
+	p.order = order
+	p.dirty = true
 }
 
 // List returns a copy of all accounts.
 func (p *Pool) List() []*account.Account {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	out := make([]*account.Account, len(p.accounts))
-	copy(out, p.accounts)
-	return out
-}
-
-// Pick selects the next enabled account for source using round-robin.
-func (p *Pool) Pick(source upstream.Source) (*account.Account, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	var cands []*account.Account
-	for _, a := range p.accounts {
-		if a.Enabled && a.Source == source {
-			cands = append(cands, a)
-		}
+	out := make([]*account.Account, 0, len(p.order))
+	for _, k := range p.order {
+		out = append(out, p.entries[k].acc)
 	}
-	if len(cands) == 0 {
-		return nil, ErrNoAccount
-	}
-	a := cands[p.rr%len(cands)]
-	p.rr++
-	return a, nil
+	return out
 }
 
 // Stats reports enabled and total account counts.
 func (p *Pool) Stats() (enabled, total int) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	for _, a := range p.accounts {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, k := range p.order {
 		total++
-		if a.Enabled {
+		if p.entries[k].acc.Enabled {
 			enabled++
 		}
 	}
@@ -71,12 +164,229 @@ func (p *Pool) Stats() (enabled, total int) {
 
 // HasSource reports whether any enabled account exists for source.
 func (p *Pool) HasSource(source upstream.Source) bool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	for _, a := range p.accounts {
-		if a.Enabled && a.Source == source {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, k := range p.order {
+		e := p.entries[k]
+		if e.acc.Source == source && e.acc.Enabled {
 			return true
 		}
 	}
 	return false
+}
+
+// Candidate returns a selectable account for source without reserving a slot.
+// It is used for read-only operations such as listing models.
+func (p *Pool) Candidate(source upstream.Source) *account.Account {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := p.now()
+	for _, k := range p.order {
+		e := p.entries[k]
+		if e.acc.Source == source && e.active() && !e.cooling(now) && !e.broken(now) {
+			return e.acc
+		}
+	}
+	return nil
+}
+
+// SetCredits records an externally observed credit balance for an account.
+func (p *Pool) SetCredits(key string, credits int64, known bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.entries[key]; ok {
+		e.credits = credits
+		e.creditsKnown = known
+		p.dirty = true
+	}
+}
+
+// SetDisabled administratively disables or revives an account.
+func (p *Pool) SetDisabled(key string, disabled bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.entries[key]; ok {
+		e.disabled = disabled
+		if !disabled {
+			e.coolingUntil = time.Time{}
+			e.breakerUntil = time.Time{}
+			e.softStreak = 0
+			e.fails = 0
+		}
+		p.dirty = true
+	}
+}
+
+// PickOptions describes one acquisition attempt.
+type PickOptions struct {
+	Source     upstream.Source
+	Model      string
+	SessionKey string
+	// Exclude holds account keys already tried for this request.
+	Exclude map[string]bool
+}
+
+// Acquire reserves an account for a request. When every matching account is
+// cooling it waits for the earliest recovery, up to Options.WaitMax.
+func (p *Pool) Acquire(ctx context.Context, opts PickOptions) (*Lease, error) {
+	deadline := p.now().Add(p.opts.WaitMax)
+	for {
+		lease, wait := p.tryAcquire(opts)
+		if lease != nil {
+			return lease, nil
+		}
+		if wait <= 0 {
+			return nil, &ErrNoAccount{Reason: "no matching account"}
+		}
+		now := p.now()
+		if now.Add(wait).After(deadline) {
+			return nil, &ErrNoAccount{RetryAfter: wait, Reason: "all accounts cooling"}
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// tryAcquire attempts one selection. It returns a lease on success, or the
+// delay after which a retry might succeed (zero when waiting cannot help).
+func (p *Pool) tryAcquire(opts PickOptions) (*Lease, time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := p.now()
+
+	cands := p.candidatesLocked(now, opts)
+	if len(cands) == 0 {
+		return nil, p.nextReadyLocked(now, opts)
+	}
+
+	// Sticky sessions keep a conversation on the account that served it.
+	if opts.SessionKey != "" && p.opts.StickyEnabled {
+		if b, ok := p.sticky[opts.SessionKey]; ok && now.Before(b.until) {
+			for _, e := range cands {
+				if e.key == b.key {
+					return p.grantLocked(e, now, opts), 0
+				}
+			}
+		}
+	}
+	return p.grantLocked(p.chooseWeightedLocked(cands, now), now, opts), 0
+}
+
+// candidatesLocked returns the selectable entries for the request.
+func (p *Pool) candidatesLocked(now time.Time, opts PickOptions) []*entry {
+	out := make([]*entry, 0, len(p.order))
+	for _, k := range p.order {
+		e := p.entries[k]
+		if e.acc.Source != opts.Source || opts.Exclude[k] {
+			continue
+		}
+		if !e.selectable(now, opts.Model, p.opts.MaxInFlight) {
+			continue
+		}
+		// credit floor: never spend an account known to be nearly empty
+		if p.opts.CreditFloor > 0 && e.creditsKnown && e.credits < p.opts.CreditFloor {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// nextReadyLocked estimates how long until any excluded/unavailable account
+// becomes a candidate again.
+func (p *Pool) nextReadyLocked(now time.Time, opts PickOptions) time.Duration {
+	best := time.Duration(0)
+	busy := false
+	for _, k := range p.order {
+		e := p.entries[k]
+		if e.acc.Source != opts.Source || opts.Exclude[k] || !e.active() {
+			continue
+		}
+		if e.inFlight >= p.opts.MaxInFlight &&
+			!e.cooling(now) && !e.broken(now) && !e.modelCooled(now, opts.Model) {
+			busy = true
+		}
+		if d := e.blockDelay(now, opts.Model); d > 0 && (best == 0 || d < best) {
+			best = d
+		}
+	}
+	if best == 0 && busy {
+		return pollInterval
+	}
+	return best
+}
+
+// grantLocked reserves an in-flight slot and records the sticky binding.
+func (p *Pool) grantLocked(e *entry, now time.Time, opts PickOptions) *Lease {
+	e.inFlight++
+	e.lastUsed = now
+	e.lastModel = opts.Model
+	if opts.SessionKey != "" && p.opts.StickyEnabled {
+		p.sticky[opts.SessionKey] = stickyBinding{key: e.key, until: now.Add(p.opts.StickyTTL)}
+	}
+	p.dirty = true
+	return &Lease{Account: e.acc, pool: p, key: e.key}
+}
+
+type scored struct {
+	e *entry
+	w float64
+}
+
+// chooseWeightedLocked scores every candidate, keeps the heaviest TopK, and
+// draws one proportionally to its weight.
+func (p *Pool) chooseWeightedLocked(cands []*entry, now time.Time) *entry {
+	if len(cands) == 1 {
+		return cands[0]
+	}
+	var maxCredits int64 = 1
+	for _, e := range cands {
+		if e.credits > maxCredits {
+			maxCredits = e.credits
+		}
+	}
+	scores := make([]scored, 0, len(cands))
+	for _, e := range cands {
+		credit := 0.5
+		if e.creditsKnown {
+			credit = float64(e.credits) / float64(maxCredits)
+			if credit > 1 {
+				credit = 1
+			}
+		}
+		idle := 1.0
+		if !e.lastUsed.IsZero() {
+			idle = math.Min(1, now.Sub(e.lastUsed).Seconds()/300)
+		}
+		success := 0.5
+		if tot := e.success + e.errors; tot > 0 {
+			success = float64(e.success+1) / float64(tot+2)
+		}
+		w := p.opts.WeightCredit*credit + p.opts.WeightIdle*idle + p.opts.WeightSuccess*success + 0.01
+		scores = append(scores, scored{e: e, w: w})
+	}
+	sort.SliceStable(scores, func(i, j int) bool { return scores[i].w > scores[j].w })
+
+	k := TopK
+	if k > len(scores) {
+		k = len(scores)
+	}
+	top := scores[:k]
+	total := 0.0
+	for _, s := range top {
+		total += s.w
+	}
+	r := p.rnd.Float64() * total
+	for i, s := range top {
+		r -= s.w
+		if r <= 0 || i == len(top)-1 {
+			return s.e
+		}
+	}
+	return top[len(top)-1].e
 }

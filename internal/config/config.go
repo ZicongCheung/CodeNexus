@@ -19,16 +19,41 @@ type Config struct {
 	DataDir  string `json:"data_dir"`
 	LogLevel string `json:"log_level"`
 
-	Pool      PoolConfig      `json:"pool"`
-	Router    RouterConfig    `json:"router"`
-	Upstreams UpstreamsConfig `json:"upstreams"`
+	Pool          PoolConfig          `json:"pool"`
+	SessionSticky SessionStickyConfig `json:"session_sticky"`
+	Features      FeaturesConfig      `json:"features"`
+	Router        RouterConfig        `json:"router"`
+	Upstreams     UpstreamsConfig     `json:"upstreams"`
+}
+
+// FeaturesConfig toggles outbound rewrite protections. Both default to true.
+type FeaturesConfig struct {
+	// SanitizeFingerprints scrubs client prompt fingerprints that the upstream
+	// content filter matches literally.
+	SanitizeFingerprints bool `json:"sanitize_fingerprints"`
+	// RepairToolMarkup restores native tool-call markup into structured calls.
+	RepairToolMarkup bool `json:"repair_tool_markup"`
 }
 
 // PoolConfig controls account selection and resilience.
 type PoolConfig struct {
-	CreditFloor     int `json:"credit_floor"`
-	CooldownSeconds int `json:"cooldown_seconds"`
-	MaxInFlight     int `json:"max_in_flight"`
+	CreditFloor        int     `json:"credit_floor"`
+	CooldownSeconds    int     `json:"cooldown_seconds"`
+	CooldownMaxSeconds int     `json:"cooldown_max_seconds"`
+	BreakerThreshold   int     `json:"breaker_threshold"`
+	BreakerSeconds     int     `json:"breaker_seconds"`
+	MaxInFlight        int     `json:"max_in_flight"`
+	WaitMaxSeconds     int     `json:"wait_max_seconds"`
+	FailoverAttempts   int     `json:"failover_attempts"`
+	WeightCredit       float64 `json:"weight_credit"`
+	WeightIdle         float64 `json:"weight_idle"`
+	WeightSuccess      float64 `json:"weight_success"`
+}
+
+// SessionStickyConfig pins a conversation to one account for a while.
+type SessionStickyConfig struct {
+	Enabled    bool `json:"enabled"`
+	TTLSeconds int  `json:"ttl_seconds"`
 }
 
 // RouterConfig controls model naming and cross-source selection.
@@ -66,8 +91,22 @@ func Default() Config {
 		AuthDir:  "./auths",
 		DataDir:  "./data",
 		LogLevel: "info",
-		Pool:     PoolConfig{CreditFloor: 100, CooldownSeconds: 600, MaxInFlight: 3},
-		Router:   RouterConfig{Naming: "flat", SameNamePolicy: "auto_healthy"},
+		Pool: PoolConfig{
+			CreditFloor:        100,
+			CooldownSeconds:    30,
+			CooldownMaxSeconds: 3600,
+			BreakerThreshold:   5,
+			BreakerSeconds:     120,
+			MaxInFlight:        3,
+			WaitMaxSeconds:     8,
+			FailoverAttempts:   3,
+			WeightCredit:       0.4,
+			WeightIdle:         0.3,
+			WeightSuccess:      0.3,
+		},
+		SessionSticky: SessionStickyConfig{Enabled: true, TTLSeconds: 1800},
+		Features:      FeaturesConfig{SanitizeFingerprints: true, RepairToolMarkup: true},
+		Router:        RouterConfig{Naming: "flat", SameNamePolicy: "auto_healthy"},
 		Upstreams: UpstreamsConfig{
 			WorkBuddy: WorkBuddyConfig{Enabled: true, TimeoutSeconds: 120},
 			TraeCN:    TraeCNConfig{Enabled: false, AuthSource: "auto", UpstreamMode: "remote", AutoRoute: true},
@@ -133,6 +172,30 @@ func (c *Config) normalize() {
 	}
 	if c.Pool.MaxInFlight <= 0 {
 		c.Pool.MaxInFlight = 3
+	}
+	if c.Pool.CooldownSeconds <= 0 {
+		c.Pool.CooldownSeconds = 30
+	}
+	if c.Pool.CooldownMaxSeconds <= 0 {
+		c.Pool.CooldownMaxSeconds = 3600
+	}
+	if c.Pool.BreakerThreshold <= 0 {
+		c.Pool.BreakerThreshold = 5
+	}
+	if c.Pool.BreakerSeconds <= 0 {
+		c.Pool.BreakerSeconds = 120
+	}
+	if c.Pool.WaitMaxSeconds <= 0 {
+		c.Pool.WaitMaxSeconds = 8
+	}
+	if c.Pool.FailoverAttempts <= 0 {
+		c.Pool.FailoverAttempts = 3
+	}
+	if c.Pool.WeightCredit == 0 && c.Pool.WeightIdle == 0 && c.Pool.WeightSuccess == 0 {
+		c.Pool.WeightCredit, c.Pool.WeightIdle, c.Pool.WeightSuccess = 0.4, 0.3, 0.3
+	}
+	if c.SessionSticky.TTLSeconds <= 0 {
+		c.SessionSticky.TTLSeconds = 1800
 	}
 	if c.Router.Naming == "" {
 		c.Router.Naming = "flat"

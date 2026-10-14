@@ -1,14 +1,20 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ZicongCheung/CodeNexus/internal/account"
 	"github.com/ZicongCheung/CodeNexus/internal/logx"
+	"github.com/ZicongCheung/CodeNexus/internal/pool"
 	"github.com/ZicongCheung/CodeNexus/internal/upstream"
 )
 
@@ -24,10 +30,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("X-Service", ServiceName)
 	writeJSON(w, code, map[string]any{
-		"status":   status,
-		"service":  ServiceName,
-		"accounts": map[string]int{"enabled": enabled, "total": total},
-		"time":     time.Now().UTC().Format(time.RFC3339),
+		"status":         status,
+		"service":        ServiceName,
+		"accounts":       map[string]int{"enabled": enabled, "total": total},
+		"sticky_sessions": s.pool.StickyCount(),
+		"time":           time.Now().UTC().Format(time.RFC3339),
 	})
 }
 
@@ -38,9 +45,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		sources = append(sources, string(src))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"service":  ServiceName,
-		"accounts": map[string]int{"enabled": enabled, "total": total},
-		"sources":  sources,
+		"service":         ServiceName,
+		"accounts":        map[string]int{"enabled": enabled, "total": total},
+		"sources":         sources,
+		"sticky_sessions": s.pool.StickyCount(),
 	})
 }
 
@@ -60,8 +68,8 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			continue
 		}
-		acc, err := s.pool.Pick(src)
-		if err != nil {
+		acc := s.pool.Candidate(src)
+		if acc == nil {
 			continue
 		}
 		models, err := u.ListModels(ctx, acc)
@@ -108,62 +116,202 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "upstream not available: "+string(src), "")
 		return
 	}
-	acc, err := s.pool.Pick(src)
-	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "no available account for source "+string(src), "overloaded_error")
-		return
-	}
 
+	msgs := parseMessages(body["messages"])
 	req := &upstream.ChatRequest{
 		Model:       modelName,
-		Messages:    parseMessages(body["messages"]),
+		Messages:    msgs,
 		Stream:      stream,
 		Temperature: parseFloat(body["temperature"]),
 		MaxTokens:   parseInt(body["max_tokens"]),
 		Tools:       parseSlice(body["tools"]),
 		Raw:         body,
 	}
+	sk := sessionKey(r, body, msgs)
 
-	if stream {
-		s.streamChat(w, r, u, acc, req, model)
-		return
+	attempts := s.cfg.Pool.FailoverAttempts
+	if attempts < 1 {
+		attempts = 1
 	}
-	resp, err := u.Chat(r.Context(), acc, req)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "upstream_error")
-		return
+	tried := map[string]bool{}
+	var lastErr *upstream.Error
+
+	for i := 0; i < attempts; i++ {
+		lease, aerr := s.pool.Acquire(r.Context(), pool.PickOptions{
+			Source:     src,
+			Model:      modelName,
+			SessionKey: sk,
+			Exclude:    tried,
+		})
+		if aerr != nil {
+			writePoolError(w, aerr)
+			return
+		}
+
+		if stream {
+			emitted, serr := s.streamChat(w, r, u, lease.Account, req, model)
+			if serr == nil {
+				lease.Succeed()
+				return
+			}
+			ue := lease.Fail(serr)
+			logx.Warnf("chat stream attempt %d/%d failed: %v", i+1, attempts, serr)
+			if emitted {
+				// The stream already concluded in-band; the client saw the error.
+				return
+			}
+			if !ue.Retryable() || i == attempts-1 {
+				writeUpstreamError(w, ue)
+				return
+			}
+			tried[lease.Account.Key()] = true
+			lastErr = ue
+			continue
+		}
+
+		resp, cerr := u.Chat(r.Context(), lease.Account, req)
+		if cerr == nil {
+			lease.Succeed()
+			writeJSON(w, http.StatusOK, nonStreamPayload(resp, model))
+			return
+		}
+		ue := lease.Fail(cerr)
+		logx.Warnf("chat attempt %d/%d failed: %v", i+1, attempts, cerr)
+		if !ue.Retryable() || i == attempts-1 {
+			writeUpstreamError(w, ue)
+			return
+		}
+		tried[lease.Account.Key()] = true
+		lastErr = ue
 	}
-	writeJSON(w, http.StatusOK, nonStreamPayload(resp, model))
+	writeUpstreamError(w, lastErr)
 }
 
-func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, u upstream.Upstream, acc *account.Account, req *upstream.ChatRequest, clientModel string) {
+// streamChat forwards a streaming completion. It reports whether any bytes were
+// sent to the client, which decides whether a retry on another account is still
+// possible. When the failure happens after the first byte it writes the error
+// into the stream and concludes it.
+func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, u upstream.Upstream, acc *account.Account, req *upstream.ChatRequest, clientModel string) (bool, error) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		writeError(w, http.StatusInternalServerError, "streaming unsupported", "")
-		return
+		return false, errors.New("streaming unsupported")
 	}
 	h := w.Header()
-	h.Set("Content-Type", "text/event-stream")
-	h.Set("Cache-Control", "no-cache")
-	h.Set("Connection", "keep-alive")
-	h.Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-
 	id := "chatcmpl-stream"
+	started := false
+	begin := func() {
+		h.Set("Content-Type", "text/event-stream")
+		h.Set("Cache-Control", "no-cache")
+		h.Set("Connection", "keep-alive")
+		h.Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+	}
 	emit := func(d upstream.StreamDelta) error {
+		if !started {
+			started = true
+			begin()
+		}
 		if _, err := fmt.Fprintf(w, "data: %s\n\n", chunkPayload(id, clientModel, d)); err != nil {
 			return err
 		}
 		flusher.Flush()
 		return nil
 	}
+
 	if err := u.ChatStream(r.Context(), acc, req, emit); err != nil {
-		logx.Warnf("chat stream: %v", err)
+		if !started {
+			return false, err
+		}
 		_, _ = fmt.Fprintf(w, "data: %s\n\n", errorChunkPayload(id, clientModel, err.Error()))
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 		flusher.Flush()
+		return true, err
+	}
+	if !started {
+		begin()
 	}
 	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()
+	return started, nil
+}
+
+func writePoolError(w http.ResponseWriter, err error) {
+	var na *pool.ErrNoAccount
+	if errors.As(err, &na) {
+		if na.RetryAfter > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(na.RetryAfter.Seconds()))))
+		}
+		writeError(w, http.StatusServiceUnavailable, "no available account: "+na.Reason, "overloaded_error")
+		return
+	}
+	writeError(w, http.StatusServiceUnavailable, err.Error(), "overloaded_error")
+}
+
+func writeUpstreamError(w http.ResponseWriter, ue *upstream.Error) {
+	if ue == nil {
+		writeError(w, http.StatusBadGateway, "upstream error", "upstream_error")
+		return
+	}
+	code := http.StatusBadGateway
+	typ := "upstream_error"
+	switch ue.Kind {
+	case upstream.KindBadRequest:
+		code, typ = http.StatusBadRequest, "invalid_request_error"
+	case upstream.KindContentBlocked:
+		code, typ = http.StatusBadRequest, "content_filter"
+	case upstream.KindRateLimited:
+		code, typ = http.StatusTooManyRequests, "rate_limit_error"
+	case upstream.KindQuota:
+		code, typ = http.StatusTooManyRequests, "insufficient_quota"
+	case upstream.KindTimeout:
+		code, typ = http.StatusGatewayTimeout, "timeout_error"
+	}
+	if ue.RetryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(ue.RetryAfter.Seconds()))))
+	}
+	writeError(w, code, ue.Message, typ)
+}
+
+// sessionKey derives a stable conversation identifier from explicit client
+// signals first (header, then the OpenAI user field) and falls back to a
+// fingerprint of the system prompt, first user turn and tool set.
+func sessionKey(r *http.Request, body map[string]any, msgs []upstream.Message) string {
+	if v := strings.TrimSpace(r.Header.Get("X-Session-Id")); v != "" {
+		return "h:" + v
+	}
+	if v, _ := body["user"].(string); strings.TrimSpace(v) != "" {
+		return "u:" + strings.TrimSpace(v)
+	}
+
+	h := sha256.New()
+	seeded := false
+	for _, m := range msgs {
+		if m.Role == "system" {
+			fmt.Fprintf(h, "S:%v\n", m.Content)
+			seeded = true
+		}
+	}
+	for _, m := range msgs {
+		if m.Role == "user" {
+			fmt.Fprintf(h, "U:%v\n", m.Content)
+			seeded = true
+			break
+		}
+	}
+	if tools, ok := body["tools"].([]any); ok {
+		for _, t := range tools {
+			if tm, ok := t.(map[string]any); ok {
+				if fn, ok := tm["function"].(map[string]any); ok {
+					fmt.Fprintf(h, "T:%v\n", fn["name"])
+					seeded = true
+				}
+			}
+		}
+	}
+	if !seeded {
+		return ""
+	}
+	return "f:" + hex.EncodeToString(h.Sum(nil)[:8])
 }
 
 func nonStreamPayload(resp *upstream.ChatResponse, model string) map[string]any {

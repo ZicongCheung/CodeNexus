@@ -4,6 +4,7 @@ package upstream
 
 import (
 	"context"
+	"sort"
 
 	"github.com/ZicongCheung/CodeNexus/internal/account"
 )
@@ -120,17 +121,21 @@ var registry = map[Source]Upstream{}
 // Register makes an upstream available to the router.
 func Register(u Upstream) { registry[u.Source()] = u }
 
+// Unregister removes an upstream from the router.
+func Unregister(s Source) { delete(registry, s) }
+
 // Get returns the registered upstream for a source.
 func Get(s Source) (Upstream, bool) {
 	u, ok := registry[s]
 	return u, ok
 }
 
-// Sources lists the currently registered sources.
+// Sources lists the currently registered sources in a stable order.
 func Sources() []Source {
 	out := make([]Source, 0, len(registry))
 	for s := range registry {
 		out = append(out, s)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
 }

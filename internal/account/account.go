@@ -1,12 +1,9 @@
 // Package account defines the unified account model shared by the pool and the
-// upstream adapters.
+// upstream adapters. Persistence lives in internal/authstore.
 package account
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -56,49 +53,4 @@ func sanitize(s string) string {
 		return "unknown"
 	}
 	return b.String()
-}
-
-// LoadDir reads every *.json credential file in dir. A missing directory is not
-// an error; malformed files are skipped.
-func LoadDir(dir string) ([]*Account, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var out []*Account
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
-		if err != nil {
-			continue
-		}
-		var a Account
-		if err := json.Unmarshal(b, &a); err != nil {
-			continue
-		}
-		if a.Source == "" {
-			a.Source = sourceFromName(e.Name())
-		}
-		if a.Source == "" || a.UID == "" {
-			continue
-		}
-		out = append(out, &a)
-	}
-	return out, nil
-}
-
-func sourceFromName(name string) Source {
-	switch {
-	case strings.HasPrefix(name, string(SourceTraeCN)+"-"):
-		return SourceTraeCN
-	case strings.HasPrefix(name, string(SourceWorkBuddy)+"-"):
-		return SourceWorkBuddy
-	default:
-		return ""
-	}
 }

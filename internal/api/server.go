@@ -76,7 +76,9 @@ func writeError(w http.ResponseWriter, code int, msg, typ string) {
 //
 // A model of the form "<source>/<name>" pins the source explicitly. Otherwise
 // the model keeps its flat name and the source is chosen as the first
-// registered upstream that has an available account.
+// registered upstream that has an available account. When no source has any
+// account the first registered source is still returned, so the caller reports
+// "service unavailable" rather than a client error.
 func (s *Server) resolveSource(model string) (upstream.Source, string, error) {
 	if i := strings.IndexByte(model, '/'); i > 0 {
 		prefix := upstream.Source(model[:i])
@@ -84,10 +86,14 @@ func (s *Server) resolveSource(model string) (upstream.Source, string, error) {
 			return prefix, model[i+1:], nil
 		}
 	}
-	for _, src := range upstream.Sources() {
+	sources := upstream.Sources()
+	for _, src := range sources {
 		if s.pool.HasSource(src) {
 			return src, model, nil
 		}
+	}
+	if len(sources) > 0 {
+		return sources[0], model, nil
 	}
 	return "", model, errNoUpstream
 }

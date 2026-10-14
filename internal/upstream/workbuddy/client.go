@@ -12,10 +12,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/ZicongCheung/CodeNexus/internal/account"
+	"github.com/ZicongCheung/CodeNexus/internal/rewrite"
 	"github.com/ZicongCheung/CodeNexus/internal/upstream"
 )
 
@@ -30,6 +32,10 @@ type Config struct {
 	BaseURL        string
 	UserAgent      string
 	TimeoutSeconds int
+	// DisableSanitize turns off content-filter fingerprint scrubbing.
+	DisableSanitize bool
+	// DisableMarkupRepair turns off native tool-call markup restoration.
+	DisableMarkupRepair bool
 }
 
 // Client is the WorkBuddy / CodeBuddy upstream adapter.
@@ -97,7 +103,7 @@ func (c *Client) ListModels(ctx context.Context, acc *account.Account) ([]upstre
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, upstream.Classify(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
@@ -117,6 +123,8 @@ func (c *Client) ListModels(ctx context.Context, acc *account.Account) ([]upstre
 	return out, nil
 }
 
+// buildBody assembles the outbound body and runs it through the shared rewrite
+// pipeline so every adapter sends the same normalized shape.
 func (c *Client) buildBody(req *upstream.ChatRequest, stream bool) ([]byte, error) {
 	body := make(map[string]any, len(req.Raw)+4)
 	for k, v := range req.Raw {
@@ -125,7 +133,7 @@ func (c *Client) buildBody(req *upstream.ChatRequest, stream bool) ([]byte, erro
 	body["model"] = req.Model
 	body["stream"] = stream
 	if _, ok := body["messages"]; !ok {
-		msgs := make([]map[string]any, 0, len(req.Messages))
+		msgs := make([]any, 0, len(req.Messages))
 		for _, m := range req.Messages {
 			msgs = append(msgs, map[string]any{"role": m.Role, "content": m.Content})
 		}
@@ -140,6 +148,13 @@ func (c *Client) buildBody(req *upstream.ChatRequest, stream bool) ([]byte, erro
 	if len(req.Tools) > 0 {
 		body["tools"] = req.Tools
 	}
+
+	body = rewrite.Prepare(body, rewrite.Options{
+		ForceStream:            stream,
+		MinMaxTokens:           16,
+		DefaultReasoningEffort: "high",
+		DisableSanitize:        c.cfg.DisableSanitize,
+	})
 	return json.Marshal(body)
 }
 
@@ -148,8 +163,8 @@ type chatCompletion struct {
 	Model   string `json:"model"`
 	Choices []struct {
 		Message struct {
-			Content          string             `json:"content"`
-			ReasoningContent string             `json:"reasoning_content"`
+			Content          string              `json:"content"`
+			ReasoningContent string              `json:"reasoning_content"`
 			ToolCalls        []upstream.ToolCall `json:"tool_calls"`
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
@@ -173,7 +188,7 @@ func (c *Client) Chat(ctx context.Context, acc *account.Account, req *upstream.C
 	}
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
-		return nil, err
+		return nil, upstream.Classify(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
@@ -195,7 +210,26 @@ func (c *Client) Chat(ctx context.Context, acc *account.Account, req *upstream.C
 		CompletionTokens: cc.Usage.CompletionTokens,
 		TotalTokens:      cc.Usage.TotalTokens,
 	}
+	c.repairMarkup(out, req)
 	return out, nil
+}
+
+// repairMarkup restores native tool markup when the upstream returned plain
+// text instead of structured tool calls.
+func (c *Client) repairMarkup(out *upstream.ChatResponse, req *upstream.ChatRequest) {
+	if c.cfg.DisableMarkupRepair || len(out.ToolCalls) > 0 {
+		return
+	}
+	if out.FinishReason != "" && out.FinishReason != "stop" {
+		return
+	}
+	calls, text, ok := rewrite.ExtractMarkup(out.Content, requestToolNames(req))
+	if !ok {
+		return
+	}
+	out.ToolCalls = toUpstreamCalls(calls, 0)
+	out.Content = text
+	out.FinishReason = "tool_calls"
 }
 
 type streamChunk struct {
@@ -227,11 +261,51 @@ func (c *Client) ChatStream(ctx context.Context, acc *account.Account, req *upst
 	httpReq.Header.Set("Accept", "text/event-stream")
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
-		return err
+		return upstream.Classify(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		return statusError("chat", resp)
+	}
+
+	emitRaw := emit
+	var rw *rewrite.MarkupRewriter
+	nextID := 0
+	if !c.cfg.DisableMarkupRepair {
+		rw = rewrite.NewMarkupRewriter(requestToolNames(req))
+		emit = func(d upstream.StreamDelta) error {
+			if len(d.ToolCalls) > 0 {
+				// real structured calls win: release anything held verbatim
+				if text := rw.Disable(); text != "" {
+					if err := emitRaw(upstream.StreamDelta{Content: text}); err != nil {
+						return err
+					}
+				}
+				return emitRaw(d)
+			}
+			if d.Content == "" {
+				return emitRaw(d)
+			}
+			text, calls := rw.Write(d.Content)
+			if text != "" {
+				if err := emitRaw(upstream.StreamDelta{Content: text}); err != nil {
+					return err
+				}
+			}
+			if len(calls) > 0 {
+				batch := toUpstreamCalls(calls, nextID)
+				nextID += len(calls)
+				return emitRaw(upstream.StreamDelta{ToolCalls: batch, FinishReason: "tool_calls", Usage: d.Usage})
+			}
+			if d.ReasoningContent != "" || d.FinishReason != "" || d.Usage != nil {
+				return emitRaw(upstream.StreamDelta{
+					ReasoningContent: d.ReasoningContent,
+					FinishReason:     d.FinishReason,
+					Usage:            d.Usage,
+				})
+			}
+			return nil
+		}
 	}
 
 	sc := bufio.NewScanner(resp.Body)
@@ -267,7 +341,17 @@ func (c *Client) ChatStream(ctx context.Context, acc *account.Account, req *upst
 			return err
 		}
 	}
-	return sc.Err()
+	if err := sc.Err(); err != nil {
+		return upstream.Classify(err)
+	}
+	if rw != nil {
+		if text := rw.Flush(); text != "" {
+			if err := emitRaw(upstream.StreamDelta{Content: text}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // Refresh implements upstream.Upstream. Token refresh lands with the account
@@ -279,7 +363,65 @@ func (c *Client) Probe(_ context.Context, acc *account.Account) (*upstream.Probe
 	return &upstream.Probe{Healthy: acc != nil && acc.AccessToken != "", Detail: "workbuddy"}, nil
 }
 
+// requestToolNames extracts the declared function names from a request.
+func requestToolNames(req *upstream.ChatRequest) []string {
+	if len(req.Tools) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(req.Tools))
+	for _, raw := range req.Tools {
+		tm, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		fn, ok := tm["function"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if name, _ := fn["name"].(string); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func toUpstreamCalls(calls []rewrite.MarkupCall, base int) []upstream.ToolCall {
+	out := make([]upstream.ToolCall, 0, len(calls))
+	for i, c := range calls {
+		tc := upstream.ToolCall{ID: fmt.Sprintf("call_%d", base+i), Type: "function", Index: base + i}
+		tc.Function.Name = c.Name
+		tc.Function.Arguments = c.Arguments
+		out = append(out, tc)
+	}
+	return out
+}
+
 func statusError(op string, resp *http.Response) error {
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	return fmt.Errorf("workbuddy: %s status %d: %s", op, resp.StatusCode, strings.TrimSpace(string(b)))
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	e := upstream.ClassifyHTTP(resp.StatusCode, string(b))
+	if e.Message != "" {
+		e.Message = op + ": " + e.Message
+	} else {
+		e.Message = op
+	}
+	if d := parseRetryAfter(resp.Header.Get("Retry-After")); d > 0 {
+		e.RetryAfter = d
+	}
+	return e
+}
+
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		return time.Duration(n) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
 }

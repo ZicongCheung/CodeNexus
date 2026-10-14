@@ -14,7 +14,7 @@ import (
 func newTestServer(apiKey string) *Server {
 	cfg := config.Default()
 	cfg.APIKey = apiKey
-	return NewServer(&cfg, pool.New(), nil)
+	return NewServer(&cfg, pool.New(pool.Options{}), nil)
 }
 
 func TestHealthz(t *testing.T) {
