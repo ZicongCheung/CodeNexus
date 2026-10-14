@@ -1,0 +1,20 @@
+.git
+.gitignore
+.github
+
+# 敏感运行时数据
+auths/
+data/
+config.json
+config.local.json
+
+# 前端依赖（构建在镜像内完成）
+web/node_modules/
+
+# 本地工具 / AI 记忆
+.workbuddy/
+
+# 文档与杂项
+docs/
+*.md
+!README.md

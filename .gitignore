@@ -16,6 +16,11 @@ config.local.json
 # ---- 依赖与缓存 ----
 vendor/
 
+# ---- 前端 ----
+web/node_modules/
+web/.vite/
+# 注意：internal/panel/dist 是 embed 源，必须提交
+
 # ---- 编辑器 / 系统 ----
 .idea/
 .vscode/
@@ -27,3 +32,6 @@ Thumbs.db
 *.log
 *.tmp
 /tmp/
+
+# ---- 本地工具 / AI 记忆（不提交）----
+.workbuddy/
