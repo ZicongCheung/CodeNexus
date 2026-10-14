@@ -1,0 +1,704 @@
+# CodeNexus 执行计划与产品落地文档
+
+> **版本**：v1.0 · 立项定稿
+> **日期**：2026-10-14
+> **负责人**：张（产品/PM/最终决策）
+> **文档状态**：✅ 关键方向已全部拍板，可作为分步开发依据
+> **关联文档**：[`README.md`](../README.md) · [`ROADMAP.md`](./ROADMAP.md) · [`CONTRIBUTING.md`](../CONTRIBUTING.md)
+
+---
+
+## 0. 文档信息与修订记录
+
+| 版本 | 日期 | 变更 | 决策人 |
+|---|---|---|---|
+| v1.0 | 2026-10-14 | 立项定稿；完成 4+3 轮方向拍板，确定纯 Go 单二进制路线 | 张 |
+
+**阅读指引**
+
+- 只想了解"做成什么样"：读 §1 愿景、§4 决策记录、§11 分期。
+- 要动手开发：读 §6 架构、§7 数据模型、§8 协议面、§11 里程碑、§15 团队分工。
+- 要评估风险：读 §14 风险登记册。
+
+---
+
+## 1. 项目愿景与定位
+
+**CodeNexus** 是一个**统一的 AI 编码账号网关**：把 `WorkBuddy / CodeBuddy`（腾讯 CodeBuddy 系）与 `Trae CN`（字节 Trae 中国版）两套账号池，收敛进**一个进程、一个端口、一个面板、一个 `base_url`**，对外提供 **OpenAI 兼容 + Codex Responses + Anthropic Messages** 三类接口。
+
+**一句话定位**：*你自有的多个 AI 编码账号，用一个本地网关统一调度，供任意编辑器 / Agent / SDK 直接调用。*
+
+**产品原则（本项目所有取舍的最高依据，按优先级排序）**
+
+1. **体验一致优先**：用户面对的永远是"一个东西"，来源差异被网关屏蔽。
+2. **可靠即体验**：上游协议频繁变化时，工具不能"越用越不好用"；高保真与可维护性是体验的一部分。
+3. **宁可多花实现成本，不做体验妥协**（用户明确指示：方向选择不考虑实现复杂度）。
+4. **安全默认开启**：鉴权、凭证加密、响应安全头默认打开。
+5. **合规边界清晰**：仅限自用账号、本机/私有环境。
+
+---
+
+## 2. 目标与非目标
+
+### 2.1 目标（In Scope）
+
+| 编号 | 目标 | 验收口径 |
+|---|---|---|
+| G1 | 单一进程托管两类账号池 | 一个 `codenexus(.exe)` 同时服务 WB 与 Trae |
+| G2 | 对外全协议超集 | `/v1/chat/completions`、`/v1/responses`、`/v1/messages`、`/v1/models` 同时可用 |
+| G3 | 模型扁平命名 + 跨源自动择优 | 同名模型按来源健康度自动选择，失败自动回退 |
+| G4 | Trae 全量认证来源 | `auto`/`env`/`manual`/`cli`/`web-login` 五种均可添加账号 |
+| G5 | Trae 全量四端点 + 自动路由 | Remote/Solo/IDE Agent/Work Agent 可切换，带工具自动走 IDE |
+| G6 | WB 现有能力零回归 | WB 全部既有功能在新架构下行为等价 |
+| G7 | 统一重设计控制台 | 以"来源"为一等公民的单一面板 |
+| G8 | Windows 单机优先交付 | 干净 Windows 机器双击 exe 即可跑通 |
+| G9 | 凭证信封加密 | 静态加密 + 可显式导出/导入迁移 |
+
+### 2.2 非目标（Out of Scope，v1 明确不做）
+
+| 编号 | 非目标 | 原因 |
+|---|---|---|
+| N1 | TraeWork 原生工具链（native bridge，即 `UPSTREAM_MODE=traework-native` 出站传输） | 依赖 Windows + pyzmq + TraeWork 私有 DLL，与"纯 Go 单二进制、零外部依赖"冲突；且**"对外提供 Trae API 给其它 agent/工具"完全不依赖它**（四端点纯 HTTP 即可）。列为 v2 可选。**注意**：TraeWork「自定义模型」入站兼容（纯协议翻译）不属此列，纳入 v1（见 §9.4）。 |
+| N2 | 批量注册 / 账号共享池 / 付费转售 | 违反上游条款，项目红线 |
+| N3 | 公网多租户 / 计费系统 | 定位为自用网关 |
+| N4 | 挂载式插件市场 | 无产品需求 |
+| N5 | 移动端 / 桌面 GUI 客户端 | 网页控制台已覆盖 |
+
+---
+
+## 3. 能力盘点（目标能力域）
+
+> 本项目为**全新独立实现**：不复制代码、不逐行移植、不搬运文件；在**功能一致**的前提下做**独立重写、不雷同**（命名与代码结构自成一体）。
+>
+> **实现依据**：公开协议文档、官方/客户端行为观察、自行抓包与回放样本，**并允许查阅既有实现源码作为协议事实的参考**；但**不得复制其代码表达**（见 ADR-12）。
+
+### 3.1 来源 A · WorkBuddy / CodeBuddy 系
+
+| 维度 | 能力域 |
+|---|---|
+| 对外协议 | OpenAI Chat（`/v1/chat/completions`）、`/v1/models` |
+| 账号 | 浏览器授权登录；多账号池 |
+| 任务 | 签到、活跃上报、保活等定时任务 |
+| 额度 | 积分 / 余额查询 |
+| 可靠性 | 加权选号、会话粘性、429/402 冷却与指数退避、熔断 |
+| 出站改写 | 强制流式、思维链注入与回填、指纹脱敏、原生工具标记还原 |
+
+### 3.2 来源 B · Trae CN
+
+| 维度 | 能力域 |
+|---|---|
+| 对外协议 | OpenAI Chat、Codex Responses、Anthropic Messages、`/v1/models` |
+| 上游端点 | Remote / Solo / IDE Agent / Work Agent（四端）+ 自动路由 + 失败回落 |
+| 认证 | 五种来源：本地凭证自动发现、环境变量、手工令牌、本地 CLI、浏览器授权 |
+| 任务与风控 | 每日签到、风控码退避与设备标识轮换、后台错峰重试 |
+| 额度 | 逐请求用量与积分结算（多重优先级 + 后台补偿） |
+| 流式与高级 | SSE 心跳、thinking 分离、工具调用、1M 上下文、图片输入、截断自动续写、思考强度映射 |
+| 并发 | 多账号顺序 / 额度优先轮询、每账号并发槽与排队 |
+
+### 3.3 能力矩阵（实现总清单）
+
+| 域 | 能力 | 目标期 |
+|---|---|---|
+| 认证 | 来源 A：浏览器授权；来源 B：本地凭证 / 环境变量 / 手工令牌 / 本地 CLI / 浏览器授权 | P1–P3 |
+| 上游 | 两来源适配器；来源 B 四端点 + 自动路由 | P1–P3 |
+| 协议 | Chat、Responses、Anthropic Messages、models | P1–P4 |
+| 流式 | SSE 重建、心跳、thinking 分离、工具调用 delta | P2–P4 |
+| 高级 | 自动续写、1M、图片、思考强度映射、未知模型透传 | P4 |
+| 任务 | 签到 / 活跃 / 保活等；来源 B 风控退避 | P1–P3 |
+| 用量 | 逐请求记录 + 每日汇总 + 额度结算 | P4 |
+| 控制台 | 统一面板（来源为一等公民） | P5 |
+| 打包 | Windows 单文件优先 + 跨平台 | P6 |
+
+---
+
+## 4. 关键决策记录（ADR 摘要）
+
+> 以下为与产品负责人逐项确认后的**定稿决策**，开发过程中不得擅自偏移；如需变更须走"提问 → 拍板"流程。
+
+| ID | 决策项 | 定稿结论 | 理由（用户视角） |
+|---|---|---|---|
+| **ADR-01** | 技术栈 | **纯 Go 单二进制**（标准库优先，零运行时依赖） | 交付形态最纯净、部署最简 |
+| **ADR-02** | 对外协议面 | **全协议超集**（Chat + Responses + Anthropic Messages） | Codex / Claude Code / OpenAI SDK 均可直连，体验天花板 |
+| **ADR-03** | 模型命名与路由 | **扁平名 + 同名跨源自动择优**，另设前缀别名精确通道 | 最贴近"一个池"直觉，客户端零改动 |
+| **ADR-04** | 目标平台 | **Windows 单机优先，兼顾 Linux/macOS** | 匹配实际使用环境 |
+| **ADR-05** | 面板形态 | **统一重设计**（来源为一等公民），否决增量扩展/双面板 | 信息架构不随来源增多而碎裂 |
+| **ADR-06** | 来源 B 认证 | **全量五种** | 与上游能力对齐，不缩水 |
+| **ADR-07** | 来源 B 上游端点 | **全量四端点 + 自动路由** | 工具调用与全模型可用 |
+| **ADR-08** | 分期策略 | **双链路先通，能力后补** | 每步可运行验证、风险可控 |
+| **ADR-09** | 来源 B 桌面端能力边界 | **原生桥出站传输 v1 不纳入**（v2 可选）；**入站兼容（自定义模型）纳入 v1** | "对外提供来源 B API"不依赖原生桥；入站兼容为纯协议翻译、零原生依赖 |
+| **ADR-10** | 凭证安全 | **信封加密 + OS 密钥库（DPAPI/Keychain/Secret Service）**，一步到位取最优 | 静态最强保护 + 显式导出/导入迁移 |
+| **ADR-11** | 工程统一源 | 配置/凭证**单一文件源**（`config.json` 双段 + 单一 `auths/`）；遥测**内嵌纯 Go SQLite** | 单一权威源 + 高频数据不膨胀 |
+| **ADR-12** | 实现方式与知识产权 | **独立重写、不雷同**：可查阅既有实现源码作为协议事实参考，但**不复制代码、不逐行移植、不搬运文件**，命名与结构独立；**不保留归属、不注明来源** | 用户要求全新项目、功能一致即可；独立表达以规避衍生作品风险 |
+| **ADR-13** | 控制台前端 | **Svelte 5 + Vite + TypeScript**，构建产物 `go:embed` 进二进制 | 编译后近乎零运行时开销，体验与性能综合最优 |
+| **ADR-14** | 项目标识 | 二进制 / 服务名 `codenexus`；模块 `github.com/ZicongCheung/CodeNexus`；默认监听 `127.0.0.1:6828` | 与既有工具错开端口、默认仅本机更安全 |
+
+---
+
+## 5. 总体架构
+
+### 5.1 架构图
+
+```mermaid
+flowchart TB
+    C["客户端 / SDK<br/>编辑器 · Codex · Claude Code · 脚本"]
+
+    subgraph CN["CodeNexus 单进程 (Go)"]
+        direction TB
+        API["协议入口层 api<br/>OpenAI Chat · Responses · Anthropic Messages · models"]
+        AUTH["鉴权 httpauth<br/>Bearer / x-api-key · 常量时间比较"]
+        ROUTER["统一路由 router<br/>模型目录 → 来源 · 同名跨源择优 · 会话粘性"]
+        POOL[("统一账号池 pool<br/>Source 维度 · 加权选号 · 租约 · 熔断 · 冷却")]
+        SCHED["定时调度 scheduler<br/>WB 五类任务 + Trae 签到"]
+        STORE[("store<br/>config.json · auths/ · data/ · SQLite 遥测")]
+        CRYPTO["crypto<br/>信封加密 + OS 密钥库"]
+
+        subgraph UP["上游适配器 upstream (Upstream 接口)"]
+            WB["workbuddy 适配器"]
+            TR["traecn 适配器"]
+        end
+
+        PANEL["统一控制台 panel (go:embed)"]
+    end
+
+    WBU["WorkBuddy / CodeBuddy 上游"]
+    TRU["Trae CN 上游<br/>Remote · Solo · IDE · Work"]
+
+    C -->|"HTTP/SSE"| API --> AUTH --> ROUTER
+    ROUTER --> POOL
+    SCHED --> POOL
+    POOL <--> STORE
+    CRYPTO -.保护.-> STORE
+    PANEL --- STORE
+    ROUTER --> WB --> WBU
+    ROUTER --> TR --> TRU
+```
+
+### 5.2 分层与目录结构（目标）
+
+```text
+CodeNexus/
+├── cmd/
+│   └── codenexus/              # 主服务入口（原 cmd/server）
+│       ├── main.go
+│       ├── config.go           # 配置加载（双段）
+│       └── wiring.go           # 依赖装配 / 适配器注册
+├── internal/
+│   ├── api/                    # 统一协议入口层
+│   │   ├── openai_chat.go      # /v1/chat/completions
+│   │   ├── responses.go        # /v1/responses (Codex)
+│   │   ├── anthropic.go        # /v1/messages (+count_tokens)
+│   │   ├── models.go           # /v1/models
+│   │   ├── status.go           # /status · /healthz
+│   │   └── ssewriter.go        # 统一 SSE 出站（心跳、delta 组装）
+│   ├── upstream/
+│   │   ├── upstream.go         # ★ Upstream 接口 + 注册表
+│   │   ├── types.go            # 统一请求/响应/事件类型
+│   │   ├── sse.go              # 共享 SSE 重建（复用 WB）
+│   │   ├── thinking.go         # 思维链（复用 WB）
+│   │   ├── sanitize.go         # 指纹脱敏（复用 WB）
+│   │   ├── payload.go          # 出站改写（复用 WB）
+│   │   ├── workbuddy/          # WB 实现（原 upstream 包体迁入）
+│   │   │   ├── client.go
+│   │   │   └── {desktop,dsml,streak,travel,report,school,global_models,...}.go
+│   │   └── traecn/             # Trae 实现（自 Python 移植）
+│   │       ├── client.go
+│   │       ├── remote.go       # chat_sessions + events 协议
+│   │       ├── ide.go          # IDE Agent 端点
+│   │       ├── solo.go         # Solo 端点
+│   │       ├── work_agent.go   # Work Agent 端点
+│   │       ├── route.go        # 自动路由 + 失败回落
+│   │       ├── auth.go         # 5 种认证来源
+│   │       ├── decrypt.go      # storage.json AES-128-CBC
+│   │       ├── checkin.go      # 9074 设备轮换 + 指数退避
+│   │       ├── usage.go        # 用量/积分结算
+│   │       ├── images.go       # 图片输入
+│   │       └── continuation.go # 截断自动续写
+│   ├── pool/                   # 统一账号池（新增 Source 维度）
+│   ├── router/                 # 模型→来源 路由与择优（新增）
+│   ├── scheduler/              # 合并后的定时任务
+│   ├── panel/                  # 统一控制台（go:embed）
+│   ├── store/                  # 单一权威源：config/凭证/状态/SQLite
+│   ├── crypto/                 # 信封加密 + OS 密钥库（新增）
+│   ├── httpauth/               # 复用
+│   ├── reqlog/                 # 复用
+│   ├── usage/                  # 用量（并入 SQLite）
+│   └── logfmt/                 # 复用
+├── web/                        # 面板前端源码（构建后 embed 进 panel）
+├── docs/                       # 文档（本文件、ROADMAP 等）
+├── scripts/                    # 便携脚本
+├── Dockerfile
+├── docker-compose.yml
+├── go.mod
+└── README.md
+```
+
+### 5.3 核心接口抽象（★ 关键设计）
+
+新增 Trae 上游的前提是把 WB 的"具体客户端"抽成接口。定稿接口：
+
+```go
+// internal/upstream/upstream.go
+type Source string
+const (
+    SourceWorkBuddy Source = "workbuddy"
+    SourceTraeCN    Source = "trae-cn"
+)
+
+// Upstream 定义"一个来源"必须具备的能力。
+// 各来源在 workbuddy/ 与 traecn/ 下实现，通过 registry 注册。
+type Upstream interface {
+    Source() Source
+
+    // —— 模型与推理 ——
+    ListModels(ctx context.Context) ([]ModelSpec, error)
+    Chat(ctx context.Context, acc *pool.Account, req *ChatRequest) (*ChatResponse, error)
+    ChatStream(ctx context.Context, acc *pool.Account, req *ChatRequest, emit EmitFunc) error
+
+    // —— 账号生命周期 ——
+    AuthModes() []AuthMode                                   // 该来源支持的认证来源
+    BeginLogin(ctx context.Context, mode AuthMode) (LoginFlow, error)
+    Refresh(ctx context.Context, acc *pool.Account) error
+    Probe(ctx context.Context, acc *pool.Account) (*AccountProbe, error) // 余额/积分/健康
+
+    // —— 来源特有任务（可选实现）——
+    SupportTasks() []TaskKind
+    RunTask(ctx context.Context, acc *pool.Account, kind TaskKind) (*TaskResult, error)
+
+    // —— 错误语义归一 ——
+    Classify(err error) UpstreamError                        // → 冷却/熔断/禁用 的统一分类
+}
+```
+
+**设计要点**
+
+1. **入口统一、出口适配**：协议层只认 `Upstream` 接口，不感知 WB/Trae 差异。
+2. **池与调度解耦**：`pool` 只管"有哪些凭证、状态如何"；`router` 只管"这次选谁"。
+3. **管线复用**：`sse.go`/`thinking.go`/`sanitize.go`/`payload.go` 提为包级公共函数，两来源共用。
+4. **来源特有逻辑内聚**：`desktop.go`/`dsml.go`/`travel.go` 归 `workbuddy/`；`remote.go`/`ide.go`/`9074` 归 `traecn/`。
+
+---
+
+## 6. 统一数据模型
+
+### 6.1 统一账号模型
+
+```go
+// internal/pool/entry.go（扩展）
+type Account struct {
+    Source   upstream.Source // workbuddy | trae-cn
+    UID      string          // 来源内唯一
+    Label    string          // 昵称/备注
+    Enabled  bool
+    Enterprise bool          // WB 企业版标记（Trae 语义不同，按来源解释）
+
+    Creds    CredentialRef   // 指向 auths/ 下的加密凭证文件
+    Meta     AccountMeta     // 账号级元信息（到期、模型开关等）
+
+    // 运行态（可持久化到 state）
+    Health        Health       // healthy | degraded | disabled | cooling
+    CooldownUntil time.Time
+    InFlight      int32
+    Credits       int64        // WB 积分 / Trae 通用积分（统一为"额度"抽象）
+    LastError     string
+    SuccessCount  int64
+    FailCount     int64
+}
+```
+
+**统一"额度"抽象**：WB 用 credits、Trae 用通用积分，语义相近但量纲不同 → 池内统一为 `Credits int64` + `CreditUnit string`（展示层按来源格式化），**不做跨来源额度换算**（避免误导）。
+
+### 6.2 统一凭证存储
+
+```text
+auths/
+├── workbuddy-<uid>.json.enc     # 信封加密：{wrapped_dek, nonce, ciphertext, alg, kid}
+└── trae-<uid>.json.enc
+```
+
+- 明文凭证仅在**内存**中存在；落盘一律加密（ADR-10）。
+- 解密流程：OS 密钥库取 KEK → 解 `wrapped_dek` → AES-256-GCM 解 `ciphertext`。
+- 密钥库不可用时：降级为**用户口令派生密钥**（PBKDF2/Argon2id），并在面板显式告警（不静默降级为明文）。
+- **导出/导入**：面板提供"加密导出包"（口令保护，`age` 或 PBKDF2+AES-GCM），用于跨机迁移。
+
+### 6.3 统一配置（单一权威源）
+
+`config.json`（**顶层为共享配置，`upstreams` 为双来源分节**）：
+
+```jsonc
+{
+  "$schema": "./docs/config.schema.json",
+  "listen": "127.0.0.1:7863",
+  "api_key": "",                       // 留空=不鉴权（危险，首次启动自动生成随机值）
+  "auth_dir": "./auths",
+  "data_dir": "./data",
+  "sqlite_file": "./data/codenexus.db",
+
+  "pool":   { "credit_floor": 100, "max_in_flight": 3, "breaker_threshold": 3, ... },
+  "router": { "naming": "flat", "same_name_policy": "auto_healthy", "alias_prefix": true },
+  "crypto": { "backend": "os_keystore", "fallback": "passphrase" },
+  "schedule": { "checkin_enabled": true, "keepalive_enabled": true, ... },
+
+  "upstreams": {
+    "workbuddy": {
+      "enabled": true,
+      "user_agent": "",
+      "prompt": { "mode": "custom", "file": "" },
+      "cooldown": { "soft_rate": "600s", "soft_rate_max": "2h" },
+      "schedule": { "checkin_hours": [9,21], "travel_hours": [9,21], "activity_hours": [10],
+                    "keepalive_hours": [22], "blackcat_hours": [23] },
+      "features": { "sanitize_blacklist_fingerprints": true }
+    },
+    "trae-cn": {
+      "enabled": true,
+      "auth_source": "auto",             // auto|env|manual|cli|web-login
+      "upstream_mode": "remote",         // remote|solo|ide|work-agent|cli
+      "auto_route": true,
+      "parallel_limit": 2,
+      "slot_timeout_seconds": 60,
+      "reasoning_verbose": false,
+      "auto_continue": { "enabled": true, "max_rounds": 3 },
+      "max_mode": { "enabled": false, "models": [] },
+      "checkin": { "enabled": true, "time": "08:30", "device_ids": {} },
+      "usage": { "session_query": true, "max_history": 1000 }
+    }
+  }
+}
+```
+
+**热生效字段**（面板保存后无需重启）：`api_key`、`pool.*`、`router.*`、`schedule.*`、`upstreams.*.auto_route`/`auth_source`/`auto_continue`/`max_mode`/`checkin` 等。
+**需重启字段**：`listen`、`auth_dir`、`data_dir`、`crypto.backend`、`upstreams.*.timeout` 等进程装配期依赖项——面板保存时明确提示。
+
+### 6.4 遥测存储（SQLite）
+
+高频数据从 JSONL/JSON 迁入内嵌 **纯 Go SQLite**（`modernc.org/sqlite`，无 CGO，保持单二进制）：
+
+```sql
+CREATE TABLE request_log (
+  id INTEGER PRIMARY KEY, ts TEXT, source TEXT, account_uid TEXT,
+  model TEXT, endpoint TEXT, stream INTEGER,
+  prompt_tokens INTEGER, completion_tokens INTEGER, total_tokens INTEGER,
+  credits REAL, status TEXT, latency_ms INTEGER, ttfb_ms INTEGER, error TEXT
+);
+CREATE TABLE usage_daily (
+  day TEXT, source TEXT, model TEXT,
+  prompt_tokens INTEGER, completion_tokens INTEGER, cache_tokens INTEGER,
+  requests INTEGER, credits REAL, PRIMARY KEY(day, source, model)
+);
+CREATE TABLE task_log (id INTEGER PRIMARY KEY, ts TEXT, source TEXT, uid TEXT,
+  kind TEXT, ok INTEGER, detail TEXT);
+```
+
+保留策略：`request_log` 默认 7 天 / 100 MiB（沿用 WB 语义）；`usage_daily` 保留 400 天（沿用 Trae 语义）。
+
+---
+
+## 7. 对外协议面设计（ADR-02）
+
+### 7.1 端点矩阵
+
+| 端点 | 方法 | 协议 | 鉴权 | 适用来源 | 阶段 |
+|---|---|---|---|---|---|
+| `/v1/models` | GET | OpenAI | Bearer | 全 | P1 |
+| `/v1/chat/completions` | POST | OpenAI Chat | Bearer | 全 | P1/P2 |
+| `/v1/responses` | POST | OpenAI Responses (Codex) | Bearer | 全（Trae 优先） | P4 |
+| `/v1/messages` | POST | Anthropic Messages | `x-api-key` 或 Bearer | 全 | P4 |
+| `/v1/messages/count_tokens` | POST | Anthropic | 同上 | 全 | P4 |
+| `/v1/chat`、`/v1` | POST | OpenAI 兼容别名 | Bearer | 全 | P4 |
+| `/status` | GET | 自定义 | Bearer | 全 | P1 |
+| `/healthz` | GET | 自定义 | 无 | 全 | P0 |
+| `/panel/`、`/panel/api/*` | — | 控制台 | Bearer | 全 | P5 |
+| `/web/login*` | — | 浏览器授权 | 无/回调 | Trae | P2 |
+| `/v1/traework/chat` 等入站别名 | POST | TraeWork 自定义模型入站（§9.4-A） | Bearer | Trae | P3（可选） |
+| `/…/custom_model_connectivity_check` | POST | TraeWork 连通性探测（§9.4-A） | 公开 | Trae | P3（可选） |
+
+### 7.2 协议归一策略
+
+- **统一内部中间表示**：所有入站协议先解析为内部 `ChatRequest`（消息数组 + tools + reasoning 参数 + 图片），再交给 `Upstream`。
+- **出站形态按入站协议回填**：
+  - 入站 OpenAI Chat → 出站 OpenAI Chat（含 `delta.tool_calls`）。
+  - 入站 Responses → 出站 Responses 事件（`function_call`、`*_call_output`、`previous_response_id`）。
+  - 入站 Anthropic → 出站 `content_block` 流式事件（`tool_use`/`thinking`）。
+- **能力不匹配降级**：某来源不支持某协议特性时，返回**明确的结构化错误**（而非静默改写），并在 `/v1/models` 元数据标注能力位。
+
+### 7.3 模型命名、路由与择优（ADR-03）
+
+```text
+GET /v1/models
+ → 汇总各来源模型目录（WB: console/enterprises/personal/models；Trae: Remote+Solo 合并目录）
+ → 扁平名去重：同名模型合并为一条，附 sources: ["workbuddy","trae-cn"]
+ → 同时提供别名通道：workbuddy/<model>、trae-cn/<model>（精确指定用）
+```
+
+**路由决策（`internal/router`）**
+
+1. 请求模型为 `source/model` 别名 → 直连该来源。
+2. 请求模型为扁平名：
+   - 仅一个来源有 → 直连。
+   - 多来源有 → 按 `same_name_policy=auto_healthy`：**在健康账号中按加权选号联合择优**；首选失败自动回退到次源（可配置回退开关与回退上限）。
+3. 未知模型 → 按 `passthrough` 语义透传到默认来源（可配置）。
+
+---
+
+## 8. 控制台设计（ADR-05：统一重设计）
+
+### 8.1 信息架构（来源为一等公民）
+
+```text
+顶部：[全部] [WorkBuddy] [Trae CN]   ← 全局来源切换（贯穿所有视图）
+侧栏：
+  ├── 概览        统一仪表盘（合并两来源的 tokens/额度/账号健康/任务状态）
+  ├── 账号        账号表（按来源分组/筛选）+ 添加账号（按来源选认证方式）+ 批量运维
+  ├── 用量        Token 时序 + 明细（按来源/模型/端点维度）
+  ├── 额度        积分构成（WB 到期分布 / Trae 通用积分）+ 消费记录
+  ├── 任务与签到   合并任务中心（WB 五类任务 + Trae 签到）+ 队列执行
+  ├── 模型与档位   模型目录（含来源标记、能力位）+ 思考档位 + 连通性测试
+  ├── 配置        在线编辑（共享段 + 双来源分节）+ 热生效提示
+  └── 日志        请求日志 + 任务/对话/系统分频道 + 归档检索
+```
+
+### 8.2 关键交互原则
+
+- **来源可筛不可乱**：所有列表默认"全部"，来源列为独立标签；切换顶部来源即全局过滤。
+- **添加账号向导按来源分流**：选来源 → 展示该来源支持的认证方式（WB: OAuth 浏览器授权；Trae: 五选一）→ 落盘 → 热加载进池。
+- **能力位可视化**：模型列表标注 `stream/tools/vision/reasoning/max`，避免用户调用到不支持的能力。
+- **安全头沿用 WB**：CSP `default-src 'none'`、无内联脚本、`X-Frame-Options: DENY` 等。
+
+---
+
+## 9. Trae 适配器设计要点（移植清单）
+
+### 9.1 认证来源（ADR-06：全量五种）
+
+| 来源 | 机制 | Go 实现要点 | 阶段 |
+|---|---|---|---|
+| `web-login` | 浏览器授权 → 回调拿 JWT | 内嵌授权助手（Go 重写原 Python helper）：本地 127.0.0.1 回调监听 + 展示授权链接 + 轮询 | P2 |
+| `manual` | 粘贴 `Cloud-IDE-JWT` | 直接校验/落盘 | P2 |
+| `env` | 环境变量 `TRAE_TOKEN`/`TRAE_REFRESH_TOKEN`/`TRAE_USER_ID` | 读取 + 归一 | P2 |
+| `auto` | 解密本机 `storage.json` | AES-128-CBC，key=SHA512(salt+machine_id)[:16]，4 组盐，IV=密文前 16B；路径探测 | P3 |
+| `cli` | 本地 Trae CLI 子进程 | `os/exec` 启动 CLI，按协议收发（禁本机工具 `Read,Bash,...` 默认项） | P3 |
+
+### 9.2 四端点与自动路由（ADR-07）
+
+```text
+remote      默认；纯聊天走 Agent，创建失败/空响应回落 Work（同账号一次）
+solo        Solo 原生端点
+ide-agent   带 tools/tool_choice 或工具历史时首选（避免远端工具误报本地文件操作）
+work-agent  无工具请求的备选执行器
+auto_route  请求带工具 → IDE Agent；纯聊天 → Remote；失败一律回落 Remote
+```
+
+### 9.3 风控与任务
+
+- **9074 风控码**：签到遇 9074 → 轮换设备 ID（`TRAE_CHECKIN_DEVICE_IDS_JSON` 可指定真实设备 ID）→ 指数退避（基准 60s，封顶 3600s）→ 后台按 `auto_retry_interval`(60s) 错峰重试。
+- **定时签到**：默认 `08:30`（北京时间），晚于该时间启动当天补签一次；多账号间间隔 60s；"立即执行"不占用当天定时名额。
+- **用量结算**：三重优先级（上游 usage → 回合级 credits_float → 账号差值），账单未落库标"结算中"并后台退避，**不得把未知值伪装成 0**。
+
+### 9.4 TraeWork 能力边界（ADR-09 落地说明）
+
+TraeWork（Trae 桌面 Agent 客户端）相关能力是**两件方向相反的事**，必须区分：
+
+| 场景 | 方向 | 机制 | v1 |
+|---|---|---|---|
+| **A. 自定义模型入站兼容** | TraeWork 客户端 **→** CodeNexus | 纯协议翻译（`traework_compat` 等价物，**无网络 I/O**）：识别 TraeWork 入站路径/头，解析其请求形状，转成内部 `ChatRequest`，默认经 **remote HTTP** 上游发出 | ✅ **纳入**（成本极低，属"全套功能"；实现为空可整体裁剪） |
+| **B. native bridge 出站传输** | CodeNexus **→** 本机 TraeWork 原生运行时 | 加载 `ai_agent.dll` 等私有 DLL + ZeroMQ AHA IPC + JSON-RPC `request_stream`，需独立 Windows helper 进程 | ❌ **不纳入**（v2 可选） |
+
+**A 项入站路径（可选实现）**：`POST /api/ide/v2/llm_raw_chat`、`/api/agent/v3/llm_raw_chat_custom_model`、`/api/agent/v3/custom_model_proxy/chat`、`/v1/traework/chat`，以及 `/api/agent/v3/custom_model_connectivity_check`、`/api/ide/v1/custom_model_connectivity_check`、`/v1/custom_model/connectivity`（连通性探测，可公开）。
+
+**结论（用户已确认）**："把 Trae 的 API 给其它 agent/工具使用" 走的是**四端点纯 HTTP**，与 native bridge 无关；故 B 不影响核心目标，**不引入**。
+
+---
+
+## 10. 调度、可靠性与安全（合并策略）
+
+### 10.1 定时任务合并
+
+| 任务 | 来源 | 默认时刻 | 开关 |
+|---|---|---|---|
+| 签到 + 余额 | WB | 09/21 整点 | `schedule.checkin_enabled` |
+| 连登管家 | WB | 签到末尾 | 随签到 |
+| 活跃上报 | WB | 10 整点 | `schedule.activity_enabled` |
+| 猫猫旅行 | WB | 09/21 整点 | `schedule.travel_enabled` |
+| 保活（刷新 token） | WB | 22 整点 | `schedule.keepalive_enabled` |
+| 夜猫子 | WB | 23 整点 | `schedule.blackcat_enabled` |
+| 签到（Trae） | Trae | 08:30 | `upstreams.trae-cn.checkin.enabled` |
+| 余额后台刷新 | 全 | 每 5 分钟 | `balance_refresh_minutes` |
+
+统一为 `scheduler.Task{Source, Kind, Hours, Enabled}` 注册；空数组/null 表示"回落默认"，禁用须显式 `*_enabled: false`。
+
+### 10.2 可靠性
+
+- **错误分类统一**（`Upstream.Classify`）：余额耗尽→硬冷却至次日 04:00；频控(429/6004)→软冷却指数退避；session 失效→连续 3 次才禁用；404→固定 60s；5xx→熔断；内容拦截→不罚账号。
+- **会话粘性**：`conversation_id`/`previous_response_id` → 绑定账号，TTL 滚动，失败解绑。
+- **租约与并发**：每账号 `max_in_flight`，Trae 另受 `parallel_limit` 会话槽约束。
+
+### 10.3 安全
+
+- 鉴权：Bearer + 常量时间比较 + uid 白名单（防路径穿越）。
+- 凭证：信封加密（ADR-10），文件 0600，目录 0700。
+- 传输：进程仅明文本机 HTTPS 建议反代；监听默认 `127.0.0.1`。
+- 面板：CSP 等安全响应头；`/healthz` 恒无鉴权。
+
+---
+
+## 11. 分期里程碑与验收标准（ADR-08：双链路先通，能力后补）
+
+> 每期结束必须满足"可运行 + 可验证"，并更新 `docs/ROADMAP.md` 勾选状态。
+
+### P0 · 骨架与上游抽象（地基）
+
+| 项 | 内容 |
+|---|---|
+| 任务 | ① 抽出 `Upstream` 接口 + 注册表；② `upstream` 拆为共享管线 + `workbuddy/`；③ 配置支持 `upstreams` 双段；④ 统一目录 `auths/`、`data/`；⑤ 面板壳 + `/healthz`（`service=codenexus`） |
+| 改动面 | `internal/upstream/*`、`cmd/codenexus/config.go`、`server/handler.go`、`panel/panel.go`、`scheduler/scheduler.go` |
+| 验收 | `go build ./... && go vet ./... && go test ./...` 全绿；`/healthz` 可用；WB 现有测试无回归 |
+
+### P1 · WorkBuddy 功能等价回归
+
+| 项 | 内容 |
+|---|---|
+| 任务 | 用新接口跑通 WB 全功能：OAuth 登录、签到、池调度、`/v1/chat/completions`（流式/非流式）、`/v1/models`、面板视图 |
+| 验收 | 与上游 WB 项目**行为等价**（同账号对比 TTFB、token 口径、冷却触发）；WB 全部既有测试通过 |
+
+### P2 · Trae 基础链路打通
+
+| 项 | 内容 |
+|---|---|
+| 任务 | ① 认证：`web-login`（Go 重写授权助手）、`manual`、`env`；② 上游：Remote 端点 + 模型目录；③ 统一池（Source 维度）+ 模型路由（扁平名 + 同名择优）；④ `/v1/chat/completions` 流式/非流式 |
+| 验收 | 从面板添加 Trae 账号 → 通过 CodeNexus 完成一次流式对话；同名模型跨源择优生效 |
+
+### P3 · Trae 认证补齐 + 端点扩展 + 风控
+
+| 项 | 内容 |
+|---|---|
+| 任务 | ① 认证补齐：`auto`(storage.json 解密)、`cli`(子进程)；② 四端点 Remote/Solo/IDE/Work + 自动路由 + 回落；③ 签到 + 9074 设备轮换退避 + 定时补签 |
+| 验收 | 五种认证来源均可添加账号；四端点可切换且自动路由正确；制造 9074 后可自动恢复 |
+
+### P4 · 协议超集与高级能力
+
+| 项 | 内容 |
+|---|---|
+| 任务 | ① `/v1/responses`（含 `previous_response_id`）；② `/v1/messages` + `count_tokens`（Anthropic）；③ 工具调用（`delta.tool_calls`/`tool_use`/`function_call`）；④ thinking 分离；⑤ 自动续写、1M Max、图片输入、`reasoning_effort` 映射；⑥ 用量与积分记录（SQLite） |
+| 验收 | **Claude Code / Codex / OpenAI SDK 三客户端直连成功**；工具调用端到端闭环；用量记录正确 |
+
+### P5 · 统一面板重设计 + 任务合并 + 配置热生效 + 凭证加密
+
+| 项 | 内容 |
+|---|---|
+| 任务 | ① 面板信息架构改造（来源切换）；② 定时任务合并入统一任务中心；③ 在线配置编辑热生效；④ 信封加密 + OS 密钥库 + 导出/导入 |
+| 验收 | 面板全功能可用；热生效字段保存即生效；重启后加密凭证可正常解密；导出/导入迁移可用 |
+
+### P6 · 打包与发布
+
+| 项 | 内容 |
+|---|---|
+| 任务 | ① Windows 单 exe（前端 embed、无 CGO）；② Linux/macOS 构建；③ Docker 镜像；④ Release 资产 + 校验和；⑤ 用户文档 |
+| 验收 | 干净 Windows 机器：双击 exe → 生成 `config.json`（随机 `api_key` 打印一次）→ 打开 `http://127.0.0.1:7863/panel/` → 添加账号 → 调用成功 |
+
+---
+
+## 12. 测试策略
+
+| 层级 | 范围 | 手段 |
+|---|---|---|
+| 单元 | 池选号/冷却/熔断、路由器择优、配置解析、SSE 帧重建、解密 | Go `testing` + 表驱动 |
+| 协议一致性 | Chat/Responses/Anthropic 出站事件与官方规范对齐 | 录制上游 SSE 回放（离线）；三方 SDK 实测 |
+| 端到端 | 两来源各一条真实链路（流式/非流式/工具调用） | 冒烟脚本（手动触发，凭证不外泄） |
+| 回归 | 面板、调度、签到、风控退避 | 定时/手动触发；日志断言 |
+| 打包 | 三平台构建、embed 完整性、密钥库可用性 | CI 构建 + 干净机验收 |
+
+**红线**：任何测试与日志**不得包含真实凭证**；离线回放数据须脱敏。
+
+---
+
+## 13. 风险登记册
+
+| ID | 风险 | 概率 | 影响 | 缓解 |
+|---|---|---|---|---|
+| R1 | 上游协议（Trae/WB）漂移导致失效 | 高 | 高 | 适配器内聚、错误分类统一、快速定位；保留上游版本指纹日志 |
+| R2 | 纯 Go 移植保真度（SSE/Responses/Anthropic） | 中 | 高 | 协议一致性测试 + 三方 SDK 实测 + 录制回放 |
+| R3 | `storage.json` 加密变更致 `auto` 失效 | 中 | 中 | 解密失败给出明确提示并引导改用 web-login/manual |
+| R4 | 9074 风控策略突变 | 中 | 中 | 设备轮换 + 退避可配置；后台错峰重试 |
+| R5 | 账号封禁 / 条款风险 | 中 | 高 | 严格自用定位；README/面板显著免责声明；禁止批量注册 |
+| R6 | 凭证泄露 | 低 | 高 | 信封加密 + OS 密钥库 + 0600/0700 + 不提交 |
+| R7 | 跨平台密钥库实现差异 | 中 | 中 | 抽象 `crypto.Keystore` 接口 + 口令派生兜底（显式告警） |
+| R8 | 单二进制体积膨胀 | 中 | 低 | 纯 Go SQLite（无 CGO）；`-ldflags="-s -w"`；必要时裁剪 |
+| R9 | 同名模型跨源质量不一致 | 中 | 中 | 提供前缀别名精确通道；可关闭自动择优 |
+| R10 | 移植周期长、中途不可用 | 中 | 中 | 分期交付 (ADR-08)，每期可运行 |
+
+---
+
+## 14. 团队分工（RACI）
+
+> 本项目由产品负责人（张）决策，AI 团队成员执行。下表的"角色"映射到协作 Agent / 后续会话。
+
+| 角色 | 职责 | 关键产出 |
+|---|---|---|
+| **PM / 产品决策**（张） | 方向拍板、验收、优先级裁决 | ADR、里程碑验收 |
+| **架构负责人**（Go） | 接口抽象、包结构、装配、跨模块设计 | `upstream.Upstream`、`router`、`pool` 扩展 |
+| **Trae 移植工程师** | Python → Go 协议移植（认证/端点/SSE/工具/风控） | `internal/upstream/traecn/*` |
+| **WB 维护工程师** | WB 接口化改造、零回归保障 | `internal/upstream/workbuddy/*` |
+| **前端面板工程师** | 统一面板重设计、来源维度 IA | `web/` + `internal/panel` |
+| **平台/安全工程师** | 凭证信封加密、密钥库、打包分发 | `internal/crypto`、构建流水线 |
+| **QA / 测试** | 测试矩阵、协议一致性、打包验收 | 测试用例、验收报告 |
+
+| 阶段 | PM | 架构 | Trae 移植 | WB 维护 | 前端 | 平台/安全 | QA |
+|---|---|---|---|---|---|---|---|
+| P0 | A | **R** | C | **R** | C | C | C |
+| P1 | A | C | I | **R** | C | I | **R** |
+| P2 | A | C | **R** | I | C | I | **R** |
+| P3 | A | C | **R** | I | I | I | **R** |
+| P4 | A | **R** | **R** | C | I | I | **R** |
+| P5 | A | C | C | C | **R** | **R** | **R** |
+| P6 | A | C | I | I | C | **R** | **R** |
+
+> R=负责执行 · A=最终批准 · C=被咨询 · I=被知会
+
+---
+
+## 15. 协作与工作流约定
+
+- **语言**：文档与沟通一律简体中文。
+- **汇报格式**：表格 + 状态图标（✅/⚠️/ℹ️）+「位置 / 改动 / 结果」三段式；显式标注「待拍板」「刻意保留」。
+- **提交规范**：Conventional Commits（`feat:`/`fix:`/`docs:`/`refactor:`/`chore:`）；分支 `feat/...`、`fix/...`、`docs/...`。
+- **决策纪律**：遇到多方向分叉，**先给 pros/cons 矩阵 + 最优推荐 → 用户拍板 → 再动手**；不得静默选型。
+- **安全红线**：任何 issue/PR/日志不得出现真实凭证；`auths/`、`data/`、`config.json` 永不提交。
+- **验证纪律**：每期以 `go build/vet/test` 全绿 + 对应验收项为准，方可进入下一期。
+
+### 15.1 工作区约定
+
+- **`.workbuddy/`**：本地 AI 记忆 / 工具目录，**已加入 `.gitignore`**，永不提交。
+- **第三方源码副本**：早期调研把两个参考项目克隆到仓库外目录；依 ADR-12，可**查阅其源码作为协议事实参考**，但实现须独立重写、不雷同（副本不入库，可保留供查阅）。
+
+---
+
+## 16. 附录
+
+### 16.1 上游端点映射表（Trae CN）
+
+| 域 | 端点 | 用途 |
+|---|---|---|
+| Remote | `{TRAE_WEB_BASE_URL}/chat_sessions`、`/events` | 聊天补全（SSE，会话协议） |
+| IDE/Solo | `{TRAE_MODEL_API_HOST}` 模型网关 | IDE Agent / Solo 端点 |
+| 模型目录 | `get_detail_param`、Remote Agent/Work/Design 目录 | `/v1/models` 合并来源 |
+| 签到 | TraeWork 签到接口 | 每日签到（含 9074 风控） |
+| 用量 | `{TRAE_USAGE_API_HOST}` | 回合级积分查询 |
+
+### 16.2 术语表
+
+| 术语 | 含义 |
+|---|---|
+| 来源 Source | 账号所属上游平台：`workbuddy` / `trae-cn` |
+| 适配器 Upstream | 某来源在网关内的实现，向协议层屏蔽差异 |
+| 统一账号池 Pool | 跨来源的账号集合，含运行态与调度所需信息 |
+| 扁平命名 | 模型名不带来源前缀；同名模型跨源合并 |
+| 后缀别名 | `source/model` 形式，用于精确指定来源 |
+| 信封加密 | 用数据密钥加密凭证，数据密钥再由外部密钥（OS 密钥库）保护 |
+| 9074 | Trae 上游签到风控业务码，触发设备 ID 轮换与退避 |
+
+### 16.3 免责声明（摘要，详见 README）
+
+本项目为非官方、逆向实现的本地网关，仅限**你本人拥有并合法使用的账号**、**本机 / 私有环境自用**；明确反对批量注册、共享池、二次售卖；逆向接口随时可能失效且可能违反上游条款，存在账号封禁风险；凭证请勿外传、勿公开监听端口。**继续使用即代表已知悉并自行承担风险。**
+
+---
+
+*—— 本文档为 CodeNexus 项目的单一执行依据；任何方向变更须经产品负责人拍板后更新本文件并记录 ADR。*
