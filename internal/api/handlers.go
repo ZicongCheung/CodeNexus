@@ -107,6 +107,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	stream, _ := body["stream"].(bool)
 
+	hint := hintFrom(r)
+	hint.Model = model
+	hint.Stream = stream
+
 	src, modelName, err := s.resolveSource(model)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error(), "")
@@ -149,6 +153,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			writePoolError(w, aerr)
 			return
 		}
+		hint.Attempts = i + 1
+		hint.Account = accountLabel(lease.Account)
 
 		if stream {
 			emitted, serr := s.streamChat(w, r, u, lease.Account, req, model)
@@ -181,12 +187,22 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		resp, cerr := u.Chat(r.Context(), lease.Account, req)
 		if cerr == nil {
 			lease.Succeed()
+			hint.Usage = &struct{ Prompt, Completion, Total int64 }{
+				Prompt:     int64(resp.Usage.PromptTokens),
+				Completion: int64(resp.Usage.CompletionTokens),
+				Total:      int64(resp.Usage.TotalTokens),
+			}
 			writeJSON(w, http.StatusOK, nonStreamPayload(resp, model))
 			return
 		}
 		if s.tryRefresh(r.Context(), lease.Account, cerr, refreshed) {
 			if resp, cerr = u.Chat(r.Context(), lease.Account, req); cerr == nil {
 				lease.Succeed()
+				hint.Usage = &struct{ Prompt, Completion, Total int64 }{
+					Prompt:     int64(resp.Usage.PromptTokens),
+					Completion: int64(resp.Usage.CompletionTokens),
+					Total:      int64(resp.Usage.TotalTokens),
+				}
 				writeJSON(w, http.StatusOK, nonStreamPayload(resp, model))
 				return
 			}
@@ -456,4 +472,16 @@ func parseSlice(v any) []any {
 		return s
 	}
 	return nil
+}
+
+// accountLabel renders an account for the request log. It prefers the display
+// label so an operator recognises the account without seeing a token.
+func accountLabel(acc *account.Account) string {
+	if acc == nil {
+		return ""
+	}
+	if acc.Label != "" {
+		return acc.Label
+	}
+	return acc.UID
 }

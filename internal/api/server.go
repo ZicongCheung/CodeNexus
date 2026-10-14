@@ -12,6 +12,7 @@ import (
 	"github.com/ZicongCheung/CodeNexus/internal/config"
 	"github.com/ZicongCheung/CodeNexus/internal/httpauth"
 	"github.com/ZicongCheung/CodeNexus/internal/pool"
+	"github.com/ZicongCheung/CodeNexus/internal/reqlog"
 	"github.com/ZicongCheung/CodeNexus/internal/upstream"
 )
 
@@ -30,12 +31,17 @@ type Option func(*Server)
 // WithRefresher installs a credential refresher used to heal auth failures.
 func WithRefresher(r Refresher) Option { return func(s *Server) { s.refresher = r } }
 
+// WithRecorder installs the request log recorder used by the console's
+// observability endpoints.
+func WithRecorder(r *reqlog.Recorder) Option { return func(s *Server) { s.recorder = r } }
+
 // Server wires the gateway routes.
 type Server struct {
 	cfg       *config.Config
 	pool      *pool.Pool
 	panel     http.Handler
 	refresher Refresher
+	recorder  *reqlog.Recorder
 	root      http.Handler
 }
 
@@ -52,7 +58,7 @@ func NewServer(cfg *config.Config, p *pool.Pool, panel http.Handler, opts ...Opt
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/status", s.withAuth(s.handleStatus))
 	mux.HandleFunc("/v1/models", s.withAuth(s.handleModels))
-	mux.HandleFunc("/v1/chat/completions", s.withAuth(s.handleChat))
+	mux.HandleFunc("/v1/chat/completions", s.record("chat", s.withAuth(s.handleChat)))
 	if panel != nil {
 		mux.Handle("/panel/", panel)
 		mux.Handle("/panel", panel)

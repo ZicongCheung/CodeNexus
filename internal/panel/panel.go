@@ -20,6 +20,8 @@ import (
 	"github.com/ZicongCheung/CodeNexus/internal/config"
 	"github.com/ZicongCheung/CodeNexus/internal/httpauth"
 	"github.com/ZicongCheung/CodeNexus/internal/pool"
+	"github.com/ZicongCheung/CodeNexus/internal/reqlog"
+	"github.com/ZicongCheung/CodeNexus/internal/scheduler"
 )
 
 //go:embed dist
@@ -41,11 +43,18 @@ type Console struct {
 	cfg    *config.Config
 	store  *authstore.Store
 	pool   *pool.Pool
+	sched  *scheduler.Scheduler
+	reqlog *reqlog.Recorder
 	static http.Handler
 	logf   func(string, ...any)
 
+	mux *http.ServeMux
+
 	mu     sync.Mutex
 	logins map[string]loginSession
+	// busy guards one in-flight task action per account, so a double click
+	// cannot start two sweeps over the same credential.
+	busy map[string]bool
 }
 
 // Option customizes a Console.
@@ -54,10 +63,24 @@ type Option func(*Console)
 // WithLogger installs a logger for console-side warnings.
 func WithLogger(fn func(string, ...any)) Option { return func(c *Console) { c.logf = fn } }
 
+// WithScheduler connects the console to the task scheduler, enabling the task
+// center. Without it the task endpoints report the subsystem as unavailable.
+func WithScheduler(s *scheduler.Scheduler) Option { return func(c *Console) { c.sched = s } }
+
+// WithReqLog connects the console to the request log, enabling the
+// observability endpoints.
+func WithReqLog(r *reqlog.Recorder) Option { return func(c *Console) { c.reqlog = r } }
+
 // New builds the console handler. store and p may be nil to disable account
 // management (the static console still serves).
 func New(cfg *config.Config, store *authstore.Store, p *pool.Pool, opts ...Option) *Console {
-	c := &Console{cfg: cfg, store: store, pool: p, logins: map[string]loginSession{}}
+	c := &Console{
+		cfg:    cfg,
+		store:  store,
+		pool:   p,
+		logins: map[string]loginSession{},
+		busy:   map[string]bool{},
+	}
 	for _, o := range opts {
 		if o != nil {
 			o(c)
@@ -69,6 +92,7 @@ func New(cfg *config.Config, store *authstore.Store, p *pool.Pool, opts ...Optio
 	} else {
 		c.static = http.FileServer(http.FS(sub))
 	}
+	c.mux = c.buildMux()
 	return c
 }
 
@@ -88,6 +112,59 @@ func (c *Console) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c.static.ServeHTTP(w, r2)
 }
 
+// buildMux wires the admin API routes. Method-qualified patterns keep the
+// read and write halves of an endpoint distinct.
+func (c *Console) buildMux() *http.ServeMux {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /api/session", c.handleSession)
+
+	// Account onboarding.
+	mux.HandleFunc("GET /api/accounts", c.handleAccounts)
+	mux.HandleFunc("POST /api/accounts/remove", c.handleRemoveAccount)
+	mux.HandleFunc("POST /api/auth/start", c.handleAuthStart)
+	mux.HandleFunc("GET /api/auth/poll", c.handleAuthPoll)
+	mux.HandleFunc("POST /api/auth/import", c.handleImport)
+
+	// Task center: catalogue and per-account operations.
+	mux.HandleFunc("GET /api/tasks/catalog", c.handleTaskCatalog)
+	mux.HandleFunc("GET /api/accounts/{uid}/tasks", c.handleAccountTasks)
+	mux.HandleFunc("POST /api/accounts/{uid}/tasks/accept", c.handleTaskAccept)
+	mux.HandleFunc("POST /api/accounts/{uid}/tasks/claim", c.handleTaskClaim)
+	mux.HandleFunc("POST /api/accounts/{uid}/tasks/auto", c.handleTaskAuto)
+	mux.HandleFunc("POST /api/accounts/{uid}/tasks/auto_all", c.handleTaskAutoAll)
+	mux.HandleFunc("GET /api/accounts/{uid}/packages", c.handleAccountPackages)
+	mux.HandleFunc("POST /api/accounts/{uid}/{op}", c.handleAccountOp)
+
+	// Task center: whole-pool operations.
+	mux.HandleFunc("POST /api/batch/{op}", c.handleBatch)
+	mux.HandleFunc("POST /api/tasks/scan_all", c.handleScanAll)
+	mux.HandleFunc("GET /api/tasks/queue", c.handleQueue)
+	mux.HandleFunc("POST /api/tasks/run_queue", c.handleRunQueue)
+
+	// Observability.
+	mux.HandleFunc("GET /api/observability/metrics", c.handleMetrics)
+	mux.HandleFunc("GET /api/observability/logs", c.handleLogs)
+
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) {
+		writeErr(w, http.StatusNotFound, "unknown console endpoint")
+	})
+	return mux
+}
+
+// handleAccountOp separates the single-account state toggles from the
+// single-account task triggers, which share the {uid}/{op} shape.
+func (c *Console) handleAccountOp(w http.ResponseWriter, r *http.Request) {
+	switch r.PathValue("op") {
+	case "pause", "resume", "disable", "revive":
+		c.handleAccountState(w, r)
+	case "checkin", "activity", "balance", "travel", "keepalive":
+		c.handleAccountAction(w, r)
+	default:
+		writeErr(w, http.StatusNotFound, "unknown console endpoint")
+	}
+}
+
 // serveAPI dispatches admin API calls after enforcing access control.
 func (c *Console) serveAPI(w http.ResponseWriter, r *http.Request, path string) {
 	r.Body = http.MaxBytesReader(w, r.Body, 8<<20)
@@ -95,22 +172,9 @@ func (c *Console) serveAPI(w http.ResponseWriter, r *http.Request, path string) 
 		writeErr(w, http.StatusUnauthorized, "console access requires the gateway api_key")
 		return
 	}
-	switch {
-	case path == "/api/session" && r.Method == http.MethodGet:
-		c.handleSession(w, r)
-	case path == "/api/accounts" && r.Method == http.MethodGet:
-		c.handleAccounts(w, r)
-	case path == "/api/accounts/remove" && r.Method == http.MethodPost:
-		c.handleRemoveAccount(w, r)
-	case path == "/api/auth/start" && r.Method == http.MethodPost:
-		c.handleAuthStart(w, r)
-	case path == "/api/auth/poll" && r.Method == http.MethodGet:
-		c.handleAuthPoll(w, r)
-	case path == "/api/auth/import" && r.Method == http.MethodPost:
-		c.handleImport(w, r)
-	default:
-		writeErr(w, http.StatusNotFound, "unknown console endpoint")
-	}
+	r2 := r.Clone(r.Context())
+	r2.URL.Path = path
+	c.mux.ServeHTTP(w, r2)
 }
 
 // authorized reports whether the caller may use the admin API. Loopback callers
@@ -134,6 +198,24 @@ func isLoopback(remoteAddr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// tryLock claims the per-account task slot, reporting false when an action for
+// that account is already running.
+func (c *Console) tryLock(key string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.busy[key] {
+		return false
+	}
+	c.busy[key] = true
+	return true
+}
+
+func (c *Console) unlock(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.busy, key)
+}
+
 func (c *Console) warn(format string, args ...any) {
 	if c.logf != nil {
 		c.logf(format, args...)
@@ -149,6 +231,8 @@ func (c *Console) handleSession(w http.ResponseWriter, _ *http.Request) {
 		"service":  ServiceName,
 		"accounts": accounts,
 		"sources":  sourceNames(),
+		"tasks":    c.sched != nil,
+		"reqlog":   c.reqlog != nil,
 	})
 }
 

@@ -31,6 +31,16 @@ type entry struct {
 
 	credits      int64
 	creditsKnown bool
+	// creditsTotal is the size of the account's credit grant; zero when unknown.
+	creditsTotal int64
+	// expiring is the part of credits that lapses inside the configured window.
+	expiring int64
+	// earliestAt is when the next batch lapses, with earliestRemaining positive.
+	earliestAt        time.Time
+	earliestRemaining int64
+	// checkinDay records the schedule-local day of the last successful check-in,
+	// so a restart can avoid re-running an already-completed day.
+	checkinDay string
 
 	inFlight int
 
@@ -46,6 +56,21 @@ func newEntry(acc *account.Account) *entry {
 
 func (e *entry) cooling(now time.Time) bool { return now.Before(e.coolingUntil) }
 func (e *entry) broken(now time.Time) bool  { return now.Before(e.breakerUntil) }
+
+// expiringScore reports how strongly the account should be preferred so that
+// credits about to lapse are spent first. It is the share of the balance that
+// expires inside the window, in [0,1]; zero when nothing is expiring or the
+// balance is unknown.
+func (e *entry) expiringScore() float64 {
+	if e.credits <= 0 || e.expiring <= 0 {
+		return 0
+	}
+	s := float64(e.expiring) / float64(e.credits)
+	if s > 1 {
+		return 1
+	}
+	return s
+}
 
 func (e *entry) modelCooled(now time.Time, model string) bool {
 	if model == "" || e.modelCooldowns == nil {

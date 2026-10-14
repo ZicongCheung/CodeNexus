@@ -12,17 +12,23 @@ import (
 const stateVersion = 1
 
 type stateEntry struct {
-	Credits      int64  `json:"credits"`
-	CreditsKnown bool   `json:"credits_known"`
-	CoolingUntil int64  `json:"cooling_until,omitempty"`
-	CoolKind     string `json:"cool_kind,omitempty"`
-	SoftStreak   int    `json:"soft_streak,omitempty"`
-	Fails        int    `json:"fails,omitempty"`
-	BreakerUntil int64  `json:"breaker_until,omitempty"`
-	Success      int64  `json:"success,omitempty"`
-	Errors       int64  `json:"errors,omitempty"`
-	Disabled     bool   `json:"disabled,omitempty"`
-	LastUsed     int64  `json:"last_used,omitempty"`
+	Credits           int64  `json:"credits"`
+	CreditsKnown      bool   `json:"credits_known"`
+	CreditsTotal      int64  `json:"credits_total,omitempty"`
+	Expiring          int64  `json:"expiring,omitempty"`
+	EarliestAt        int64  `json:"earliest_at,omitempty"`
+	EarliestRemaining int64  `json:"earliest_remaining,omitempty"`
+	CheckinDay        string `json:"checkin_day,omitempty"`
+	CoolingUntil      int64  `json:"cooling_until,omitempty"`
+	CoolKind          string `json:"cool_kind,omitempty"`
+	SoftStreak        int    `json:"soft_streak,omitempty"`
+	Fails             int    `json:"fails,omitempty"`
+	BreakerUntil      int64  `json:"breaker_until,omitempty"`
+	Success           int64  `json:"success,omitempty"`
+	Errors            int64  `json:"errors,omitempty"`
+	Disabled          bool   `json:"disabled,omitempty"`
+	Paused            bool   `json:"paused,omitempty"`
+	LastUsed          int64  `json:"last_used,omitempty"`
 }
 
 type stateFile struct {
@@ -73,6 +79,11 @@ func (p *Pool) LoadState() error {
 		}
 		e.credits = se.Credits
 		e.creditsKnown = se.CreditsKnown
+		e.creditsTotal = se.CreditsTotal
+		e.expiring = se.Expiring
+		e.earliestAt = fromUnix(se.EarliestAt)
+		e.earliestRemaining = se.EarliestRemaining
+		e.checkinDay = se.CheckinDay
 		e.coolingUntil = fromUnix(se.CoolingUntil)
 		e.coolKind = upstream.ErrorKind(se.CoolKind)
 		e.softStreak = se.SoftStreak
@@ -81,6 +92,7 @@ func (p *Pool) LoadState() error {
 		e.success = se.Success
 		e.errors = se.Errors
 		e.disabled = se.Disabled
+		e.paused = se.Paused
 		e.lastUsed = fromUnix(se.LastUsed)
 	}
 	return nil
@@ -97,17 +109,23 @@ func (p *Pool) Flush() error {
 	sf := stateFile{Version: stateVersion, Entries: make(map[string]stateEntry, len(p.entries))}
 	for k, e := range p.entries {
 		sf.Entries[k] = stateEntry{
-			Credits:      e.credits,
-			CreditsKnown: e.creditsKnown,
-			CoolingUntil: toUnix(e.coolingUntil),
-			CoolKind:     string(e.coolKind),
-			SoftStreak:   e.softStreak,
-			Fails:        e.fails,
-			BreakerUntil: toUnix(e.breakerUntil),
-			Success:      e.success,
-			Errors:       e.errors,
-			Disabled:     e.disabled,
-			LastUsed:     toUnix(e.lastUsed),
+			Credits:           e.credits,
+			CreditsKnown:      e.creditsKnown,
+			CreditsTotal:      e.creditsTotal,
+			Expiring:          e.expiring,
+			EarliestAt:        toUnix(e.earliestAt),
+			EarliestRemaining: e.earliestRemaining,
+			CheckinDay:        e.checkinDay,
+			CoolingUntil:      toUnix(e.coolingUntil),
+			CoolKind:          string(e.coolKind),
+			SoftStreak:        e.softStreak,
+			Fails:             e.fails,
+			BreakerUntil:      toUnix(e.breakerUntil),
+			Success:           e.success,
+			Errors:            e.errors,
+			Disabled:          e.disabled,
+			Paused:            e.paused,
+			LastUsed:          toUnix(e.lastUsed),
 		}
 	}
 	p.dirty = false

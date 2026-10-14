@@ -35,6 +35,11 @@ type Config struct {
 	// AuthBaseURL overrides the regional base used by the device-login and
 	// token-refresh endpoints. Empty uses the built-in regional defaults.
 	AuthBaseURL string
+	// BillingBaseURL and WebBaseURL override the hosts serving the metering and
+	// web-growth task endpoints. Empty uses the built-in regional defaults;
+	// tests point them at a stub.
+	BillingBaseURL string
+	WebBaseURL     string
 	// DisableSanitize turns off content-filter fingerprint scrubbing.
 	DisableSanitize bool
 	// DisableMarkupRepair turns off native tool-call markup restoration.
@@ -357,9 +362,19 @@ func (c *Client) ChatStream(ctx context.Context, acc *account.Account, req *upst
 	return nil
 }
 
-// Probe implements upstream.Upstream with a minimal liveness check.
-func (c *Client) Probe(_ context.Context, acc *account.Account) (*upstream.Probe, error) {
-	return &upstream.Probe{Healthy: acc != nil && acc.Token() != "", Detail: "workbuddy"}, nil
+// Probe implements upstream.Upstream by reading the account's credit balance,
+// which doubles as a liveness check on the credential.
+func (c *Client) Probe(ctx context.Context, acc *account.Account) (*upstream.Probe, error) {
+	if acc == nil || acc.Token() == "" {
+		return &upstream.Probe{Healthy: false, Detail: "workbuddy: no credential"}, nil
+	}
+	credits, err := c.Credits(ctx, acc, 0)
+	if err != nil {
+		// A rejected credential is a definitive "not healthy"; a transient
+		// failure is not.
+		return &upstream.Probe{Healthy: !IsUnauthorized(err), Detail: err.Error()}, err
+	}
+	return &upstream.Probe{Credits: credits.Remain, Healthy: true, Detail: "workbuddy"}, nil
 }
 
 // requestToolNames extracts the declared function names from a request.

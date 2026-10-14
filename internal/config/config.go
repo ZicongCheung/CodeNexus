@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"time"
 )
 
 // Config is the root configuration object.
@@ -24,7 +26,66 @@ type Config struct {
 	Features      FeaturesConfig      `json:"features"`
 	Security      SecurityConfig      `json:"security"`
 	Router        RouterConfig        `json:"router"`
+	Schedule      ScheduleConfig      `json:"schedule"`
+	ReqLog        ReqLogConfig        `json:"request_log"`
 	Upstreams     UpstreamsConfig     `json:"upstreams"`
+}
+
+// ScheduleConfig controls the built-in daily task scheduler.
+//
+// Hours are local clock hours in Timezone. A task runs once at each listed
+// hour, so listing two hours gives two daily chances. Enabled flags default to
+// true: a config file that predates this section keeps every task on.
+type ScheduleConfig struct {
+	// Timezone is an IANA name used for day boundaries and slot hours. Sign-in
+	// and streak rewards settle on the upstream's calendar, so the default
+	// matches it rather than the host clock.
+	Timezone string `json:"timezone"`
+
+	CheckinHours   []int `json:"checkin_hours"`
+	TravelHours    []int `json:"travel_hours"`
+	ActivityHours  []int `json:"activity_hours"`
+	KeepaliveHours []int `json:"keepalive_hours"`
+	BlackcatHours  []int `json:"blackcat_hours"`
+	GrowthHours    []int `json:"growth_hours"`
+
+	CheckinEnabled   bool `json:"checkin_enabled"`
+	TravelEnabled    bool `json:"travel_enabled"`
+	ActivityEnabled  bool `json:"activity_enabled"`
+	KeepaliveEnabled bool `json:"keepalive_enabled"`
+	BlackcatEnabled  bool `json:"blackcat_enabled"`
+	GrowthEnabled    bool `json:"growth_enabled"`
+
+	// BalanceRefreshEnabled keeps credit balances fresh on a short interval,
+	// independent of the hourly schedule.
+	BalanceRefreshEnabled bool `json:"balance_refresh_enabled"`
+	BalanceRefreshMinutes int  `json:"balance_refresh_minutes"`
+
+	// IncludeDisabledInTasks lets the credential-maintenance tasks (check-in,
+	// activity, keep-alive, balance) also run for administratively disabled
+	// accounts. Disabled accounts still never serve traffic.
+	IncludeDisabledInTasks bool `json:"include_disabled_in_tasks"`
+
+	// CatchUpOnStart runs one catch-up pass for the credential-maintenance
+	// tasks when the process starts after today's slot already passed, so a
+	// restart does not silently lose a day. Growth tasks are not caught up:
+	// they reset daily and carry no continuity penalty.
+	CatchUpOnStart bool `json:"catch_up_on_start"`
+
+	// AccountDelayMS spaces out per-account upstream calls within one sweep.
+	AccountDelayMS int `json:"account_delay_ms"`
+
+	// ExpiringSoonHours marks credits that expire within this window. The pool
+	// then prefers spending those accounts first. Zero disables the signal.
+	ExpiringSoonHours int `json:"expiring_soon_hours"`
+}
+
+// ReqLogConfig controls the in-memory request log.
+type ReqLogConfig struct {
+	// RecentLimit is how many recent requests the console can show.
+	RecentLimit int `json:"recent_limit"`
+	// Stdout mirrors each record to the process log.
+	Stdout bool `json:"stdout"`
 }
 
 // SecurityConfig controls how credentials are protected at rest.
@@ -57,6 +118,9 @@ type PoolConfig struct {
 	WeightCredit       float64 `json:"weight_credit"`
 	WeightIdle         float64 `json:"weight_idle"`
 	WeightSuccess      float64 `json:"weight_success"`
+	// WeightExpiring tilts selection toward accounts holding credits that are
+	// close to expiring, so they are spent before they lapse.
+	WeightExpiring float64 `json:"weight_expiring"`
 }
 
 // SessionStickyConfig pins a conversation to one account for a while.
@@ -109,14 +173,36 @@ func Default() Config {
 			MaxInFlight:        3,
 			WaitMaxSeconds:     8,
 			FailoverAttempts:   3,
-			WeightCredit:       0.4,
-			WeightIdle:         0.3,
-			WeightSuccess:      0.3,
+			WeightCredit:       0.35,
+			WeightIdle:         0.25,
+			WeightSuccess:      0.25,
+			WeightExpiring:     0.15,
 		},
 		SessionSticky: SessionStickyConfig{Enabled: true, TTLSeconds: 1800},
 		Features:      FeaturesConfig{SanitizeFingerprints: true, RepairToolMarkup: true},
 		Security:      SecurityConfig{KeyProvider: "auto", EncryptCredentials: true},
 		Router:        RouterConfig{Naming: "flat", SameNamePolicy: "auto_healthy"},
+		Schedule: ScheduleConfig{
+			Timezone:              "Asia/Shanghai",
+			CheckinHours:          []int{9, 21},
+			TravelHours:           []int{9, 21},
+			ActivityHours:         []int{10},
+			KeepaliveHours:        []int{22},
+			BlackcatHours:         []int{23},
+			GrowthHours:           []int{1},
+			CheckinEnabled:        true,
+			TravelEnabled:         true,
+			ActivityEnabled:       true,
+			KeepaliveEnabled:      true,
+			BlackcatEnabled:       true,
+			GrowthEnabled:         true,
+			BalanceRefreshEnabled: true,
+			BalanceRefreshMinutes: 5,
+			CatchUpOnStart:        true,
+			AccountDelayMS:        1500,
+			ExpiringSoonHours:     168,
+		},
+		ReqLog: ReqLogConfig{RecentLimit: 100, Stdout: true},
 		Upstreams: UpstreamsConfig{
 			WorkBuddy: WorkBuddyConfig{Enabled: true, TimeoutSeconds: 120},
 			TraeCN:    TraeCNConfig{Enabled: false, AuthSource: "auto", UpstreamMode: "remote", AutoRoute: true},
@@ -201,8 +287,11 @@ func (c *Config) normalize() {
 	if c.Pool.FailoverAttempts <= 0 {
 		c.Pool.FailoverAttempts = 3
 	}
-	if c.Pool.WeightCredit == 0 && c.Pool.WeightIdle == 0 && c.Pool.WeightSuccess == 0 {
-		c.Pool.WeightCredit, c.Pool.WeightIdle, c.Pool.WeightSuccess = 0.4, 0.3, 0.3
+	if c.Pool.WeightCredit == 0 && c.Pool.WeightIdle == 0 && c.Pool.WeightSuccess == 0 && c.Pool.WeightExpiring == 0 {
+		c.Pool.WeightCredit, c.Pool.WeightIdle, c.Pool.WeightSuccess, c.Pool.WeightExpiring = 0.35, 0.25, 0.25, 0.15
+	}
+	if c.Pool.WeightCredit < 0 || c.Pool.WeightIdle < 0 || c.Pool.WeightSuccess < 0 || c.Pool.WeightExpiring < 0 {
+		c.Pool.WeightCredit, c.Pool.WeightIdle, c.Pool.WeightSuccess, c.Pool.WeightExpiring = 0.35, 0.25, 0.25, 0.15
 	}
 	if c.SessionSticky.TTLSeconds <= 0 {
 		c.SessionSticky.TTLSeconds = 1800
@@ -227,6 +316,54 @@ func (c *Config) normalize() {
 	if c.Upstreams.TraeCN.UpstreamMode == "" {
 		c.Upstreams.TraeCN.UpstreamMode = "remote"
 	}
+	c.normalizeSchedule()
+}
+
+// normalizeSchedule fills defaults and validates the scheduler section. Hours
+// are clamped into 0-23 and de-duplicated so a bad value cannot wedge the
+// schedule loop into never firing.
+func (c *Config) normalizeSchedule() {
+	s := &c.Schedule
+	if _, err := time.LoadLocation(s.Timezone); err != nil {
+		s.Timezone = "Asia/Shanghai"
+	}
+	s.CheckinHours = normalizeHours(s.CheckinHours, []int{9, 21})
+	s.TravelHours = normalizeHours(s.TravelHours, []int{9, 21})
+	s.ActivityHours = normalizeHours(s.ActivityHours, []int{10})
+	s.KeepaliveHours = normalizeHours(s.KeepaliveHours, []int{22})
+	s.BlackcatHours = normalizeHours(s.BlackcatHours, []int{23})
+	s.GrowthHours = normalizeHours(s.GrowthHours, []int{1})
+	if s.BalanceRefreshMinutes <= 0 {
+		s.BalanceRefreshMinutes = 5
+	}
+	if s.AccountDelayMS < 0 {
+		s.AccountDelayMS = 0
+	}
+	if s.ExpiringSoonHours < 0 {
+		s.ExpiringSoonHours = 0
+	}
+	if c.ReqLog.RecentLimit <= 0 {
+		c.ReqLog.RecentLimit = 100
+	}
+}
+
+// normalizeHours de-duplicates and clamps configured hours, falling back to
+// the defaults when nothing usable is left.
+func normalizeHours(in, fallback []int) []int {
+	seen := make(map[int]bool, len(in))
+	out := make([]int, 0, len(in))
+	for _, h := range in {
+		if h < 0 || h > 23 || seen[h] {
+			continue
+		}
+		seen[h] = true
+		out = append(out, h)
+	}
+	if len(out) == 0 {
+		return append([]int(nil), fallback...)
+	}
+	sort.Ints(out)
+	return out
 }
 
 func writeAtomic(path string, v any) error {

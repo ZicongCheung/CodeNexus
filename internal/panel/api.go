@@ -217,6 +217,7 @@ type importAccount struct {
 	Label        string `json:"label"`
 	Nickname     string `json:"nickname"`
 	Email        string `json:"email"`
+	EnterpriseID string `json:"enterprise_id"`
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
 	Domain       string `json:"domain"`
@@ -363,10 +364,11 @@ func normalizeImport(records []importAccount) ([]*account.Account, []string) {
 			enabled = *rec.Enabled
 		}
 		acc := &account.Account{
-			Source:  src,
-			UID:     uid,
-			Label:   label,
-			Enabled: enabled,
+			Source:       src,
+			UID:          uid,
+			Label:        label,
+			Enabled:      enabled,
+			EnterpriseID: strings.TrimSpace(rec.EnterpriseID),
 		}
 		acc.SetCredentials(token, strings.TrimSpace(rec.RefreshToken), strings.TrimSpace(rec.Domain), normalizeExpiry(rec))
 		out = append(out, acc)

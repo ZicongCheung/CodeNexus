@@ -38,6 +38,7 @@ type Options struct {
 	WeightCredit     float64
 	WeightIdle       float64
 	WeightSuccess    float64
+	WeightExpiring   float64
 	// Seed makes the weighted draw reproducible in tests. Zero means time-based.
 	Seed int64
 	// Clock overrides the time source in tests.
@@ -66,8 +67,8 @@ func (o Options) withDefaults() Options {
 	if o.StickyTTL <= 0 {
 		o.StickyTTL = 30 * time.Minute
 	}
-	if o.WeightCredit == 0 && o.WeightIdle == 0 && o.WeightSuccess == 0 {
-		o.WeightCredit, o.WeightIdle, o.WeightSuccess = 0.4, 0.3, 0.3
+	if o.WeightCredit == 0 && o.WeightIdle == 0 && o.WeightSuccess == 0 && o.WeightExpiring == 0 {
+		o.WeightCredit, o.WeightIdle, o.WeightSuccess, o.WeightExpiring = 0.35, 0.25, 0.25, 0.15
 	}
 	if o.Clock == nil {
 		o.Clock = time.Now
@@ -250,6 +251,77 @@ func (p *Pool) SetCredits(key string, credits int64, known bool) {
 	}
 }
 
+// Credits describes the account's credit picture as last observed upstream.
+type Credits struct {
+	Remain            int64
+	Total             int64
+	Known             bool
+	Expiring          int64
+	EarliestAt        time.Time
+	EarliestRemaining int64
+}
+
+// SetCreditsDetail records a detailed credit observation and clears a quota
+// cooldown, since a freshly observed positive balance means the account can be
+// used again.
+func (p *Pool) SetCreditsDetail(key string, c Credits) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.entries[key]
+	if !ok {
+		return
+	}
+	e.credits = c.Remain
+	e.creditsKnown = c.Known
+	e.creditsTotal = c.Total
+	e.expiring = c.Expiring
+	e.earliestAt = c.EarliestAt
+	e.earliestRemaining = c.EarliestRemaining
+	if c.Known && c.Remain > 0 && e.coolKind == upstream.KindQuota {
+		e.coolingUntil = time.Time{}
+		e.coolKind = ""
+	}
+	p.dirty = true
+}
+
+// Credits returns the last observed credit picture for key.
+func (p *Pool) Credits(key string) (Credits, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.entries[key]
+	if !ok {
+		return Credits{}, false
+	}
+	return Credits{
+		Remain:            e.credits,
+		Total:             e.creditsTotal,
+		Known:             e.creditsKnown,
+		Expiring:          e.expiring,
+		EarliestAt:        e.earliestAt,
+		EarliestRemaining: e.earliestRemaining,
+	}, true
+}
+
+// NoteCheckin records the schedule-local day of a successful check-in.
+func (p *Pool) NoteCheckin(key, day string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.entries[key]; ok {
+		e.checkinDay = day
+		p.dirty = true
+	}
+}
+
+// CheckinDay returns the schedule-local day of the last successful check-in.
+func (p *Pool) CheckinDay(key string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.entries[key]; ok {
+		return e.checkinDay
+	}
+	return ""
+}
+
 // SetDisabled administratively disables or revives an account.
 func (p *Pool) SetDisabled(key string, disabled bool) {
 	p.mu.Lock()
@@ -264,6 +336,28 @@ func (p *Pool) SetDisabled(key string, disabled bool) {
 		}
 		p.dirty = true
 	}
+}
+
+// SetPaused parks an account: it stays configured and keeps its health, but is
+// not selected for traffic. Pausing does not reset any failure state, so
+// resuming restores exactly the previous posture.
+func (p *Pool) SetPaused(key string, paused bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.entries[key]; ok {
+		e.paused = paused
+		p.dirty = true
+	}
+}
+
+// Paused reports whether the account is administratively parked.
+func (p *Pool) Paused(key string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.entries[key]; ok {
+		return e.paused
+	}
+	return false
 }
 
 // PickOptions describes one acquisition attempt.
@@ -416,7 +510,8 @@ func (p *Pool) chooseWeightedLocked(cands []*entry, now time.Time) *entry {
 		if tot := e.success + e.errors; tot > 0 {
 			success = float64(e.success+1) / float64(tot+2)
 		}
-		w := p.opts.WeightCredit*credit + p.opts.WeightIdle*idle + p.opts.WeightSuccess*success + 0.01
+		w := p.opts.WeightCredit*credit + p.opts.WeightIdle*idle + p.opts.WeightSuccess*success +
+			p.opts.WeightExpiring*e.expiringScore() + 0.01
 		scores = append(scores, scored{e: e, w: w})
 	}
 	sort.SliceStable(scores, func(i, j int) bool { return scores[i].w > scores[j].w })

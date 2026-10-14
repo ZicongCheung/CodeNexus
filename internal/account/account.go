@@ -30,6 +30,11 @@ type Account struct {
 	Label   string `json:"label,omitempty"`
 	Enabled bool   `json:"enabled"`
 
+	// EnterpriseID is set when the account is bound to an enterprise tenant.
+	// Enterprise tenants have their own quota model and, on the WorkBuddy
+	// side, no personal check-in or growth program.
+	EnterpriseID string `json:"enterprise_id,omitempty"`
+
 	AccessToken  string `json:"access_token,omitempty"`
 	RefreshToken string `json:"refresh_token,omitempty"`
 	Domain       string `json:"domain,omitempty"`
@@ -123,6 +128,7 @@ func (a *Account) Snapshot() Account {
 		UID:          a.UID,
 		Label:        a.Label,
 		Enabled:      a.Enabled,
+		EnterpriseID: a.EnterpriseID,
 		AccessToken:  a.AccessToken,
 		RefreshToken: a.RefreshToken,
 		Domain:       a.Domain,
@@ -130,6 +136,9 @@ func (a *Account) Snapshot() Account {
 		Ephemeral:    a.Ephemeral,
 	}
 }
+
+// IsEnterprise reports whether the account belongs to an enterprise tenant.
+func (a *Account) IsEnterprise() bool { return strings.TrimSpace(a.EnterpriseID) != "" }
 
 func sanitize(s string) string {
 	var b strings.Builder

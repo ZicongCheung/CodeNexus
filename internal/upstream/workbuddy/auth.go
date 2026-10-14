@@ -168,10 +168,11 @@ func (c *Client) DevicePoll(ctx context.Context, realm, state string) (*account.
 		label = acct.UID
 	}
 	acc := &account.Account{
-		Source:  account.SourceWorkBuddy,
-		UID:     acct.UID,
-		Label:   label,
-		Enabled: true,
+		Source:       account.SourceWorkBuddy,
+		UID:          acct.UID,
+		Label:        label,
+		Enabled:      true,
+		EnterpriseID: strings.TrimSpace(acct.EnterpriseID),
 	}
 	acc.SetCredentials(tok.AccessToken, tok.RefreshToken, tok.Domain, expiryFrom(tok.ExpiresIn))
 	return acc, true, nil

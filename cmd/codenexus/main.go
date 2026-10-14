@@ -23,6 +23,8 @@ import (
 	"github.com/ZicongCheung/CodeNexus/internal/logx"
 	"github.com/ZicongCheung/CodeNexus/internal/panel"
 	"github.com/ZicongCheung/CodeNexus/internal/pool"
+	"github.com/ZicongCheung/CodeNexus/internal/reqlog"
+	"github.com/ZicongCheung/CodeNexus/internal/scheduler"
 	"github.com/ZicongCheung/CodeNexus/internal/upstream"
 	"github.com/ZicongCheung/CodeNexus/internal/upstream/workbuddy"
 )
@@ -129,9 +131,38 @@ func run(configPath string) error {
 	})
 	refresher.Start(ctx)
 
+	// The scheduler runs the recurring account maintenance and the growth
+	// task sweep. It shares the pool with the gateway, so a task and a live
+	// request never fight over the same credential.
+	statePath := filepath.Join(cfg.DataDir, "scheduler-state.json")
+	sched := scheduler.New(scheduler.Options{
+		Cfg:     cfg.Schedule,
+		Pool:    p,
+		Tasks:   upstream.TasksFor,
+		Refresh: refresher,
+		State:   scheduler.LoadState(statePath),
+		Logf:    func(format string, args ...any) { logx.Infof(format, args...) },
+	})
+	go sched.Run(ctx)
+	sched.StartBalanceRefresh(ctx)
+	if cfg.Schedule.CheckinEnabled || cfg.Schedule.TravelEnabled || cfg.Schedule.ActivityEnabled ||
+		cfg.Schedule.KeepaliveEnabled || cfg.Schedule.BlackcatEnabled || cfg.Schedule.GrowthEnabled {
+		logx.Infof("scheduler active (timezone %s)", cfg.Schedule.Timezone)
+	} else {
+		logx.Warnf("scheduler inactive: every task family is disabled")
+	}
+
+	// The request log feeds the console's observability panels and is shared
+	// with the HTTP layer that records every chat request.
+	recorder := reqlog.New(cfg.ReqLog.RecentLimit, cfg.ReqLog.Stdout)
+
 	console := panel.New(cfg, store, p,
-		panel.WithLogger(func(format string, args ...any) { logx.Infof(format, args...) }))
-	srv := api.NewServer(cfg, p, console, api.WithRefresher(refresher))
+		panel.WithLogger(func(format string, args ...any) { logx.Infof(format, args...) }),
+		panel.WithScheduler(sched),
+		panel.WithReqLog(recorder))
+	srv := api.NewServer(cfg, p, console,
+		api.WithRefresher(refresher),
+		api.WithRecorder(recorder))
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           srv,
@@ -313,6 +344,7 @@ func buildPool(cfg *config.Config) *pool.Pool {
 		WeightCredit:     cfg.Pool.WeightCredit,
 		WeightIdle:       cfg.Pool.WeightIdle,
 		WeightSuccess:    cfg.Pool.WeightSuccess,
+		WeightExpiring:   cfg.Pool.WeightExpiring,
 	})
 	p.SetStatePath(filepath.Join(cfg.DataDir, "pool-state.json"))
 	p.SetErrorHandler(func(err error) { logx.Warnf("flush pool state: %v", err) })
