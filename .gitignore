@@ -1,0 +1,29 @@
+# ---- 敏感运行时数据（切勿提交：含明文凭证 / 私有配置）----
+auths/
+data/
+config.json
+config.local.json
+
+# ---- Go 编译产物 ----
+/codenexus
+/codenexus.exe
+*.exe
+*.test
+*.out
+/dist/
+/bin/
+
+# ---- 依赖与缓存 ----
+vendor/
+
+# ---- 编辑器 / 系统 ----
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ---- 日志与临时文件 ----
+*.log
+*.tmp
+/tmp/
