@@ -4,33 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>CodeNexus Console</title>
-    <!--
-      Placeholder console. The real Svelte app lives in web/ and, when built,
-      overwrites this directory. Kept here so the binary always embeds a page.
-    -->
-    <style>
-      :root { color-scheme: light dark; }
-      body {
-        margin: 0;
-        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-        display: grid;
-        place-items: center;
-        min-height: 100vh;
-        background: #0f1115;
-        color: #e6e8ec;
-      }
-      .card { max-width: 30rem; padding: 2rem 2.5rem; text-align: center; }
-      h1 { font-size: 1.4rem; margin: 0 0 .5rem; }
-      p { color: #9aa3af; line-height: 1.6; margin: .25rem 0; }
-      code { background: #1b1f27; padding: .1rem .35rem; border-radius: 4px; }
-    </style>
+    <script type="module" crossorigin src="/panel/assets/index-BlGwGGrF.js"></script>
+    <link rel="stylesheet" crossorigin href="/panel/assets/index-Bt9KQLHa.css">
   </head>
   <body>
-    <main class="card">
-      <h1>CodeNexus</h1>
-      <p>控制台脚手架已就位（占位页）。</p>
-      <p>面板前端在 <code>web/</code>，构建后覆盖此目录。</p>
-      <p>健康检查：<code>GET /healthz</code> · 模型列表：<code>GET /v1/models</code></p>
-    </main>
+    <div id="app"></div>
   </body>
 </html>

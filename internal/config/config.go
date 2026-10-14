@@ -22,8 +22,17 @@ type Config struct {
 	Pool          PoolConfig          `json:"pool"`
 	SessionSticky SessionStickyConfig `json:"session_sticky"`
 	Features      FeaturesConfig      `json:"features"`
+	Security      SecurityConfig      `json:"security"`
 	Router        RouterConfig        `json:"router"`
 	Upstreams     UpstreamsConfig     `json:"upstreams"`
+}
+
+// SecurityConfig controls how credentials are protected at rest.
+type SecurityConfig struct {
+	// KeyProvider selects the credential key backend: auto, os, or file.
+	KeyProvider string `json:"key_provider"`
+	// EncryptCredentials seals credential files with envelope encryption.
+	EncryptCredentials bool `json:"encrypt_credentials"`
 }
 
 // FeaturesConfig toggles outbound rewrite protections. Both default to true.
@@ -106,6 +115,7 @@ func Default() Config {
 		},
 		SessionSticky: SessionStickyConfig{Enabled: true, TTLSeconds: 1800},
 		Features:      FeaturesConfig{SanitizeFingerprints: true, RepairToolMarkup: true},
+		Security:      SecurityConfig{KeyProvider: "auto", EncryptCredentials: true},
 		Router:        RouterConfig{Naming: "flat", SameNamePolicy: "auto_healthy"},
 		Upstreams: UpstreamsConfig{
 			WorkBuddy: WorkBuddyConfig{Enabled: true, TimeoutSeconds: 120},
@@ -196,6 +206,11 @@ func (c *Config) normalize() {
 	}
 	if c.SessionSticky.TTLSeconds <= 0 {
 		c.SessionSticky.TTLSeconds = 1800
+	}
+	switch c.Security.KeyProvider {
+	case "auto", "os", "file":
+	default:
+		c.Security.KeyProvider = "auto"
 	}
 	if c.Router.Naming == "" {
 		c.Router.Naming = "flat"

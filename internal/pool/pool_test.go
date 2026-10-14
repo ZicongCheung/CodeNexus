@@ -15,9 +15,9 @@ const wb = upstream.SourceWorkBuddy
 
 type fakeClock struct{ t time.Time }
 
-func (c *fakeClock) now() time.Time          { return c.t }
-func (c *fakeClock) add(d time.Duration)     { c.t = c.t.Add(d) }
-func newClock() *fakeClock                   { return &fakeClock{t: time.Unix(1000, 0)} }
+func (c *fakeClock) now() time.Time      { return c.t }
+func (c *fakeClock) add(d time.Duration) { c.t = c.t.Add(d) }
+func newClock() *fakeClock               { return &fakeClock{t: time.Unix(1000, 0)} }
 
 func newPool(clk *fakeClock, opts Options) *Pool {
 	opts.Clock = clk.now

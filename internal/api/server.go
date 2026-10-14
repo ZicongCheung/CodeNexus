@@ -3,10 +3,12 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
 
+	"github.com/ZicongCheung/CodeNexus/internal/account"
 	"github.com/ZicongCheung/CodeNexus/internal/config"
 	"github.com/ZicongCheung/CodeNexus/internal/httpauth"
 	"github.com/ZicongCheung/CodeNexus/internal/pool"
@@ -16,17 +18,35 @@ import (
 // ServiceName is reported by /healthz and /status.
 const ServiceName = "codenexus"
 
+// Refresher renews an account's credentials on demand. It is optional; when
+// absent the gateway never attempts an in-request token refresh.
+type Refresher interface {
+	RefreshNow(ctx context.Context, acc *account.Account) error
+}
+
+// Option customizes a Server.
+type Option func(*Server)
+
+// WithRefresher installs a credential refresher used to heal auth failures.
+func WithRefresher(r Refresher) Option { return func(s *Server) { s.refresher = r } }
+
 // Server wires the gateway routes.
 type Server struct {
-	cfg   *config.Config
-	pool  *pool.Pool
-	panel http.Handler
-	root  http.Handler
+	cfg       *config.Config
+	pool      *pool.Pool
+	panel     http.Handler
+	refresher Refresher
+	root      http.Handler
 }
 
 // NewServer builds the HTTP handler. panel may be nil to disable the console.
-func NewServer(cfg *config.Config, p *pool.Pool, panel http.Handler) *Server {
+func NewServer(cfg *config.Config, p *pool.Pool, panel http.Handler, opts ...Option) *Server {
 	s := &Server{cfg: cfg, pool: p, panel: panel}
+	for _, o := range opts {
+		if o != nil {
+			o(s)
+		}
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)

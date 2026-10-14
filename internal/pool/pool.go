@@ -138,6 +138,55 @@ func (p *Pool) Replace(accts []*account.Account) {
 	p.dirty = true
 }
 
+// Add inserts or replaces one account, preserving nothing (used when a new
+// account is added at runtime, e.g. through the console).
+func (p *Pool) Add(acc *account.Account) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	key := acc.Key()
+	if _, ok := p.entries[key]; !ok {
+		p.order = append(p.order, key)
+	}
+	p.entries[key] = newEntry(acc)
+	p.dirty = true
+}
+
+// Remove drops an account from the pool.
+func (p *Pool) Remove(key string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.entries[key]; !ok {
+		return
+	}
+	delete(p.entries, key)
+	for i, k := range p.order {
+		if k == key {
+			p.order = append(p.order[:i], p.order[i+1:]...)
+			break
+		}
+	}
+	p.dirty = true
+}
+
+// Get returns the account for key.
+func (p *Pool) Get(key string) (*account.Account, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.entries[key]
+	if !ok {
+		return nil, false
+	}
+	return e.acc, true
+}
+
+// Enabled reports whether the account for key is administratively enabled.
+func (p *Pool) Enabled(key string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.entries[key]
+	return ok && e.active()
+}
+
 // List returns a copy of all accounts.
 func (p *Pool) List() []*account.Account {
 	p.mu.Lock()

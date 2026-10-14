@@ -137,6 +137,13 @@ func Classify(err error) *Error {
 	return NewError(KindUnknown, 0, err.Error())
 }
 
+// IsAuth reports whether err is an authentication failure, which the gateway
+// may recover from by refreshing the account's token and retrying once.
+func IsAuth(err error) bool {
+	e := Classify(err)
+	return e != nil && e.Kind == KindAuth
+}
+
 func containsAny(s string, subs ...string) bool {
 	for _, sub := range subs {
 		if strings.Contains(s, sub) {

@@ -116,6 +116,27 @@ type Upstream interface {
 	Probe(ctx context.Context, acc *account.Account) (*Probe, error)
 }
 
+// DeviceCode is the user-facing challenge of an interactive device login.
+type DeviceCode struct {
+	// State is the opaque session identifier used when polling.
+	State string
+	// URL is where the user authorizes the device.
+	URL string
+	// Realm records which regional service issued the code.
+	Realm string
+}
+
+// DeviceAuth is implemented by adapters that support interactive device-code
+// login. The console drives it to add accounts without restarting the gateway.
+type DeviceAuth interface {
+	// DeviceStart requests a device code and its authorization URL.
+	DeviceStart(ctx context.Context, realm string) (*DeviceCode, error)
+
+	// DevicePoll reports whether authorization has completed. When done is true
+	// the returned account is ready to be persisted.
+	DevicePoll(ctx context.Context, realm, state string) (*account.Account, bool, error)
+}
+
 var registry = map[Source]Upstream{}
 
 // Register makes an upstream available to the router.

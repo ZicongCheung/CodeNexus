@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -10,12 +11,15 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/ZicongCheung/CodeNexus/internal/api"
+	"github.com/ZicongCheung/CodeNexus/internal/authrefresh"
 	"github.com/ZicongCheung/CodeNexus/internal/authstore"
 	"github.com/ZicongCheung/CodeNexus/internal/config"
+	"github.com/ZicongCheung/CodeNexus/internal/crypto"
 	"github.com/ZicongCheung/CodeNexus/internal/logx"
 	"github.com/ZicongCheung/CodeNexus/internal/panel"
 	"github.com/ZicongCheung/CodeNexus/internal/pool"
@@ -23,10 +27,22 @@ import (
 	"github.com/ZicongCheung/CodeNexus/internal/upstream/workbuddy"
 )
 
+// The WorkBuddy adapter implements interactive device login; the console relies
+// on it being registered.
+var _ upstream.DeviceAuth = (*workbuddy.Client)(nil)
+
 // version is overridable at build time via -ldflags "-X main.version=...".
 var version = "0.0.0-dev"
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "auth" {
+		if err := runAuth(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "codenexus auth: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	configPath := flag.String("config", "config.json", "path to the config file")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
@@ -58,10 +74,29 @@ func run(configPath string) error {
 
 	p := buildPool(cfg)
 
-	store := authstore.New(cfg.AuthDir)
+	keeper, err := buildKeeper(cfg)
+	if err != nil {
+		return err
+	}
+	if keeper != nil {
+		logx.Infof("credential encryption enabled (key backend: %s)", keeper.Name())
+	} else {
+		logx.Warnf("credential encryption disabled (security.encrypt_credentials=false)")
+	}
+
+	store := buildStore(cfg, keeper)
 	accts, err := store.Load()
 	if err != nil {
 		logx.Warnf("load accounts: %v", err)
+	}
+	if n, merr := store.Migrate(); merr != nil {
+		logx.Warnf("migrate credentials: %v", merr)
+	} else if n > 0 {
+		logx.Infof("upgraded %d credential file(s) to encrypted storage", n)
+	}
+	if env := authstore.AccountsFromEnv(); len(env) > 0 {
+		logx.Infof("loaded %d account(s) from environment variables", len(env))
+		accts = append(accts, env...)
 	}
 	p.Replace(accts)
 	if err := p.LoadState(); err != nil {
@@ -86,7 +121,17 @@ func run(configPath string) error {
 	}
 	// Trae CN upstream is registered in a later phase.
 
-	srv := api.NewServer(cfg, p, panel.Handler())
+	// Background credential refresh keeps tokens from expiring unnoticed.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	refresher := authrefresh.New(p, store, authrefresh.Options{
+		Logf: func(format string, args ...any) { logx.Warnf(format, args...) },
+	})
+	refresher.Start(ctx)
+
+	console := panel.New(cfg, store, p,
+		panel.WithLogger(func(format string, args ...any) { logx.Infof(format, args...) }))
+	srv := api.NewServer(cfg, p, console, api.WithRefresher(refresher))
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           srv,
@@ -112,9 +157,145 @@ func run(configPath string) error {
 		logx.Infof("shutting down...")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	return httpSrv.Shutdown(ctx)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	return httpSrv.Shutdown(shutdownCtx)
+}
+
+// buildStore assembles the credential store, enabling encryption when a keeper
+// is available.
+func buildStore(cfg *config.Config, keeper crypto.Keeper) *authstore.Store {
+	opts := []authstore.Option{
+		authstore.WithLogger(func(format string, args ...any) { logx.Warnf(format, args...) }),
+	}
+	if keeper != nil {
+		opts = append(opts, authstore.WithKeeper(keeper))
+	}
+	return authstore.New(cfg.AuthDir, opts...)
+}
+
+// buildKeeper resolves the credential key backend from configuration.
+func buildKeeper(cfg *config.Config) (crypto.Keeper, error) {
+	if !cfg.Security.EncryptCredentials {
+		return nil, nil
+	}
+	dir := filepath.Join(cfg.DataDir, "keys")
+	backend := cfg.Security.KeyProvider
+	if backend == "" {
+		backend = crypto.BackendAuto
+	}
+	keeper, err := crypto.NewKeeper(dir, crypto.WithBackend(backend))
+	if err != nil {
+		if errors.Is(err, crypto.ErrUnsupported) {
+			logx.Warnf("key backend %q unavailable; falling back to a local key file", backend)
+			return crypto.NewKeeper(dir, crypto.WithBackend(crypto.BackendFile))
+		}
+		return nil, err
+	}
+	return keeper, nil
+}
+
+// runAuth handles the `codenexus auth export|import` subcommands.
+func runAuth(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: codenexus auth <export|import> [flags]")
+	}
+	op := args[0]
+	fs := flag.NewFlagSet("auth "+op, flag.ContinueOnError)
+	configPath := fs.String("config", "config.json", "path to the config file")
+	pass := fs.String("passphrase", "", "bundle passphrase (else CODENEXUS_PASSPHRASE or prompt)")
+	var in, out *string
+	switch op {
+	case "export":
+		out = fs.String("out", "codenexus-auth-bundle.json", "output bundle path")
+	case "import":
+		in = fs.String("in", "", "input bundle path (required)")
+	default:
+		return fmt.Errorf("unknown auth command %q (want export or import)", op)
+	}
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return err
+	}
+	keeper, err := buildKeeper(cfg)
+	if err != nil {
+		return err
+	}
+	store := buildStore(cfg, keeper)
+
+	passphrase, err := resolvePassphrase(*pass)
+	if err != nil {
+		return err
+	}
+
+	switch op {
+	case "export":
+		accts, err := store.Load()
+		if err != nil {
+			return err
+		}
+		if len(accts) == 0 {
+			return errors.New("no accounts to export")
+		}
+		blob, err := authstore.Export(accts, passphrase)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(*out, blob, 0o600); err != nil {
+			return err
+		}
+		fmt.Printf("exported %d account(s) to %s\n", len(accts), *out)
+		return nil
+
+	case "import":
+		if strings.TrimSpace(*in) == "" {
+			return errors.New("flag -in is required")
+		}
+		blob, err := os.ReadFile(*in)
+		if err != nil {
+			return err
+		}
+		accts, err := authstore.Import(blob, passphrase)
+		if err != nil {
+			return err
+		}
+		imported := 0
+		for _, acc := range accts {
+			if err := store.Save(acc); err != nil {
+				fmt.Fprintf(os.Stderr, "skip %s: %v\n", acc.UID, err)
+				continue
+			}
+			imported++
+		}
+		fmt.Printf("imported %d/%d account(s) into %s\n", imported, len(accts), cfg.AuthDir)
+		return nil
+	}
+	return nil
+}
+
+// resolvePassphrase reads the bundle passphrase from the flag, the environment,
+// or standard input.
+func resolvePassphrase(flagVal string) (string, error) {
+	if p := strings.TrimSpace(flagVal); p != "" {
+		return p, nil
+	}
+	if p := strings.TrimSpace(os.Getenv("CODENEXUS_PASSPHRASE")); p != "" {
+		return p, nil
+	}
+	fmt.Fprint(os.Stderr, "passphrase: ")
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && line == "" {
+		return "", fmt.Errorf("read passphrase: %w", err)
+	}
+	p := strings.TrimSpace(line)
+	if p == "" {
+		return "", errors.New("empty passphrase")
+	}
+	return p, nil
 }
 
 // buildPool translates configuration into pool options.

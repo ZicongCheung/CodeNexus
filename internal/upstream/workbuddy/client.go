@@ -32,6 +32,9 @@ type Config struct {
 	BaseURL        string
 	UserAgent      string
 	TimeoutSeconds int
+	// AuthBaseURL overrides the regional base used by the device-login and
+	// token-refresh endpoints. Empty uses the built-in regional defaults.
+	AuthBaseURL string
 	// DisableSanitize turns off content-filter fingerprint scrubbing.
 	DisableSanitize bool
 	// DisableMarkupRepair turns off native tool-call markup restoration.
@@ -79,8 +82,8 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body io.Re
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if acc != nil {
-		if acc.AccessToken != "" {
-			req.Header.Set("Authorization", "Bearer "+acc.AccessToken)
+		if tok := acc.Token(); tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
 		}
 		if acc.UID != "" {
 			req.Header.Set("X-User-Id", acc.UID)
@@ -354,13 +357,9 @@ func (c *Client) ChatStream(ctx context.Context, acc *account.Account, req *upst
 	return nil
 }
 
-// Refresh implements upstream.Upstream. Token refresh lands with the account
-// lifecycle work in a later phase.
-func (c *Client) Refresh(_ context.Context, _ *account.Account) error { return nil }
-
 // Probe implements upstream.Upstream with a minimal liveness check.
 func (c *Client) Probe(_ context.Context, acc *account.Account) (*upstream.Probe, error) {
-	return &upstream.Probe{Healthy: acc != nil && acc.AccessToken != "", Detail: "workbuddy"}, nil
+	return &upstream.Probe{Healthy: acc != nil && acc.Token() != "", Detail: "workbuddy"}, nil
 }
 
 // requestToolNames extracts the declared function names from a request.

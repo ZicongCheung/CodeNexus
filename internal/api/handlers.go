@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -30,11 +31,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("X-Service", ServiceName)
 	writeJSON(w, code, map[string]any{
-		"status":         status,
-		"service":        ServiceName,
-		"accounts":       map[string]int{"enabled": enabled, "total": total},
+		"status":          status,
+		"service":         ServiceName,
+		"accounts":        map[string]int{"enabled": enabled, "total": total},
 		"sticky_sessions": s.pool.StickyCount(),
-		"time":           time.Now().UTC().Format(time.RFC3339),
+		"time":            time.Now().UTC().Format(time.RFC3339),
 	})
 }
 
@@ -134,6 +135,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		attempts = 1
 	}
 	tried := map[string]bool{}
+	refreshed := map[string]bool{}
 	var lastErr *upstream.Error
 
 	for i := 0; i < attempts; i++ {
@@ -153,6 +155,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			if serr == nil {
 				lease.Succeed()
 				return
+			}
+			if !emitted && s.tryRefresh(r.Context(), lease.Account, serr, refreshed) {
+				emitted, serr = s.streamChat(w, r, u, lease.Account, req, model)
+				if serr == nil {
+					lease.Succeed()
+					return
+				}
 			}
 			ue := lease.Fail(serr)
 			logx.Warnf("chat stream attempt %d/%d failed: %v", i+1, attempts, serr)
@@ -175,6 +184,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, nonStreamPayload(resp, model))
 			return
 		}
+		if s.tryRefresh(r.Context(), lease.Account, cerr, refreshed) {
+			if resp, cerr = u.Chat(r.Context(), lease.Account, req); cerr == nil {
+				lease.Succeed()
+				writeJSON(w, http.StatusOK, nonStreamPayload(resp, model))
+				return
+			}
+		}
 		ue := lease.Fail(cerr)
 		logx.Warnf("chat attempt %d/%d failed: %v", i+1, attempts, cerr)
 		if !ue.Retryable() || i == attempts-1 {
@@ -185,6 +201,26 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		lastErr = ue
 	}
 	writeUpstreamError(w, lastErr)
+}
+
+// tryRefresh attempts one token refresh when err looks like an auth failure and
+// the account has not been refreshed yet during this request. It reports
+// whether the caller should retry the same account.
+func (s *Server) tryRefresh(ctx context.Context, acc *account.Account, err error, done map[string]bool) bool {
+	if s.refresher == nil || !upstream.IsAuth(err) {
+		return false
+	}
+	key := acc.Key()
+	if done[key] {
+		return false
+	}
+	done[key] = true
+	if rerr := s.refresher.RefreshNow(ctx, acc); rerr != nil {
+		logx.Warnf("refresh %s after auth error: %v", key, rerr)
+		return false
+	}
+	logx.Infof("refreshed %s after auth error, retrying", key)
+	return true
 }
 
 // streamChat forwards a streaming completion. It reports whether any bytes were
