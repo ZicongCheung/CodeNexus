@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/ZicongCheung/CodeNexus/internal/account"
+	"github.com/ZicongCheung/CodeNexus/internal/logx"
 	"github.com/ZicongCheung/CodeNexus/internal/upstream"
 )
 
@@ -68,6 +70,9 @@ func (c *Client) createSession(ctx context.Context, acc *account.Account, req *u
 	if err != nil {
 		return nil, err
 	}
+	if c.cfg.DebugUpstream {
+		logx.Debugf("trae remote create: %s", clipJSON(body, 6*1024))
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.remoteEndpoint(remoteChatPath), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -110,27 +115,59 @@ func (c *Client) createSession(ctx context.Context, acc *account.Account, req *u
 	return sess, nil
 }
 
-// encodeQuery flattens the conversation into the single string the remote
-// surface accepts. It is JSON-encoded because the field is typed as a JSON
-// string upstream-side.
+// encodeQuery flattens the conversation into the `query` field the remote
+// surface reads: a JSON array of parts, each `{"type":"text","data":{"content":
+// ...}}` — not a plain string. A bare string is accepted syntactically but the
+// model never sees it, which is why a request would answer with an empty
+// message. Roles are marked the way a transcript would be, and image parts
+// become renderer media payloads so they reach a multimodal model.
 func encodeQuery(req *upstream.ChatRequest) string {
 	var b strings.Builder
-	for i, m := range req.Messages {
-		if i > 0 {
+	for _, m := range req.Messages {
+		content := flattenContent(m.Content)
+		switch m.Role {
+		case "system":
+			if content == "" {
+				continue
+			}
+			fmt.Fprintf(&b, "\n\n[System]\n%s", content)
+		case "assistant":
+			parts := make([]string, 0, 2)
+			if content != "" {
+				parts = append(parts, content)
+			}
+			if len(m.ToolCalls) > 0 {
+				parts = append(parts, toolCallHistory(m.ToolCalls))
+			}
+			if len(parts) == 0 {
+				continue
+			}
+			fmt.Fprintf(&b, "\n\n[Assistant]\n%s", strings.Join(parts, "\n\n"))
+		case "tool", "function":
+			if content == "" && m.ToolCallID == "" {
+				continue
+			}
+			fmt.Fprintf(&b, "\n\n[Client Tool Result: %s %s status=succeeded]\n%s",
+				m.ToolCallID, toolResultName(m), content)
+		default:
+			if content == "" {
+				continue
+			}
 			b.WriteString("\n\n")
+			b.WriteString(content)
 		}
-		b.WriteString(roleLabel(m.Role))
-		b.WriteString(": ")
-		b.WriteString(flattenContent(m.Content))
 	}
-	encoded, err := json.Marshal(b.String())
+	parts := []any{map[string]any{"type": "text", "data": map[string]any{"content": strings.TrimPrefix(b.String(), "\n\n")}}}
+	parts = append(parts, mediaParts(req)...)
+	encoded, err := json.Marshal(parts)
 	if err != nil {
-		return `""`
+		return `[]`
 	}
 	return string(encoded)
 }
 
-// roleLabel renders a role the way a chat transcript would.
+// roleLabel renders a role the way a chat transcript would. It feeds the CLI's
+// plain-text prompt, not the remote query field.
 func roleLabel(role string) string {
 	switch role {
 	case "system":
@@ -142,6 +179,70 @@ func roleLabel(role string) string {
 	default:
 		return "User"
 	}
+}
+
+// toolCallHistory renders an assistant turn's calls so the model sees what it
+// asked for earlier.
+func toolCallHistory(calls []upstream.ToolCall) string {
+	list := make([]any, 0, len(calls))
+	for _, c := range calls {
+		list = append(list, map[string]any{
+			"id": c.ID, "name": c.Function.Name, "arguments": c.Function.Arguments,
+		})
+	}
+	encoded, err := json.Marshal(list)
+	if err != nil {
+		return ""
+	}
+	return "[Client Tool Calls] " + string(encoded)
+}
+
+// toolResultName names the call a tool result answers.
+func toolResultName(m upstream.Message) string {
+	if m.Name != "" {
+		return m.Name
+	}
+	return "tool"
+}
+
+var dataURLPattern = regexp.MustCompile(`^data:([-\w.+/]+);base64,(.*)$`)
+
+// mediaParts converts OpenAI image parts into the renderer media payload the
+// remote executor reads. Text-only requests contribute nothing.
+func mediaParts(req *upstream.ChatRequest) []any {
+	var out []any
+	for _, m := range req.Messages {
+		blocks, ok := m.Content.([]any)
+		if !ok {
+			continue
+		}
+		for _, raw := range blocks {
+			block, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if !strings.EqualFold(firstString(block, "type"), "image_url") {
+				continue
+			}
+			nested, _ := block["image_url"].(map[string]any)
+			url := firstString(nested, "url")
+			mime, data := "", ""
+			if matches := dataURLPattern.FindStringSubmatch(url); matches != nil {
+				mime, data = matches[1], matches[2]
+			}
+			if data == "" {
+				continue
+			}
+			if mime == "" {
+				mime = "image/png"
+			}
+			out = append(out, map[string]any{
+				"type":  "image_url",
+				"value": map[string]any{"mimeType": mime, "data": data},
+			})
+		}
+	}
+	return out
 }
 
 // flattenContent turns a message body into plain text. Structured parts keep
@@ -255,6 +356,9 @@ func (c *Client) remoteChat(ctx context.Context, acc *account.Account, req *upst
 			continue
 		}
 		name := normalizeEventName(firstNonEmpty(event, eventNameOf(obj)))
+		if c.cfg.DebugUpstream {
+			logx.Debugf("trae remote event %s: %s", name, debugJSON(obj))
+		}
 		done, err := c.applyRemoteEvent(name, obj, out, st)
 		if err != nil {
 			return out, err
@@ -364,17 +468,31 @@ func prefixDelta(prev, next string) string {
 	return next
 }
 
-// visibleText extracts the answer and reasoning snapshots from an event. The
-// current upstream layout keeps them in separate fields; the older layout put
-// the reasoning in "thought", which is why both are accepted.
+// visibleText extracts the answer and reasoning snapshots from an event.
+//
+// plan_item has two layouts, and the presence of the "reasoning_content" key is
+// what tells them apart: the current one ships the reply in "thought" (for
+// example thought="你好", reasoning_content="") while the trace lives in
+// "reasoning_content"; the older variant omits that key and puts the trace in
+// "thought". Reading "thought" as reasoning in the current layout turns the
+// answer into invisible reasoning and answers with an empty message.
 func visibleText(name string, obj map[string]any) (text, reasoning string) {
 	switch name {
 	case "plan_item":
-		text = firstString(obj, "content")
-		reasoning = firstString(obj, "reasoning_content", "reasoningContent")
-		if reasoning == "" {
-			reasoning = firstString(obj, "thought")
+		_, split := obj["reasoning_content"]
+		if !split {
+			_, split = obj["reasoningContent"]
 		}
+		if split {
+			reasoning = firstString(obj, "reasoning_content", "reasoningContent")
+			text = firstString(obj, "content")
+			if text == "" {
+				text = firstString(obj, "thought")
+			}
+			return text, reasoning
+		}
+		text = firstString(obj, "content")
+		reasoning = firstString(obj, "thought")
 		return text, reasoning
 	case "message", "assistant_message", "response", "text", "output":
 		return messageText(obj), messageReasoning(obj)
@@ -544,6 +662,36 @@ func rawJSON(obj map[string]any) string {
 	}
 	if len(b) > 512 {
 		return string(b[:512])
+	}
+	return string(b)
+}
+
+// jsonString renders a value as compact JSON.
+func jsonString(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// clipJSON bounds a debug dump of raw bytes.
+func clipJSON(b []byte, limit int) string {
+	if len(b) > limit {
+		return string(b[:limit]) + "…"
+	}
+	return string(b)
+}
+
+// debugJSON re-encodes an event for the debug log with a generous bound, so a
+// protocol drift can be diagnosed from the log alone.
+func debugJSON(obj map[string]any) string {
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return ""
+	}
+	if len(b) > 16*1024 {
+		return string(b[:16*1024]) + "…"
 	}
 	return string(b)
 }

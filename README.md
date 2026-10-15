@@ -273,7 +273,7 @@ CodeNexus/
 2. **P1 来源 A 适配** ✅ — WorkBuddy / CodeBuddy 上游实现（登录、签到、池调度、Chat）。
 3. **P2 来源 B 基础链路** ✅ — 浏览器授权 / 手工 / 环境变量认证 + Remote 端点 + 统一池/路由 + 流式对话。
 4. **P3 来源 B 认证补齐与风控** ✅ — 本机 `storage.json` 一键导入、`cli` 上游模式、签到与 `9074` 风控退避、回合级积分结算（三级取值 + 并发归属闸门）。
-5. **P4 协议超集与高级能力** 🚧 — **三客户端直连的协议面已补齐**：`/v1/chat/completions`、`/v1/messages`(+`count_tokens`)、`/v1/responses`（含 `previous_response_id` 内存 LRU）；用量/积分已落 SQLite（`usage_store`，默认保留 10 万条）并带面板「用量」页；剩真机探测项。
+5. **P4 协议超集与高级能力** ✅ — 三线协议入口真机验收通过（chat / messages / responses，含 `previous_response_id` 续链）；用量/积分落 SQLite + 面板「用量」页；真机探测修复 4 个协议缺陷（2 个上游行为开放项见 EXECUTION_PLAN §9.9）。
 6. **P5 统一面板 + 任务合并 + 配置热生效 + 凭证加密**。
 7. **P6 打包与发布** — Windows 单 exe 优先，跨平台构建。
 

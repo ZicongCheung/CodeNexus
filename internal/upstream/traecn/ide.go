@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
 	"github.com/ZicongCheung/CodeNexus/internal/account"
+	"github.com/ZicongCheung/CodeNexus/internal/logx"
 	"github.com/ZicongCheung/CodeNexus/internal/upstream"
 )
 
@@ -38,7 +40,7 @@ func (c *Client) agentChat(ctx context.Context, acc *account.Account, req *upstr
 	requestID := newUUID()
 
 	body := map[string]any{
-		"messages":    agentMessages(req),
+		"messages":    agentMessages(withRuntimePrompt(req)),
 		"config_name": modelName,
 		"model":       modelName,
 		"function":    agentFunction,
@@ -51,11 +53,17 @@ func (c *Client) agentChat(ctx context.Context, acc *account.Account, req *upstr
 	} else if c.cfg.MaxTokens > 0 {
 		body["max_tokens"] = c.cfg.MaxTokens
 	}
-	if len(req.Tools) > 0 {
-		body["tools"] = req.Tools
+	if native := nativeToolDefinitions(req.Tools); len(native) > 0 {
+		body["tools"] = native
 	}
 	if req.Raw != nil {
-		for _, key := range []string{"tool_choice", "parallel_tool_calls"} {
+		if v, ok := req.Raw["tool_choice"]; ok && v != nil {
+			// The native form is a string: auto/none/required or a tool name.
+			if choice := nativeToolChoice(v); choice != "" {
+				body["tool_choice"] = choice
+			}
+		}
+		for _, key := range []string{"parallel_tool_calls"} {
 			if v, ok := req.Raw[key]; ok && v != nil {
 				body[key] = v
 			}
@@ -65,6 +73,9 @@ func (c *Client) agentChat(ctx context.Context, acc *account.Account, req *upstr
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
+	}
+	if c.cfg.DebugUpstream {
+		logx.Debugf("trae agent request: %s", clipJSON(payload, 6*1024))
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint(agentChatPath), bytes.NewReader(payload))
 	if err != nil {
@@ -167,19 +178,14 @@ func (c *Client) agentChat(ctx context.Context, acc *account.Account, req *upstr
 }
 
 // agentMessages converts normalized messages into the upstream's shape. The
-// agent surface takes the OpenAI message array as-is, including tool roles and
-// structured content, so this is a pass-through with defaults filled in. The
-// tool call and its result are re-expanded here: they arrived as neutral fields,
-// and the upstream only understands the OpenAI spelling.
-func agentMessages(req *upstream.ChatRequest) []any {
-	out := make([]any, 0, len(req.Messages))
-	for _, m := range req.Messages {
-		msg := map[string]any{"role": m.Role}
-		if m.Content != nil {
-			msg["content"] = m.Content
-		} else {
-			msg["content"] = ""
-		}
+// native transport reads content as an array of blocks, never a bare string —
+// the upstream answers 4001 "cannot unmarshal string into ... content" for one —
+// so every body is wrapped here. Tool calls and their results are re-expanded
+// from the neutral fields, and an absent body stays null rather than "".
+func agentMessages(msgs []upstream.Message) []any {
+	out := make([]any, 0, len(msgs))
+	for _, m := range msgs {
+		msg := map[string]any{"role": m.Role, "content": ideNativeContent(m.Content)}
 		if m.Name != "" {
 			msg["name"] = m.Name
 		}
@@ -195,6 +201,86 @@ func agentMessages(req *upstream.ChatRequest) []any {
 		out = append(out, msg)
 	}
 	return out
+}
+
+// withRuntimePrompt prepends the system message that describes the caller's
+// own tools. The upstream agent only knows its registry of server-side tools,
+// so without it a caller tool is answered with "no such tool" instead of a
+// structured call.
+func withRuntimePrompt(req *upstream.ChatRequest) []upstream.Message {
+	if len(req.Tools) == 0 {
+		return req.Messages
+	}
+	var b strings.Builder
+	b.WriteString("You are Trae Code connected to the user's local application. The external client application that started this conversation provides the client tools below.\n")
+	b.WriteString("Caller client tools (JSON):\n")
+	b.WriteString(jsonString(nativeToolDefinitions(req.Tools)))
+	b.WriteString("\n")
+	b.WriteString("Use native function calling for these client tools: their definitions and input schemas are in the request's tools field.\n")
+	b.WriteString("Return structured tool calls with an exact declared function name and arguments matching its schema; do not emit tool-call markup or JSON tool blocks in the response text.\n")
+	b.WriteString("The external API client executes these calls. Wait for the matching tool result before continuing, and never substitute server-side tools to reach the caller's workspace.\n")
+	if req.Raw != nil {
+		if choice, ok := req.Raw["tool_choice"]; ok && choice != nil {
+			fmt.Fprintf(&b, "tool_choice: %s\n", jsonString(choice))
+		}
+		if parallel, ok := req.Raw["parallel_tool_calls"]; ok && parallel != nil {
+			fmt.Fprintf(&b, "parallel_tool_calls: %s\n", jsonString(parallel))
+		}
+	}
+	out := make([]upstream.Message, 0, len(req.Messages)+1)
+	out = append(out, upstream.Message{Role: "system", Content: b.String()})
+	return append(out, req.Messages...)
+}
+
+// ideNativeContent renders one message body in the native block shape: text
+// becomes a single text block, structured parts are normalized in place, and a
+// missing body is null.
+func ideNativeContent(content any) any {
+	switch v := content.(type) {
+	case nil:
+		return nil
+	case string:
+		if v == "" {
+			return nil
+		}
+		return []any{map[string]any{"type": "text", "text": v}}
+	case []any:
+		out := make([]any, 0, len(v))
+		for _, raw := range v {
+			switch block := raw.(type) {
+			case string:
+				out = append(out, map[string]any{"type": "text", "text": block})
+			case map[string]any:
+				kind := strings.ToLower(strings.TrimSpace(stringField(block, "type")))
+				if kind == "" || kind == "input_text" {
+					kind = "text"
+				}
+				copied := make(map[string]any, len(block))
+				for k, val := range block {
+					copied[k] = val
+				}
+				if kind == "text" {
+					copied["type"] = "text"
+					if _, ok := copied["text"]; !ok {
+						copied["text"] = stringField(block, "content")
+					}
+					delete(copied, "value")
+				}
+				out = append(out, copied)
+			default:
+				out = append(out, raw)
+			}
+		}
+		return out
+	default:
+		return []any{map[string]any{"type": "text", "text": fmt.Sprint(content)}}
+	}
+}
+
+// stringField reads a string field from a decoded JSON object.
+func stringField(m map[string]any, key string) string {
+	s, _ := m[key].(string)
+	return s
 }
 
 // agentText reads the answer and reasoning snapshots of one agent event.
@@ -385,6 +471,80 @@ func argumentsText(fn map[string]any) string {
 		}
 	}
 	return "{}"
+}
+
+// nativeToolDefinitions converts the caller's OpenAI tool definitions into the
+// native shape. The one difference is that `function.parameters` is a JSON
+// *string* here, not an object — the upstream's protobuf/JSON adapter rejects
+// an object with 4001.
+func nativeToolDefinitions(tools []any) []any {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make([]any, 0, len(tools))
+	for _, raw := range tools {
+		tool, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		function, ok := tool["function"].(map[string]any)
+		if !ok {
+			// The compact shape some clients use.
+			function = map[string]any{}
+			for _, key := range []string{"name", "description", "parameters", "strict"} {
+				if v, ok := tool[key]; ok {
+					function[key] = v
+				}
+			}
+		}
+		name := stringField(function, "name")
+		if name == "" {
+			continue
+		}
+		parameters := function["parameters"]
+		if parameters == nil {
+			parameters = map[string]any{}
+		}
+		if _, isStr := parameters.(string); !isStr {
+			parameters = jsonString(parameters)
+		}
+		fn := map[string]any{
+			"name":        name,
+			"description": stringField(function, "description"),
+			"parameters":  parameters,
+		}
+		if strict, ok := function["strict"]; ok {
+			fn["strict"] = strict
+		}
+		out = append(out, map[string]any{"type": "function", "function": fn})
+	}
+	return out
+}
+
+// nativeToolChoice maps an OpenAI tool_choice onto the native spelling, which
+// is a string: auto/none/required or the name of one declared tool.
+func nativeToolChoice(v any) string {
+	switch c := v.(type) {
+	case string:
+		switch strings.ToLower(strings.TrimSpace(c)) {
+		case "auto", "none", "required":
+			return strings.ToLower(strings.TrimSpace(c))
+		}
+		return strings.TrimSpace(c)
+	case map[string]any:
+		kind := strings.ToLower(strings.TrimSpace(stringField(c, "type")))
+		switch kind {
+		case "auto", "none", "required":
+			return kind
+		case "function", "custom", "tool":
+			name := stringField(c, "name")
+			if fn, ok := c["function"].(map[string]any); ok {
+				name = stringField(fn, "name")
+			}
+			return strings.TrimSpace(name)
+		}
+	}
+	return ""
 }
 
 // boolOf reports whether any of the named boolean fields is true.

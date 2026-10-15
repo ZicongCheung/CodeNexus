@@ -422,8 +422,16 @@ func TestRemoteChatStreamsSnapshotDeltas(t *testing.T) {
 		t.Fatalf("agent_type = %q, want %q", got, remoteAgent)
 	}
 	query, _ := msg["query"].(string)
-	if !strings.Contains(query, "User: hi") {
-		t.Fatalf("query must carry the flattened transcript, got %q", query)
+	var parts []map[string]any
+	if err := json.Unmarshal([]byte(query), &parts); err != nil {
+		t.Fatalf("query must be a JSON parts array, got %q: %v", query, err)
+	}
+	if len(parts) == 0 || parts[0]["type"] != "text" {
+		t.Fatalf("query parts = %#v", parts)
+	}
+	data, _ := parts[0]["data"].(map[string]any)
+	if content, _ := data["content"].(string); !strings.Contains(content, "hi") {
+		t.Fatalf("query must carry the flattened transcript, got %q", content)
 	}
 
 	events := s.saw("/api/remote/v1/chat_sessions/session-1/events")

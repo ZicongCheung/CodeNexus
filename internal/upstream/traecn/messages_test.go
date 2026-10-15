@@ -14,7 +14,7 @@ func TestAgentMessagesExpandsToolFields(t *testing.T) {
 		{Role: "assistant", ToolCalls: []upstream.ToolCall{upstream.NewToolCall(0, "call_1", "get_weather", "{}")}},
 		{Role: "tool", ToolCallID: "call_1", Content: "sunny"},
 	}}
-	out := agentMessages(req)
+	out := agentMessages(req.Messages)
 	if len(out) != 3 {
 		t.Fatalf("messages = %d", len(out))
 	}

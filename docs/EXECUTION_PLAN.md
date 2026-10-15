@@ -25,6 +25,7 @@
 | v1.10 | 2026-10-15 | #42 完成并入档；记录第三轮 P4 决策（`count_tokens` 估算 / 图片透传 / 校验从宽 / `signature` 空串 / 看门狗保活）；**按参考实现修订 ADR-48 为「形状严格、校验从宽」** | 张 |
 | v1.11 | 2026-10-15 | #41 完成并入档；记录第四轮 P4 决策（推理默认隐藏 / 孤儿工具输出保留为惰性块 / 工具类型全量 / LRU 参数与哨兵）；**P4 三客户端直连的协议面至此补齐** | 张 |
 | v1.12 | 2026-10-15 | #44 完成并入档；记录第五轮 P4 决策（纯 SQL 聚合 / 明细 10 万条 / 面板最小可用含趋势 / 与 reqlog 各司其职）；**P4 全部编码工作至此完成，仅剩真机探测项** | 张 |
+| v1.13 | 2026-10-15 | **P4 真机探测完成**（本机已登录 Trae CN，`auto` 一键导入 uid 2561221162711115）；发现并修复 **4 个真实协议缺陷**；三线协议入口真机验收通过；新增 `debug_upstream` 调试开关；遗留 2 个带证据的开放项（§9.9） | 张 |
 
 **阅读指引**
 
@@ -1087,7 +1088,41 @@ TraeWork（Trae 桌面 Agent 客户端）相关能力是**两件方向相反的�
 | 面板 API：`/panel/api/usage/{summary,daily,records}`（时间窗 1~366 天、明细支持线格式/模型/结果/时间区间过滤；未启用时返回 `available:false`） | `internal/panel/usage.go` | ✅ |
 | 面板「用量」页：总览卡 + 每日趋势柱状图 + 模型分布 + 可筛选明细表（接口/模型/结果），未启用时给出开启指引 | `web/src/App.svelte` → `internal/panel/dist` | ✅ |
 | 单测：落库/读回/积分事后改账、四类过滤、日聚合随改账自动正确且不串日、按条数裁剪丢最旧、nil 存储全 no-op | `internal/usagestore/usagestore_test.go` | ✅ |
-| 真机探测项（图片输入 / 1M Max / `reasoning_effort` / 三客户端实连） | P4 收尾 | ⏳ |
+| 真机探测与验收 | 见 §9.9（4 缺陷修复 + 三线入口验收 + 2 开放项） | ✅ |
+
+### 9.9 P4 真机探测纪实（as-built，2026-10-15）
+
+> 探测环境：本机已登录 Trae CN 桌面客户端，`POST /panel/api/auth/local` 一键导入（uid `2561221162711115`，含刷新令牌）；`upstream_mode=auto-route`；`debug_upstream=true` 抓取原始事件与出站请求体。
+
+**真机抓到并修复的 4 个协议缺陷**（全部有参考源码佐证 + 修复前后实测对照）：
+
+| # | 缺陷 | 根因（参考佐证） | 修复 | 修复后实测 |
+|---|---|---|---|---|
+| 1 | Remote 面**模型看不到用户消息**（reasoning 自述 "no user message content"，content 恒空） | 参考 `flatten_query`：`query` 是 **`[{"type":"text","data":{"content":…}}]` 分部件数组**的 JSON 串，我们发的是纯文本字符串（语法合法但被静默丢弃）；角色标注应为 `[System]`/`[Assistant]`/`[Client Tool Result: id name status=…]` | `encodeQuery` 重写为 parts 数组 + 参考的 transcript 标注 | content=`"你好"`，`previous_response_id` 续链能记住跨轮暗号 |
+| 2 | Agent 面 **4001**：`cannot unmarshal string into …messages.content of type []*LLMRawMessageContent` | 参考 `_ide_native_content`：原生面 content 必须是**块数组**（字符串 → `[{"type":"text","text":…}]`，缺失 → null） | `agentMessages` 走 `ideNativeContent` | Agent 面对话正常返回 |
+| 3 | plan_item **thought/reasoning 布局颠倒**（答案变成不可见推理，content 恒空） | 参考 `_web_plan_has_split_reasoning`：**以 `reasoning_content` 键是否存在区分布局**——现行布局 `thought`=正文快照、`reasoning_content`=思维链；旧布局 `thought`=思维链 | `visibleText` 按键存在性分派 | content 正确、reasoning 正确分离 |
+| 4 | Agent 面 **4001**：`tools.function.parameters` 类型错误；且**模型不知道调用方工具存在**（自述"当前环境没有该 MCP 工具"） | ①`FunctionDefinition.parameters` 是 **JSON 字符串**而非对象（`raw_client._native_tool_definition`）；②参考用 `_messages_with_client_runtime` **前置系统消息声明调用方工具** | `nativeToolDefinitions`（parameters 转字符串）+ `nativeToolChoice`（转 auto/none/required/工具名）+ `withRuntimePrompt`（前置调用方工具与原生调用指令） | 请求体形状与参考一致（出站转储核对） |
+
+**三线协议入口真机验收（全部通过）**：
+
+| 入口 | 实测 |
+|---|---|
+| `/v1/chat/completions` | 非流式 content=`"你好"`；流式 20 chunks 拼出 `"一、二、三！"`；`finish_reason`/`usage` 正确 |
+| `/v1/messages` | `type=message`、`stop_reason=end_turn`、text 块 + `usage` 正确；`count_tokens` 返回估算值 |
+| `/v1/responses` | `status=completed`、`output=[message]`；**`previous_response_id` 续链跨轮记住暗号（"苹果"）** |
+| 面板 | `auto` 一键导入 ✓；签到 `already signed in`（幂等）✓；reqlog/usage 落库 ✓ |
+
+**新增调试设施**：`upstreams.trae-cn.debug_upstream=true`（转储原始上游事件、出站请求体，16KB 截断）——协议漂移的排查入口。
+
+**遗留开放项（带证据，非阻塞 P4 归档）**：
+
+| 项 | 证据 | 状态 |
+|---|---|---|
+| **调用方工具在 SOLO Agent 面不被调用**：`tools`（parameters 已为字符串）、`tool_choice=工具名`、运行时系统提示三者均已正确发出（出站转储核对），模型仍答"当前环境没有该工具"并改用自己的联网搜索 | 出站请求体转储 + 模型回复原文 | **开放**。参考的 `tools` 请求形状已逐字段对齐；其测试也只断言请求形状、无真机调用证据。后续方向：①用参考实现直接对同一账号实测对照（排除上游按账号/模型灰度）；②确认是否需要额外的会话级工具注册端点 |
+| **图片输入上游未消费**：`initial_message.query` 已含参考同形的 renderer media block（`{"type":"image_url","value":{mimeType,data}}`），但 `glm-5v-turbo` 的回答与图片内容无关（幻觉描述无关场景） | query 转储（media part 在场）+ 1×1 红色像素与回答不符 | **开放**。同上，需对照实验定位是形状细节还是上游能力 |
+| 1M Max / `reasoning_effort` 映射 | 未测（需特定档位与模型） | 待后续真机窗口 |
+
+> 刻意不做：参考 `strip_reasoning_narration` 的"前导叙述剥离"启发式（约 90 行正则）——它服务于"推理与答案同字段"的旧布局；现行分离布局下答案干净（实测 `thought="你好"` 无叙述），引入会带来误删风险。若后续观察到叙述泄漏再移植。
 
 ### P5 · 统一面板重设计 + 任务合并 + 配置热生效
 

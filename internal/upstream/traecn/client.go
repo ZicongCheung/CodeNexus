@@ -94,6 +94,9 @@ type Config struct {
 	UsageBaseURL string
 	// Checkin tunes the daily check-in and its risk-control handling.
 	Checkin CheckinConfig
+	// DebugUpstream dumps every raw upstream event into the debug log. It is a
+	// troubleshooting aid for protocol drift, never a default.
+	DebugUpstream bool
 	// StateFile persists the check-in device generation and 9074 backoff. It is
 	// what keeps a rate-limited device id from being reused after a restart.
 	// Empty keeps the state in memory only.

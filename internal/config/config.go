@@ -189,6 +189,8 @@ type TraeCNConfig struct {
 	// auto-route (tools → IDE Agent, plain chat → Remote). The cli mode runs a
 	// local installation instead of calling the HTTP upstreams.
 	UpstreamMode string `json:"upstream_mode"`
+	// DebugUpstream dumps every raw Trae event into the debug log.
+	DebugUpstream bool `json:"debug_upstream"`
 	// AutoRoute enables the tools/chat split when UpstreamMode is auto-route.
 	AutoRoute bool `json:"auto_route"`
 

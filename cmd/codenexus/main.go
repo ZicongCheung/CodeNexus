@@ -146,6 +146,7 @@ func run(configPath string) error {
 			IDEVersion:     cfg.Upstreams.TraeCN.IDEVersion,
 			AppID:          cfg.Upstreams.TraeCN.AppID,
 			UpstreamMode:   cfg.Upstreams.TraeCN.UpstreamMode,
+			DebugUpstream:  cfg.Upstreams.TraeCN.DebugUpstream,
 			AutoRoute:      cfg.Upstreams.TraeCN.AutoRoute,
 			LocalDataDirs:  cfg.Upstreams.TraeCN.LocalDataDirs,
 			CLI: traecn.CLIConfig{
