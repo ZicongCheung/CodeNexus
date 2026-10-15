@@ -3,6 +3,7 @@ package panel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -359,4 +360,184 @@ func TestGrowthExecutorDoesNotBlockTheConsole(t *testing.T) {
 			t.Fatalf("incomplete action %+v", a)
 		}
 	}
+}
+
+// maintOnly is an adapter with a check-in and a balance but no growth surface,
+// which is what a source like Trae CN looks like. It deliberately implements
+// upstream.Maintenance and not upstream.Tasks.
+type maintOnly struct {
+	checkins int
+	balances int
+}
+
+func (m *maintOnly) Scope(*account.Account) upstream.TaskScope {
+	return upstream.TaskScope{Checkin: true, Balance: true}
+}
+
+func (m *maintOnly) Checkin(context.Context, *account.Account) (*upstream.CheckinResult, error) {
+	m.checkins++
+	return &upstream.CheckinResult{Credit: 5}, nil
+}
+
+func (m *maintOnly) Credits(context.Context, *account.Account, time.Duration) (*upstream.Credits, error) {
+	m.balances++
+	return &upstream.Credits{Remain: 40, Total: 100}, nil
+}
+
+// newMaintConsole wires a console whose only maintenance surface is the narrow
+// interface, so the panel has to route through it.
+func newMaintConsole(t *testing.T, m upstream.Maintenance) (*Console, *pool.Pool) {
+	t.Helper()
+	c, _, p := newConsole(t)
+	acc := &account.Account{Source: account.SourceTraeCN, UID: "u-1", Label: "trae", Enabled: true}
+	acc.SetCredentials("tok", "", "trae", 0)
+	p.Add(acc)
+
+	cfg := config.Default()
+	cfg.Schedule.Timezone = "Asia/Shanghai"
+	c.sched = scheduler.New(scheduler.Options{
+		Cfg:         cfg.Schedule,
+		Pool:        p,
+		Maintenance: func(upstream.Source) (upstream.Maintenance, bool) { return m, true },
+		Now:         time.Now,
+	})
+	return c, p
+}
+
+func TestPanelRoutesAMaintenanceOnlyAdapter(t *testing.T) {
+	m := &maintOnly{}
+	c, p := newMaintConsole(t, m)
+
+	if res := do(c, http.MethodPost, "/panel/api/accounts/u-1/checkin", ""); res.code != 200 {
+		t.Fatalf("checkin code = %d (%s)", res.code, res.body)
+	}
+	if m.checkins != 1 {
+		t.Fatalf("check-ins = %d, want 1", m.checkins)
+	}
+	// The check-in sweep also refreshes the balance, which is the observation
+	// the pool uses to lift a quota cooldown.
+	if m.balances != 1 {
+		t.Fatalf("balance reads = %d, want 1", m.balances)
+	}
+	if st := p.Describe()[0]; !st.CreditsKnown || st.Credits != 40 {
+		t.Fatalf("balance not recorded: %+v", st)
+	}
+
+	if res := do(c, http.MethodPost, "/panel/api/accounts/u-1/balance", ""); res.code != 200 {
+		t.Fatalf("balance code = %d (%s)", res.code, res.body)
+	}
+	if m.balances != 2 {
+		t.Fatalf("balance reads = %d, want 2", m.balances)
+	}
+
+	// A growth-only operation has nothing to run for this source, but that is
+	// not a failure: the console must not report one.
+	for _, op := range []string{"activity", "travel"} {
+		if res := do(c, http.MethodPost, "/panel/api/accounts/u-1/"+op, ""); res.code != 200 {
+			t.Fatalf("%s code = %d (%s)", op, res.code, res.body)
+		}
+	}
+
+	// The whole-pool sweep must reach it too.
+	m.checkins = 0
+	if res := do(c, http.MethodPost, "/panel/api/batch/checkin_all", ""); res.code != 200 {
+		t.Fatalf("checkin_all code = %d (%s)", res.code, res.body)
+	}
+	if m.checkins != 1 {
+		t.Fatalf("check-ins after the batch = %d, want 1", m.checkins)
+	}
+}
+
+// balanceOnly is an adapter with a credit balance but no check-in programme,
+// which is what an enterprise account looks like.
+type balanceOnly struct{ balances int }
+
+func (b *balanceOnly) Scope(*account.Account) upstream.TaskScope {
+	return upstream.TaskScope{Balance: true}
+}
+
+func (b *balanceOnly) Checkin(context.Context, *account.Account) (*upstream.CheckinResult, error) {
+	return nil, errors.New("no check-in programme")
+}
+
+func (b *balanceOnly) Credits(context.Context, *account.Account, time.Duration) (*upstream.Credits, error) {
+	b.balances++
+	return &upstream.Credits{Remain: 10, Total: 10}, nil
+}
+
+func TestAccountsReportTodayCheckinState(t *testing.T) {
+	m := &maintOnly{}
+	c, _ := newMaintConsole(t, m)
+
+	res := do(c, http.MethodGet, "/panel/api/accounts", "")
+	if res.code != 200 {
+		t.Fatalf("accounts code = %d (%s)", res.code, res.body)
+	}
+	before := accountRow(t, &res)
+	if before["checkin_applicable"] != true {
+		t.Fatalf("a check-in source must be reported as applicable: %v", before)
+	}
+	if before["checkin_done"] == true {
+		t.Fatalf("nothing has been signed in yet: %v", before)
+	}
+
+	res = do(c, http.MethodPost, "/panel/api/accounts/u-1/checkin", "")
+	if res.code != 200 {
+		t.Fatalf("checkin code = %d (%s)", res.code, res.body)
+	}
+	out := decode(t, &res)
+	if out["checkin_applicable"] != true || out["checkin_done"] != true {
+		t.Fatalf("the check-in must report itself done: %v", out)
+	}
+
+	res = do(c, http.MethodGet, "/panel/api/accounts", "")
+	after := accountRow(t, &res)
+	if after["checkin_done"] != true {
+		t.Fatalf("the listing must carry today's check-in state: %v", after)
+	}
+	if after["checkin_day"] == nil || after["checkin_day"] == "" {
+		t.Fatalf("the check-in day must be reported: %v", after)
+	}
+}
+
+func TestAccountsMarkASourceWithoutCheckinAsNotApplicable(t *testing.T) {
+	c, _ := newMaintConsole(t, &balanceOnly{})
+
+	res := do(c, http.MethodGet, "/panel/api/accounts", "")
+	row := accountRow(t, &res)
+	if row["checkin_applicable"] != false {
+		t.Fatalf("a source without a check-in must not claim one: %v", row)
+	}
+	if row["checkin_done"] != false {
+		t.Fatalf("checkin_done = %v, want false", row["checkin_done"])
+	}
+
+	// The operation still runs — the balance refresh is the useful half — but
+	// the response must not pretend a check-in happened.
+	res = do(c, http.MethodPost, "/panel/api/accounts/u-1/checkin", "")
+	if res.code != 200 {
+		t.Fatalf("checkin code = %d (%s)", res.code, res.body)
+	}
+	out := decode(t, &res)
+	if out["checkin_applicable"] != false || out["checkin_done"] != false {
+		t.Fatalf("response = %v", out)
+	}
+}
+
+// accountRow returns the first account of an accounts listing.
+func accountRow(t *testing.T, res *httptestResponse) map[string]any {
+	t.Helper()
+	if res.code != 200 {
+		t.Fatalf("code = %d (%s)", res.code, res.body)
+	}
+	out := decode(t, res)
+	rows, _ := out["accounts"].([]any)
+	if len(rows) == 0 {
+		t.Fatalf("no accounts in %v", out)
+	}
+	row, _ := rows[0].(map[string]any)
+	if row == nil {
+		t.Fatalf("account row is not an object: %v", rows[0])
+	}
+	return row
 }

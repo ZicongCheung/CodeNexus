@@ -79,6 +79,10 @@ type Options struct {
 	Cfg   config.ScheduleConfig
 	Pool  *pool.Pool
 	Tasks func(upstream.Source) (upstream.Tasks, bool)
+	// Maintenance resolves the narrower check-in and balance surface. It is
+	// consulted first so a source that has no growth features can still be
+	// scheduled; when nil the full Tasks lookup is used as a fallback.
+	Maintenance func(upstream.Source) (upstream.Maintenance, bool)
 	// Refresh performs the keep-alive token refresh. When nil the keep-alive
 	// family is skipped.
 	Refresh Refresher
@@ -94,12 +98,13 @@ type Options struct {
 
 // Scheduler drives the scheduled families.
 type Scheduler struct {
-	pool    *pool.Pool
-	tasks   func(upstream.Source) (upstream.Tasks, bool)
-	refresh Refresher
-	state   *State
-	logf    func(string, ...any)
-	now     func() time.Time
+	pool        *pool.Pool
+	tasks       func(upstream.Source) (upstream.Tasks, bool)
+	maintenance func(upstream.Source) (upstream.Maintenance, bool)
+	refresh     Refresher
+	state       *State
+	logf        func(string, ...any)
+	now         func() time.Time
 
 	growthOpts growth.Options
 
@@ -135,6 +140,7 @@ func New(opts Options) *Scheduler {
 	return &Scheduler{
 		pool:         opts.Pool,
 		tasks:        opts.Tasks,
+		maintenance:  opts.Maintenance,
 		refresh:      opts.Refresh,
 		state:        opts.State,
 		logf:         logf,
@@ -149,6 +155,16 @@ func New(opts Options) *Scheduler {
 
 // Location returns the timezone the schedule is evaluated in.
 func (s *Scheduler) Location() *time.Location { return s.loc }
+
+// LocalDay is today in the schedule's timezone. A completed check-in is stored
+// under this day, so the scheduler and the console agree on what "today" means
+// regardless of the host's clock.
+func (s *Scheduler) LocalDay() string {
+	s.mu.Lock()
+	loc := s.loc
+	s.mu.Unlock()
+	return s.now().In(loc).Format("2006-01-02")
+}
 
 // Reconfigure hot-updates the schedule and wakes the loops so the change takes
 // effect immediately.

@@ -13,6 +13,7 @@ import (
 
 	"github.com/ZicongCheung/CodeNexus/internal/account"
 	"github.com/ZicongCheung/CodeNexus/internal/authstore"
+	"github.com/ZicongCheung/CodeNexus/internal/pool"
 	"github.com/ZicongCheung/CodeNexus/internal/upstream"
 )
 
@@ -55,13 +56,129 @@ func onboardingModes() (device, manual []string) {
 	return device, manual
 }
 
+// localSources lists the sources able to import an account that is already
+// signed in on this machine.
+func localSources() []string {
+	out := []string{}
+	for _, s := range upstream.Sources() {
+		u, ok := upstream.Get(s)
+		if !ok {
+			continue
+		}
+		if _, ok := u.(upstream.LocalDiscoverer); ok {
+			out = append(out, string(s))
+		}
+	}
+	return out
+}
+
+// handleAuthLocal imports every usable credential found in the local desktop
+// client's store. It is one explicit action rather than a background scan:
+// reading another application's session should be something the user asked for.
+func (c *Console) handleAuthLocal(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Source string `json:"source"`
+	}
+	_ = decodeJSON(r, &req)
+	src := account.Source(strings.TrimSpace(req.Source))
+	if src == "" {
+		src = account.SourceTraeCN
+	}
+	u, ok := upstream.Get(src)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "source not registered: "+string(src))
+		return
+	}
+	discoverer, ok := u.(upstream.LocalDiscoverer)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "source does not support importing from this machine: "+string(src))
+		return
+	}
+	accounts, err := discoverer.DiscoverLocal()
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	added := make([]map[string]any, 0, len(accounts))
+	for _, acc := range accounts {
+		if err := c.persist(acc); err != nil {
+			writeErr(w, http.StatusInternalServerError, "save credential: "+err.Error())
+			return
+		}
+		added = append(added, map[string]any{
+			"uid":     acc.UID,
+			"label":   acc.Label,
+			"expires": acc.ExpiresAtValue(),
+		})
+	}
+	c.warn("console: imported %d account(s) from the local %s client", len(added), src)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":       true,
+		"source":   string(src),
+		"imported": added,
+	})
+}
+
+// accountView is the console's view of an account: the pool's status plus the
+// one derived fact the pool cannot know on its own, whether today's check-in is
+// done. The pool stores the day of the last successful check-in; "today" is the
+// schedule's, not the host clock's.
+type accountView struct {
+	pool.AccountStatus
+	CheckinDone bool `json:"checkin_done"`
+	// CheckinApplicable is false for a source with no check-in programme, so
+	// the console can say "not applicable" instead of implying a failure.
+	CheckinApplicable bool `json:"checkin_applicable"`
+}
+
+// accountViews lists the pool enriched with today's check-in state.
+func (c *Console) accountViews() []accountView {
+	if c.pool == nil {
+		return nil
+	}
+	statuses := c.pool.Describe()
+	out := make([]accountView, 0, len(statuses))
+	for _, st := range statuses {
+		out = append(out, accountView{
+			AccountStatus:     st,
+			CheckinDone:       c.checkinDone(st.Key),
+			CheckinApplicable: c.checkinApplicable(st.Key),
+		})
+	}
+	return out
+}
+
+// checkinDone reports whether today's check-in has completed for the account
+// holding the given pool key.
+func (c *Console) checkinDone(key string) bool {
+	if c.sched == nil || c.pool == nil {
+		return false
+	}
+	day := c.pool.CheckinDay(key)
+	return day != "" && day == c.sched.LocalDay()
+}
+
+// checkinApplicable reports whether the account has a check-in programme at
+// all, so the console can say "not applicable" instead of implying a failure.
+// It asks the scheduler, which is the same resolver the sweep itself uses.
+func (c *Console) checkinApplicable(key string) bool {
+	if c.sched == nil || c.pool == nil {
+		return false
+	}
+	acc, ok := c.pool.Get(key)
+	if !ok || acc == nil {
+		return false
+	}
+	return c.sched.CheckinScope(acc).Checkin
+}
+
 // handleAccounts lists the pool with runtime health, without credential data.
 func (c *Console) handleAccounts(w http.ResponseWriter, _ *http.Request) {
 	if c.pool == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": []any{}})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": c.pool.Describe()})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": c.accountViews()})
 }
 
 // handleRemoveAccount drops one account from the pool and from disk.

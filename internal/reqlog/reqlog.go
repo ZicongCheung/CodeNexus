@@ -56,7 +56,20 @@ type Event struct {
 	TotalTokens      int64 `json:"total_tokens,omitempty"`
 	// TokensPerSecond is the generation rate after the first byte.
 	TokensPerSecond float64 `json:"tokens_per_second,omitempty"`
+
+	// CreditsConsumed is the billable credit charge of the turn once it is
+	// known. It is filled in out of band, so the client never waits for a
+	// billing lookup.
+	CreditsConsumed float64 `json:"credits_consumed,omitempty"`
+	// CreditsSource names where CreditsConsumed came from: "upstream" when the
+	// response carried it, "session_usage" for a per-turn lookup, or "pending"
+	// when the upstream had not settled yet. It is empty until settlement runs.
+	CreditsSource string `json:"credits_source,omitempty"`
 }
+
+// maxPendingUpdates bounds the held mutations, so a settlement whose event
+// never arrives cannot grow the map without limit.
+const maxPendingUpdates = 64
 
 // Snapshot is the console view of the recorder.
 type Snapshot struct {
@@ -82,6 +95,10 @@ type Recorder struct {
 	ring []Event
 	next int
 	size int
+
+	// pending holds mutations that arrived before their event was recorded:
+	// an out-of-band credit settlement can finish first.
+	pending map[string]func(*Event)
 
 	inFlight    int64
 	completed   int64
@@ -139,6 +156,10 @@ func (r *Recorder) Record(e Event) {
 		r.ttfbCount++
 	}
 	r.ring[r.next] = e
+	if fn := r.pending[e.RequestID]; fn != nil {
+		fn(&r.ring[r.next])
+		delete(r.pending, e.RequestID)
+	}
 	r.next = (r.next + 1) % r.limit
 	if r.size < r.limit {
 		r.size++
@@ -154,6 +175,35 @@ func (r *Recorder) Record(e Event) {
 		logx.Infof("req %s %s model=%s account=%s status=%d outcome=%s dur=%dms ttfb=%dms tok=%d%s",
 			e.RequestID, e.Path, orDash(e.Model), label, e.Status, e.Outcome, e.DurationMS, e.TTFBMS, e.TotalTokens, rateSuffix(e.TokensPerSecond))
 	}
+}
+
+// Update applies fn to the event with the given request id. When that event has
+// not been recorded yet — an out-of-band settlement can finish before the
+// middleware writes the record — the mutation is held and applied on arrival.
+// Held mutations are bounded, and the oldest is dropped first.
+func (r *Recorder) Update(id string, fn func(*Event)) {
+	if r == nil || id == "" || fn == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := 0; i < r.size; i++ {
+		idx := (r.next - 1 - i + r.limit*2) % r.limit
+		if r.ring[idx].RequestID == id {
+			fn(&r.ring[idx])
+			return
+		}
+	}
+	if r.pending == nil {
+		r.pending = make(map[string]func(*Event), 8)
+	}
+	if len(r.pending) >= maxPendingUpdates {
+		for k := range r.pending {
+			delete(r.pending, k)
+			break
+		}
+	}
+	r.pending[id] = fn
 }
 
 // Snapshot returns the counters and the recent events, newest first.

@@ -74,6 +74,14 @@ type ChatResponse struct {
 	ToolCalls        []ToolCall
 	FinishReason     string
 	Usage            Usage
+	// TurnID is the upstream identifier of this turn, when the surface exposes
+	// one. A per-turn billing lookup is keyed on it.
+	TurnID string
+	// CreditsConsumed, when non-zero, is a charge the upstream already reported.
+	// It takes precedence over any out-of-band settlement.
+	CreditsConsumed float64
+	// CreditsSource names where CreditsConsumed came from.
+	CreditsSource string
 }
 
 // StreamDelta is one incremental chunk emitted by ChatStream.
@@ -83,6 +91,9 @@ type StreamDelta struct {
 	ToolCalls        []ToolCall
 	FinishReason     string
 	Usage            *Usage
+	// TurnID carries the upstream turn identifier so a streaming caller can
+	// settle the turn's charge after the stream ends.
+	TurnID string
 }
 
 // EmitFunc receives stream deltas in order.
@@ -145,6 +156,39 @@ type CredentialAcceptor interface {
 	// AcceptCredential validates and normalizes a pasted credential. uid and
 	// label may be empty and are then derived from the token when possible.
 	AcceptCredential(token, refreshToken, uid, label string) (*account.Account, error)
+}
+
+// LocalDiscoverer is implemented by adapters that can import credentials the
+// upstream's own desktop client already holds on this machine. It is a separate
+// interface from CredentialAcceptor because the two answer different questions:
+// one normalizes a secret the user handed over, the other finds one that is
+// already present. Reading another application's store is done only when the
+// user asks for it, never on a background scan.
+type LocalDiscoverer interface {
+	// DiscoverLocal returns accounts found on this machine. A returned error
+	// with no accounts means nothing usable was found, and its message explains
+	// why so the console can show it.
+	DiscoverLocal() ([]*account.Account, error)
+}
+
+// TurnUsage is implemented by adapters whose upstream bills per turn and can
+// report that charge after the answer has been produced. It is separate from
+// Credits because a charge is not a balance: settling a turn never rewrites the
+// account's remaining credit.
+type TurnUsage interface {
+	// TurnCredits returns the credit charge of one completed turn, together
+	// with a marker naming where the number came from. An upstream that has not
+	// settled the turn yet must report an error rather than zero, because a
+	// settled zero and an unsettled turn are different facts.
+	TurnCredits(ctx context.Context, acc *account.Account, turnID string) (float64, string, error)
+
+	// UsedCredits reports the credits the account has consumed in total, which
+	// is what a single turn's charge is measured against when the upstream has
+	// no per-turn bill to hand. It is a read-only observation: settling a turn
+	// must never write the result back into the account's balance, or an
+	// observation would end up steering routing. ok is false when the number
+	// cannot be read, which is not the same as a balance of zero.
+	UsedCredits(ctx context.Context, acc *account.Account) (float64, bool)
 }
 
 var registry = map[Source]Upstream{}

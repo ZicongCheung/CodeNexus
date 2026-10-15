@@ -372,9 +372,19 @@ func TestRemoteChatStreamsSnapshotDeltas(t *testing.T) {
 	// A heartbeat and a metadata event must not produce a delta, because the
 	// first byte is what decides whether failover is still possible.
 	var text, reasoning string
+	ids := 0
 	for _, d := range *deltas {
 		text += d.Content
 		reasoning += d.ReasoningContent
+		if d.TurnID != "" {
+			ids++
+			if d.TurnID != "message-1" {
+				t.Fatalf("turn id = %q, want message-1", d.TurnID)
+			}
+			if d.Content != "" || d.ReasoningContent != "" || len(d.ToolCalls) > 0 {
+				t.Fatalf("the turn id is announced on its own, got %+v", d)
+			}
+		}
 	}
 	if text != "你好，世界" {
 		t.Fatalf("streamed text = %q, want %q", text, "你好，世界")
@@ -382,8 +392,13 @@ func TestRemoteChatStreamsSnapshotDeltas(t *testing.T) {
 	if reasoning != "思考" {
 		t.Fatalf("streamed reasoning = %q, want %q", reasoning, "思考")
 	}
-	if len(*deltas) != 3 {
-		t.Fatalf("deltas = %d, want 3 (content, content, usage)", len(*deltas))
+	// Three payload deltas (content, content, usage) plus the leading
+	// id-only announcement the caller settles the charge against.
+	if len(*deltas) != 4 {
+		t.Fatalf("deltas = %d, want 4 (turn id, content, content, usage)", len(*deltas))
+	}
+	if ids != 1 {
+		t.Fatalf("turn id announced %d times, want 1", ids)
 	}
 
 	create := s.saw("/api/remote/v1/chat_sessions")

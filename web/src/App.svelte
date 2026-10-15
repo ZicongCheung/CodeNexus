@@ -12,7 +12,7 @@
   let tab = $state('accounts')
 
   // ── onboarding (device authorization) ────────────────────────────────────
-  let addMode = $state('device') // device | manual
+  let addMode = $state('device') // device | manual | local
   let authSource = $state('workbuddy')
   let authRealm = $state('cn')
   let authState = $state('')
@@ -20,6 +20,11 @@
   let authPhase = $state('idle') // idle | starting | waiting | done | error
   let authMsg = $state('')
   let pollTimer = null
+
+  // ── onboarding (import from this machine) ────────────────────────────────
+  let localSource = $state('')
+  let localPhase = $state('idle') // idle | running | done | error
+  let localMsg = $state('')
 
   // ── onboarding (pasted token) ────────────────────────────────────────────
   let tokenSource = $state('')
@@ -64,12 +69,16 @@
   // an interactive login must not appear in the device picker, and vice versa.
   const deviceSources = $derived(session?.device_sources ?? [])
   const manualSources = $derived(session?.manual_sources ?? [])
+  const localSources = $derived(session?.local_sources ?? [])
 
   const manualSource = $derived(
     manualSources.includes(tokenSource) ? tokenSource : manualSources[0] ?? '',
   )
   const deviceSource = $derived(
     deviceSources.includes(authSource) ? authSource : deviceSources[0] ?? '',
+  )
+  const localTarget = $derived(
+    localSources.includes(localSource) ? localSource : localSources[0] ?? '',
   )
   const tokenPlaceholder = $derived(
     manualSource === 'trae-cn' ? 'Cloud-IDE-JWT…' : '访问令牌',
@@ -250,6 +259,27 @@
     } catch (err) {
       tokenPhase = 'error'
       tokenMsg = err.message
+    }
+  }
+
+  // ── onboarding (import from this machine) ────────────────────────────────
+  async function importLocal() {
+    localPhase = 'running'
+    localMsg = ''
+    try {
+      const body = await api('/auth/local', {
+        method: 'POST',
+        body: JSON.stringify({ source: localTarget }),
+      })
+      const imported = body.imported ?? []
+      localPhase = 'done'
+      localMsg = imported.length
+        ? `已导入 ${imported.length} 个账号：${imported.map((a) => a.label || a.uid).join('、')}`
+        : '本机未找到可导入的账号'
+      await refresh()
+    } catch (err) {
+      localPhase = 'error'
+      localMsg = err.message
     }
   }
 
@@ -438,8 +468,17 @@
 
   async function accountOp(acc, op, label) {
     await guard(`${acc.uid}:${op}`, async () => {
-      await api(`/accounts/${encodeURIComponent(acc.uid)}/${op}`, { method: 'POST' })
-      taskMsg = `${acc.label || acc.uid}：${label} 已完成`
+      const body = await api(`/accounts/${encodeURIComponent(acc.uid)}/${op}`, { method: 'POST' })
+      const who = acc.label || acc.uid
+      if (op === 'checkin') {
+        // The sweep logs a failure and moves on, so report what happened: a
+        // rate-limited check-in stays open and the automatic retry picks it up.
+        taskMsg = body.checkin_done
+          ? `${who}：今日签到完成`
+          : `${who}：签到未生效（上游限流或设备风控），已排入自动重试`
+      } else {
+        taskMsg = `${who}：${label} 已完成`
+      }
       await loadAccounts()
       if (expanded[acc.uid]) await loadAccountTasks(acc.uid)
     })
@@ -448,7 +487,10 @@
   async function batch(op, label) {
     await guard(op, async () => {
       await api(`/batch/${op}`, { method: 'POST' })
-      taskMsg = `${label} 执行完成`
+      // A batch sweep reports nothing per account; the honest summary names the
+      // automatic retry instead of claiming every account succeeded.
+      taskMsg =
+        op === 'checkin_all' ? '全部签到已执行；未生效的会按退避自动重试' : `${label} 执行完成`
       await loadAccounts()
       await reloadExpanded()
       await loadQueue()
@@ -545,6 +587,18 @@
     const d = new Date(t)
     if (Number.isNaN(d.getTime())) return '—'
     return d.toLocaleTimeString()
+  }
+
+  // The charge of one turn, and where the number came from. An unsettled turn
+  // never reads as a free one, so "待结算" is shown instead of 0.
+  const creditSources = {
+    upstream: '上游随响应返回',
+    session_usage: '按回合查询上游用量',
+    pending: '上游尚未结算；稍后自动补齐',
+  }
+  function creditTitle(e) {
+    if (!e.credits_source) return '本次请求没有可结算的积分'
+    return creditSources[e.credits_source] || e.credits_source
   }
 </script>
 
@@ -728,28 +782,46 @@
           {@const st = accountTasks[acc.uid] || {}}
           <div class="card acc-card">
             <div class="acc-head">
-              <button class="link caret" onclick={() => toggleTasks(acc)}>
-                {expanded[acc.uid] ? '▾' : '▸'} {acc.label || acc.uid}
-              </button>
+              {#if acc.local}
+                <span class="caret">· {acc.label || acc.uid}</span>
+              {:else}
+                <button class="link caret" onclick={() => toggleTasks(acc)}>
+                  {expanded[acc.uid] ? '▾' : '▸'} {acc.label || acc.uid}
+                </button>
+              {/if}
               <span class="badge {health(acc).cls}">{health(acc).text}</span>
+              {#if acc.local}<span class="badge idle">本机</span>{/if}
               <span class="muted small">{acc.source}</span>
-              <span class="muted small">
-                额度 {acc.credits_known ? acc.credits : '—'}
-                {#if acc.expiring > 0} · {acc.expiring} 即将过期{/if}
-              </span>
+              {#if !acc.local}
+                <span class="muted small">
+                  额度 {acc.credits_known ? acc.credits : '—'}
+                  {#if acc.expiring > 0} · {acc.expiring} 即将过期{/if}
+                </span>
+              {/if}
               <span class="spacer"></span>
-              <button class="link" onclick={() => runAllTasks(acc)} disabled={!!opBusy}>执行全部</button>
-              <button class="link" onclick={() => acceptTask(acc, '')} disabled={!!opBusy}>接取全部</button>
-              <button class="link" onclick={() => accountOp(acc, 'checkin', '签到')} disabled={!!opBusy}>签到</button>
-              <button class="link" onclick={() => accountOp(acc, 'balance', '刷新额度')} disabled={!!opBusy}>额度</button>
-              <button class="link" onclick={() => accountOp(acc, 'keepalive', '保活')} disabled={!!opBusy}>保活</button>
-              <button
-                class="link"
-                onclick={() => accountOp(acc, acc.paused ? 'resume' : 'pause', acc.paused ? '恢复' : '暂停')}
-                disabled={!!opBusy}
-              >
-                {acc.paused ? '恢复' : '暂停'}
-              </button>
+              {#if !acc.local}
+                <button class="link" onclick={() => runAllTasks(acc)} disabled={!!opBusy}>执行全部</button>
+                <button class="link" onclick={() => acceptTask(acc, '')} disabled={!!opBusy}>接取全部</button>
+                {#if acc.checkin_applicable}
+                  <button
+                    class="link"
+                    onclick={() => accountOp(acc, 'checkin', '签到')}
+                    disabled={!!opBusy}
+                    title={acc.checkin_done ? '今日已签到；再点一次会重签并刷新额度' : ''}
+                  >
+                    {acc.checkin_done ? '已签' : '签到'}
+                  </button>
+                {/if}
+                <button class="link" onclick={() => accountOp(acc, 'balance', '刷新额度')} disabled={!!opBusy}>额度</button>
+                <button class="link" onclick={() => accountOp(acc, 'keepalive', '保活')} disabled={!!opBusy}>保活</button>
+                <button
+                  class="link"
+                  onclick={() => accountOp(acc, acc.paused ? 'resume' : 'pause', acc.paused ? '恢复' : '暂停')}
+                  disabled={!!opBusy}
+                >
+                  {acc.paused ? '恢复' : '暂停'}
+                </button>
+              {/if}
             </div>
 
             {#if opBusy.startsWith(acc.uid + ':')}
@@ -839,6 +911,7 @@
             <span>状态</span>
             <span>耗时</span>
             <span>Token</span>
+            <span>积分</span>
           </div>
           {#if logEvents.length === 0}
             <div class="row logrow"><span class="muted small">暂无请求记录</span></div>
@@ -857,6 +930,15 @@
               <span class="muted small">
                 {e.total_tokens || '—'}{#if e.tokens_per_second} · {e.tokens_per_second}tok/s{/if}
               </span>
+              <span class="muted small" title={creditTitle(e)}>
+                {#if e.credits_source === 'pending'}
+                  <span class="badge warn">待结算</span>
+                {:else if e.credits_source}
+                  {e.credits_consumed ?? 0}
+                {:else}
+                  —
+                {/if}
+              </span>
             </div>
           {/each}
         </div>
@@ -871,9 +953,31 @@
         {#if manualSources.length}
           <button class:active={addMode === 'manual'} onclick={() => (addMode = 'manual')}>粘贴令牌</button>
         {/if}
+        {#if localSources.length}
+          <button class:active={addMode === 'local'} onclick={() => (addMode = 'local')}>从本机导入</button>
+        {/if}
       </div>
 
-      {#if addMode === 'device' || !manualSources.length}
+      {#if addMode === 'local'}
+      <h2>从本机导入</h2>
+      <p class="muted">
+        读取本机已登录客户端的会话，直接导入账号，无需复制令牌。这是一次显式操作：仅在你点击后读取，不会在后台扫描。
+      </p>
+      {#if localSources.length > 1}
+        <label class="stack">
+          <span>来源</span>
+          <select bind:value={localSource}>
+            {#each localSources as s}<option value={s}>{s}</option>{/each}
+          </select>
+        </label>
+      {/if}
+      <button class="primary" onclick={importLocal} disabled={localPhase === 'running'}>
+        {localPhase === 'running' ? '读取中…' : '从本机导入账号'}
+      </button>
+      {#if localMsg}
+        <p class="msg {localPhase === 'error' ? 'error' : 'ok'}">{localMsg}</p>
+      {/if}
+      {:else if addMode === 'device' || !manualSources.length}
       <h2>设备授权登录</h2>
       <p class="muted">
         选择来源与区域后开始授权，浏览器会打开登录页；完成后此页面自动接收账号，无需手工粘贴令牌。
@@ -1257,6 +1361,6 @@
   .stat-card .v { font-size: 1.15rem; font-weight: 700; font-variant-numeric: tabular-nums; }
   .stat-card .v em { font-style: normal; font-size: .7rem; font-weight: 500; color: var(--muted); margin-left: .15rem; }
 
-  .row.logrow { grid-template-columns: 1fr 1.7fr 1.2fr 1.1fr .7fr 1.3fr .8fr; }
+  .row.logrow { grid-template-columns: 1fr 1.7fr 1.2fr 1.1fr .7fr 1.3fr .8fr .9fr; }
   .row.loghead { background: var(--bg); color: var(--muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .04em; }
 </style>

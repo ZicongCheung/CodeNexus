@@ -17,7 +17,7 @@ type emitTracker struct {
 }
 
 func (t *emitTracker) write(d upstream.StreamDelta) error {
-	if d.Content == "" && d.ReasoningContent == "" && len(d.ToolCalls) == 0 && d.Usage == nil {
+	if d.Content == "" && d.ReasoningContent == "" && len(d.ToolCalls) == 0 && d.Usage == nil && d.TurnID == "" {
 		return nil
 	}
 	t.emitted = true
@@ -49,9 +49,15 @@ func (c *Client) ChatStream(ctx context.Context, acc *account.Account, req *upst
 // upstream needs: a model the agent surface refuses is usually served by the
 // remote surface, so the request is retried there once, on the same account and
 // only while nothing has been emitted yet.
+//
+// The cli mode is checked first because it has no credential at all: the local
+// CLI owns the session, so requiring a token would reject every request.
 func (c *Client) chat(ctx context.Context, acc *account.Account, req *upstream.ChatRequest, t *emitTracker) (*upstream.ChatResponse, error) {
 	if req == nil {
 		return nil, upstream.NewError(upstream.KindBadRequest, 0, "trae: empty request")
+	}
+	if c.cfg.UpstreamMode == "cli" {
+		return c.cliChat(ctx, req, t.write)
 	}
 	if acc == nil || strings.TrimSpace(acc.Token()) == "" {
 		return nil, upstream.NewError(upstream.KindAuth, 0, "trae: no credential")

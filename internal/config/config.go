@@ -62,6 +62,13 @@ type ScheduleConfig struct {
 	BalanceRefreshEnabled bool `json:"balance_refresh_enabled"`
 	BalanceRefreshMinutes int  `json:"balance_refresh_minutes"`
 
+	// CheckinRetryEnabled re-runs the check-in for accounts that have not
+	// completed today's, so an account the upstream throttled at the slot still
+	// gets in later the same day. The adapter's own backoff is what keeps the
+	// retries from hammering upstream.
+	CheckinRetryEnabled bool `json:"checkin_retry_enabled"`
+	CheckinRetrySeconds int  `json:"checkin_retry_seconds"`
+
 	// IncludeDisabledInTasks lets the credential-maintenance tasks (check-in,
 	// activity, keep-alive, balance) also run for administratively disabled
 	// accounts. Disabled accounts still never serve traffic.
@@ -162,11 +169,13 @@ type WorkBuddyConfig struct {
 // TraeCNConfig configures the Trae CN upstream.
 type TraeCNConfig struct {
 	Enabled bool `json:"enabled"`
-	// AuthSource selects the interactive/credential source: manual, env,
-	// web-login. The auto (local storage.json) and cli sources arrive later.
+	// AuthSource records how accounts are expected to arrive: manual, env,
+	// web-login or auto (the local client's store). It is informational — every
+	// registered path stays available in the console.
 	AuthSource string `json:"auth_source"`
-	// UpstreamMode pins the executor: remote, solo, ide, work-agent, or
-	// auto-route (tools → IDE Agent, plain chat → Remote).
+	// UpstreamMode pins the executor: remote, solo, ide, work-agent, cli, or
+	// auto-route (tools → IDE Agent, plain chat → Remote). The cli mode runs a
+	// local installation instead of calling the HTTP upstreams.
 	UpstreamMode string `json:"upstream_mode"`
 	// AutoRoute enables the tools/chat split when UpstreamMode is auto-route.
 	AutoRoute bool `json:"auto_route"`
@@ -177,6 +186,12 @@ type TraeCNConfig struct {
 	RemoteBaseURL string `json:"remote_base_url"`
 	// AuthBaseURL serves the OAuth token exchange.
 	AuthBaseURL string `json:"auth_base_url"`
+	// UGBaseURL serves the daily check-in API.
+	UGBaseURL string `json:"ug_base_url"`
+	// PayBaseURL serves the entitlement-usage (credit balance) API.
+	PayBaseURL string `json:"pay_base_url"`
+	// UsageBaseURL serves the per-turn commercial usage API.
+	UsageBaseURL string `json:"usage_base_url"`
 	// AuthorizeURL is the page the interactive login opens.
 	AuthorizeURL string `json:"authorize_url"`
 	// ClientID is sent with the token exchange.
@@ -197,6 +212,65 @@ type TraeCNConfig struct {
 	AppVersion  string `json:"app_version"`
 	IDEVersion  string `json:"ide_version"`
 	AppID       string `json:"app_id"`
+
+	// LocalDataDirs overrides where the desktop client's store is looked for
+	// when importing from this machine. Empty derives the platform defaults.
+	LocalDataDirs []string `json:"local_data_dirs,omitempty"`
+	// CLI configures the local-CLI executor (UpstreamMode: cli).
+	CLI TraeCLIConfig `json:"cli"`
+	// Checkin configures the daily check-in and its risk-control handling.
+	Checkin CheckinConfig `json:"checkin"`
+}
+
+// TraeCLIConfig configures the local-CLI executor. Zero values take the
+// built-in defaults the adapter ships.
+type TraeCLIConfig struct {
+	// Command overrides the executable. Empty searches the built-in names.
+	Command string `json:"command,omitempty"`
+	// Args replaces the built-in base arguments (default "-p").
+	Args []string `json:"args,omitempty"`
+	// WorkDir isolates the child process.
+	WorkDir string `json:"work_dir,omitempty"`
+	// ModelMode is how the model reaches the CLI: default, config, flag, none.
+	ModelMode string `json:"model_mode,omitempty"`
+	// OutputMode is "json" (structured, default) or "text".
+	OutputMode string `json:"output_mode,omitempty"`
+	// PromptStdin sends the prompt on stdin instead of as an argument.
+	PromptStdin bool `json:"prompt_stdin,omitempty"`
+	// MaxConcurrency caps simultaneous child processes.
+	MaxConcurrency int `json:"max_concurrency,omitempty"`
+	// TimeoutSeconds bounds the silence between two reads from the child.
+	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+	// DisableTools denies the built-in tool set. Nil means enabled, which is the
+	// safe default for a proxy that would otherwise run commands on this host.
+	DisableTools *bool `json:"disable_tools,omitempty"`
+	// DisallowedTools adds to the built-in deny list.
+	DisallowedTools []string `json:"disallowed_tools,omitempty"`
+	// MaxMessages and MaxPromptChars bound the serialized transcript.
+	MaxMessages    int `json:"max_messages,omitempty"`
+	MaxPromptChars int `json:"max_prompt_chars,omitempty"`
+}
+
+// CheckinConfig configures the daily check-in and its risk-control handling.
+type CheckinConfig struct {
+	// Enabled turns the daily sweep on.
+	Enabled bool `json:"enabled"`
+	// At is the local time of day the sweep runs, "HH:MM".
+	At string `json:"at"`
+	// IntervalSeconds spaces out the claims of one sweep. The upstream throttles
+	// a source by device, so back-to-back claims from one machine are unwise.
+	IntervalSeconds int `json:"interval_seconds"`
+	// RetryAfterSeconds is the base of the 9074 backoff.
+	RetryAfterSeconds int `json:"retry_after_seconds"`
+	// MaxBackoffSeconds caps that backoff.
+	MaxBackoffSeconds int `json:"max_backoff_seconds"`
+	// BackoffExponentCap bounds the doubling so a long 9074 streak settles at
+	// minutes rather than parking on the ceiling.
+	BackoffExponentCap int `json:"backoff_exponent_cap"`
+	// RotateDeviceID lets a 9074 rotate the derived device id and retry once.
+	RotateDeviceID *bool `json:"rotate_device_id,omitempty"`
+	// DeviceIDs pins a device id per account, disabling rotation when set.
+	DeviceIDs map[string]string `json:"device_ids,omitempty"`
 }
 
 // Default returns the built-in defaults.
@@ -240,6 +314,8 @@ func Default() Config {
 			GrowthEnabled:         true,
 			BalanceRefreshEnabled: true,
 			BalanceRefreshMinutes: 5,
+			CheckinRetryEnabled:   true,
+			CheckinRetrySeconds:   60,
 			CatchUpOnStart:        true,
 			AccountDelayMS:        1500,
 			ExpiringSoonHours:     168,
@@ -255,6 +331,9 @@ func Default() Config {
 				BaseURL:        "https://trae-api-cn.mchost.guru",
 				RemoteBaseURL:  "https://trae-api-cn.mchost.guru/api/remote/v1",
 				AuthBaseURL:    "https://api.trae.cn",
+				UGBaseURL:      "https://api.trae.cn",
+				PayBaseURL:     "https://api.trae.cn",
+				UsageBaseURL:   "https://api5-normal.mchost.guru",
 				AuthorizeURL:   "https://www.trae.cn/authorization",
 				ClientID:       "ono9krqynydwx5",
 				TimeoutSeconds: 120,
@@ -265,10 +344,33 @@ func Default() Config {
 				AppVersion:     "3.3.65",
 				IDEVersion:     "3.3.67",
 				AppID:          "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8",
+				CLI: TraeCLIConfig{
+					Args:           []string{"-p"},
+					ModelMode:      "default",
+					OutputMode:     "json",
+					MaxConcurrency: 2,
+					TimeoutSeconds: 300,
+					DisableTools:   boolPtr(true),
+					MaxMessages:    60,
+					MaxPromptChars: 20000,
+				},
+				Checkin: CheckinConfig{
+					Enabled:            true,
+					At:                 "08:30",
+					IntervalSeconds:    60,
+					RetryAfterSeconds:  60,
+					MaxBackoffSeconds:  3600,
+					BackoffExponentCap: 3,
+					RotateDeviceID:     boolPtr(true),
+				},
 			},
 		},
 	}
 }
+
+// boolPtr is a helper for the optional booleans in the config, where absence
+// has to be distinguishable from an explicit false.
+func boolPtr(v bool) *bool { return &v }
 
 // Load reads config from path. When the file is absent it writes a default file
 // (including a fresh random api_key) and returns it; the caller is expected to
@@ -392,6 +494,9 @@ func (c *Config) normalizeTrae() {
 		{&t.BaseURL, d.BaseURL},
 		{&t.RemoteBaseURL, d.RemoteBaseURL},
 		{&t.AuthBaseURL, d.AuthBaseURL},
+		{&t.UGBaseURL, d.UGBaseURL},
+		{&t.PayBaseURL, d.PayBaseURL},
+		{&t.UsageBaseURL, d.UsageBaseURL},
 		{&t.AuthorizeURL, d.AuthorizeURL},
 		{&t.ClientID, d.ClientID},
 		{&t.DeviceBrand, d.DeviceBrand},
@@ -415,13 +520,78 @@ func (c *Config) normalizeTrae() {
 		t.WebLoginPort = 0
 	}
 	switch t.UpstreamMode {
-	case "remote", "solo", "ide", "work-agent", "auto-route":
+	case "remote", "solo", "ide", "work-agent", "cli", "auto-route":
 	default:
 		t.UpstreamMode = "auto-route"
 	}
 	if t.UpstreamMode == "auto-route" {
 		t.AutoRoute = true
 	}
+	c.normalizeTraeCLI()
+	c.normalizeTraeCheckin()
+}
+
+// normalizeTraeCLI fills the local-CLI executor defaults and clamps its bounds.
+func (c *Config) normalizeTraeCLI() {
+	cli := &c.Upstreams.TraeCN.CLI
+	d := Default().Upstreams.TraeCN.CLI
+	if len(cli.Args) == 0 {
+		cli.Args = d.Args
+	}
+	if strings.TrimSpace(cli.ModelMode) == "" {
+		cli.ModelMode = d.ModelMode
+	}
+	if strings.TrimSpace(cli.OutputMode) == "" {
+		cli.OutputMode = d.OutputMode
+	}
+	if cli.MaxConcurrency <= 0 {
+		cli.MaxConcurrency = d.MaxConcurrency
+	}
+	if cli.TimeoutSeconds <= 0 {
+		cli.TimeoutSeconds = d.TimeoutSeconds
+	}
+	if cli.DisableTools == nil {
+		cli.DisableTools = d.DisableTools
+	}
+	if cli.MaxMessages <= 0 {
+		cli.MaxMessages = d.MaxMessages
+	}
+	if cli.MaxPromptChars <= 0 {
+		cli.MaxPromptChars = d.MaxPromptChars
+	}
+}
+
+// normalizeTraeCheckin fills the check-in defaults, rejecting a malformed time
+// so the sweep cannot be scheduled at an undefined moment.
+func (c *Config) normalizeTraeCheckin() {
+	ck := &c.Upstreams.TraeCN.Checkin
+	d := Default().Upstreams.TraeCN.Checkin
+	if _, err := parseClock(ck.At); err != nil {
+		ck.At = d.At
+	}
+	if ck.IntervalSeconds <= 0 {
+		ck.IntervalSeconds = d.IntervalSeconds
+	}
+	if ck.RetryAfterSeconds <= 0 {
+		ck.RetryAfterSeconds = d.RetryAfterSeconds
+	}
+	if ck.MaxBackoffSeconds <= 0 {
+		ck.MaxBackoffSeconds = d.MaxBackoffSeconds
+	}
+	if ck.MaxBackoffSeconds < ck.RetryAfterSeconds {
+		ck.MaxBackoffSeconds = ck.RetryAfterSeconds
+	}
+	if ck.BackoffExponentCap <= 0 {
+		ck.BackoffExponentCap = d.BackoffExponentCap
+	}
+	if ck.RotateDeviceID == nil {
+		ck.RotateDeviceID = d.RotateDeviceID
+	}
+}
+
+// parseClock validates an "HH:MM" time of day.
+func parseClock(v string) (time.Time, error) {
+	return time.Parse("15:04", strings.TrimSpace(v))
 }
 
 // normalizeSchedule fills defaults and validates the scheduler section. Hours
@@ -440,6 +610,9 @@ func (c *Config) normalizeSchedule() {
 	s.GrowthHours = normalizeHours(s.GrowthHours, []int{1})
 	if s.BalanceRefreshMinutes <= 0 {
 		s.BalanceRefreshMinutes = 5
+	}
+	if s.CheckinRetrySeconds <= 0 {
+		s.CheckinRetrySeconds = 60
 	}
 	if s.AccountDelayMS < 0 {
 		s.AccountDelayMS = 0

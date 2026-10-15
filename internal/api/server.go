@@ -43,12 +43,13 @@ type Server struct {
 	refresher Refresher
 	recorder  *reqlog.Recorder
 	router    *modelRouter
+	gate      *snapshotGate
 	root      http.Handler
 }
 
 // NewServer builds the HTTP handler. panel may be nil to disable the console.
 func NewServer(cfg *config.Config, p *pool.Pool, panel http.Handler, opts ...Option) *Server {
-	s := &Server{cfg: cfg, pool: p, panel: panel}
+	s := &Server{cfg: cfg, pool: p, panel: panel, gate: newSnapshotGate()}
 	for _, o := range opts {
 		if o != nil {
 			o(s)

@@ -211,7 +211,14 @@ func (c *Client) remoteChat(ctx context.Context, acc *account.Account, req *upst
 		return nil, upstream.ClassifyHTTP(resp.StatusCode, string(raw))
 	}
 
-	out := &upstream.ChatResponse{ID: sess.SessionID, Model: req.Model}
+	out := &upstream.ChatResponse{ID: sess.SessionID, Model: req.Model, TurnID: sess.MessageID}
+	// Announce the turn id before any content so a streaming caller learns what
+	// to settle the charge against even if the answer is long.
+	if emit != nil {
+		if err := emit(upstream.StreamDelta{TurnID: sess.MessageID}); err != nil {
+			return nil, err
+		}
+	}
 	st := &snapshotState{emit: emit}
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)

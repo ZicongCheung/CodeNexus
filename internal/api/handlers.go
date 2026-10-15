@@ -123,6 +123,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	hint := hintFrom(r)
 	hint.Model = model
 	hint.Stream = stream
+	// Every path out of this handler must retire the attribution window, and a
+	// window that settlement took over is already cleared, so this is a no-op
+	// on the normal paths and the only release on the abandoned ones.
+	defer hint.releaseSnapshot()
 
 	sources, modelName, err := s.router.Plan(model)
 	if err != nil {
@@ -174,17 +178,24 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 		hint.Attempts = i + 1
 		hint.Account = accountLabel(lease.Account)
+		// Open the credit window before the attempt so the reading that opens
+		// it is taken from the account that is about to serve the turn.
+		s.beginSettlement(hint, u, lease.Account)
 
 		if stream {
-			emitted, serr := s.streamChat(w, r, u, lease.Account, req, model)
+			emitted, turnID, serr := s.streamChat(w, r, u, lease.Account, req, model)
 			if serr == nil {
 				lease.Succeed()
+				hint.TurnID = turnID
+				s.settleCredits(hint, u, lease.Account)
 				return
 			}
 			if !emitted && s.tryRefresh(r.Context(), lease.Account, serr, refreshed) {
-				emitted, serr = s.streamChat(w, r, u, lease.Account, req, model)
+				emitted, turnID, serr = s.streamChat(w, r, u, lease.Account, req, model)
 				if serr == nil {
 					lease.Succeed()
+					hint.TurnID = turnID
+					s.settleCredits(hint, u, lease.Account)
 					return
 				}
 			}
@@ -211,7 +222,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 				Completion: int64(resp.Usage.CompletionTokens),
 				Total:      int64(resp.Usage.TotalTokens),
 			}
+			hint.TurnID = resp.TurnID
+			hint.Credits = resp.CreditsConsumed
+			hint.CreditsSource = resp.CreditsSource
 			writeJSON(w, http.StatusOK, nonStreamPayload(resp, model))
+			s.settleCredits(hint, u, lease.Account)
 			return
 		}
 		if s.tryRefresh(r.Context(), lease.Account, cerr, refreshed) {
@@ -222,7 +237,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 					Completion: int64(resp.Usage.CompletionTokens),
 					Total:      int64(resp.Usage.TotalTokens),
 				}
+				hint.TurnID = resp.TurnID
+				hint.Credits = resp.CreditsConsumed
+				hint.CreditsSource = resp.CreditsSource
 				writeJSON(w, http.StatusOK, nonStreamPayload(resp, model))
+				s.settleCredits(hint, u, lease.Account)
 				return
 			}
 		}
@@ -260,16 +279,18 @@ func (s *Server) tryRefresh(ctx context.Context, acc *account.Account, err error
 
 // streamChat forwards a streaming completion. It reports whether any bytes were
 // sent to the client, which decides whether a retry on another account is still
-// possible. When the failure happens after the first byte it writes the error
-// into the stream and concludes it.
-func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, u upstream.Upstream, acc *account.Account, req *upstream.ChatRequest, clientModel string) (bool, error) {
+// possible, and the upstream turn id when the stream carried one. When the
+// failure happens after the first byte it writes the error into the stream and
+// concludes it.
+func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, u upstream.Upstream, acc *account.Account, req *upstream.ChatRequest, clientModel string) (bool, string, error) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		return false, errors.New("streaming unsupported")
+		return false, "", errors.New("streaming unsupported")
 	}
 	h := w.Header()
 	id := "chatcmpl-stream"
 	started := false
+	turnID := ""
 	begin := func() {
 		h.Set("Content-Type", "text/event-stream")
 		h.Set("Cache-Control", "no-cache")
@@ -278,6 +299,15 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, u upstream.U
 		w.WriteHeader(http.StatusOK)
 	}
 	emit := func(d upstream.StreamDelta) error {
+		if turnID == "" && d.TurnID != "" {
+			turnID = d.TurnID
+		}
+		// A settlement-only delta tells us what to bill against and carries
+		// nothing the client should see.
+		if d.Content == "" && d.ReasoningContent == "" && len(d.ToolCalls) == 0 &&
+			d.Usage == nil && d.FinishReason == "" {
+			return nil
+		}
 		if !started {
 			started = true
 			begin()
@@ -291,19 +321,19 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, u upstream.U
 
 	if err := u.ChatStream(r.Context(), acc, req, emit); err != nil {
 		if !started {
-			return false, err
+			return false, turnID, err
 		}
 		_, _ = fmt.Fprintf(w, "data: %s\n\n", errorChunkPayload(id, clientModel, err.Error()))
 		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 		flusher.Flush()
-		return true, err
+		return true, turnID, err
 	}
 	if !started {
 		begin()
 	}
 	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()
-	return started, nil
+	return started, turnID, nil
 }
 
 func writePoolError(w http.ResponseWriter, err error) {

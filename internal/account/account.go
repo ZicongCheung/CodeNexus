@@ -44,6 +44,12 @@ type Account struct {
 	// one injected through the environment).
 	Ephemeral bool `json:"-"`
 
+	// Local marks an entry that stands for something on this machine rather than
+	// a credential: the local CLI executor. It has no token to refresh or bill,
+	// so it is skipped by refresh and persistence, and the console badges it
+	// instead of showing an empty quota.
+	Local bool `json:"local,omitempty"`
+
 	mu sync.RWMutex
 }
 
@@ -134,6 +140,7 @@ func (a *Account) Snapshot() Account {
 		Domain:       a.Domain,
 		ExpiresAt:    a.ExpiresAt,
 		Ephemeral:    a.Ephemeral,
+		Local:        a.Local,
 	}
 }
 

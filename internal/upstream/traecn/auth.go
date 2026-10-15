@@ -129,9 +129,15 @@ func nestedString(m map[string]any, path ...string) string {
 
 // Refresh implements upstream.Upstream. An account without a refresh token
 // cannot be renewed silently; the caller reports it as needing a new login.
+//
+// In cli mode there is nothing to renew: the local CLI holds its own session, so
+// a refresh is a no-op rather than an auth failure that would disable the entry.
 func (c *Client) Refresh(ctx context.Context, acc *account.Account) error {
 	if acc == nil {
 		return ErrNoCredential
+	}
+	if c.cfg.UpstreamMode == "cli" {
+		return nil
 	}
 	rt := strings.TrimSpace(acc.RefreshTokenValue())
 	if rt == "" {

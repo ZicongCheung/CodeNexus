@@ -15,6 +15,7 @@ type stateEntry struct {
 	Credits           int64  `json:"credits"`
 	CreditsKnown      bool   `json:"credits_known"`
 	CreditsTotal      int64  `json:"credits_total,omitempty"`
+	CreditsUnlimited  bool   `json:"credits_unlimited,omitempty"`
 	Expiring          int64  `json:"expiring,omitempty"`
 	EarliestAt        int64  `json:"earliest_at,omitempty"`
 	EarliestRemaining int64  `json:"earliest_remaining,omitempty"`
@@ -80,6 +81,7 @@ func (p *Pool) LoadState() error {
 		e.credits = se.Credits
 		e.creditsKnown = se.CreditsKnown
 		e.creditsTotal = se.CreditsTotal
+		e.creditsUnlimited = se.CreditsUnlimited
 		e.expiring = se.Expiring
 		e.earliestAt = fromUnix(se.EarliestAt)
 		e.earliestRemaining = se.EarliestRemaining
@@ -108,10 +110,16 @@ func (p *Pool) Flush() error {
 	}
 	sf := stateFile{Version: stateVersion, Entries: make(map[string]stateEntry, len(p.entries))}
 	for k, e := range p.entries {
+		// A placeholder entry (this machine's CLI, environment-supplied
+		// credentials) has no persistent identity, so it has no state to keep.
+		if e.acc != nil && e.acc.Ephemeral {
+			continue
+		}
 		sf.Entries[k] = stateEntry{
 			Credits:           e.credits,
 			CreditsKnown:      e.creditsKnown,
 			CreditsTotal:      e.creditsTotal,
+			CreditsUnlimited:  e.creditsUnlimited,
 			Expiring:          e.expiring,
 			EarliestAt:        toUnix(e.earliestAt),
 			EarliestRemaining: e.earliestRemaining,

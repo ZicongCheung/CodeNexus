@@ -316,6 +316,88 @@ func TestConsoleAuthTokenRejectsUnsupportedSource(t *testing.T) {
 	}
 }
 
+// fakeLocal is a Trae-shaped source that can import from this machine, so the
+// console's one-click local import can be exercised without a real profile.
+type fakeLocal struct {
+	fakeUpstream
+	accounts []*account.Account
+	err      error
+}
+
+func (f *fakeLocal) Source() upstream.Source { return upstream.SourceTraeCN }
+
+func (f *fakeLocal) DiscoverLocal() ([]*account.Account, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.accounts, nil
+}
+
+func TestConsoleAuthLocalImportsDiscoveredAccounts(t *testing.T) {
+	c, store, p := newConsole(t)
+	first := &account.Account{Source: account.SourceTraeCN, UID: "u-1", Label: "本机 Trae CN", Enabled: true}
+	first.SetCredentials("tok-1", "rt-1", "", 0)
+	second := &account.Account{Source: account.SourceTraeCN, UID: "u-2", Label: "本机 Trae CN", Enabled: true}
+	second.SetCredentials("tok-2", "rt-2", "", 0)
+	fake := &fakeLocal{accounts: []*account.Account{first, second}}
+	upstream.Register(fake)
+	t.Cleanup(func() { upstream.Unregister(upstream.SourceTraeCN) })
+
+	rec := call(c, http.MethodPost, "/panel/api/auth/local", `{"source":"trae-cn"}`, true, "")
+	if rec.Code != 200 {
+		t.Fatalf("code = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"uid":"u-1"`) || !strings.Contains(rec.Body.String(), `"uid":"u-2"`) {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+	if len(p.Describe()) != 2 {
+		t.Fatalf("pool size = %d, want 2", len(p.Describe()))
+	}
+	loaded, err := store.Load()
+	if err != nil || len(loaded) != 2 {
+		t.Fatalf("store = %+v err = %v", loaded, err)
+	}
+}
+
+func TestConsoleAuthLocalRejectsUnsupportedSource(t *testing.T) {
+	c, _, _ := newConsole(t)
+	upstream.Register(&fakeUpstream{})
+	t.Cleanup(func() { upstream.Unregister(upstream.SourceWorkBuddy) })
+
+	rec := call(c, http.MethodPost, "/panel/api/auth/local", `{"source":"workbuddy"}`, true, "")
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "does not support") {
+		t.Fatalf("code = %d body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestConsoleAuthLocalReportsDiscoveryFailure(t *testing.T) {
+	c, _, p := newConsole(t)
+	upstream.Register(&fakeLocal{err: errors.New("no local client credential found")})
+	t.Cleanup(func() { upstream.Unregister(upstream.SourceTraeCN) })
+
+	rec := call(c, http.MethodPost, "/panel/api/auth/local", `{"source":"trae-cn"}`, true, "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code = %d, want 400", rec.Code)
+	}
+	if len(p.Describe()) != 0 {
+		t.Fatal("a failed discovery must not touch the pool")
+	}
+}
+
+func TestConsoleSessionReportsLocalSources(t *testing.T) {
+	c, _, _ := newConsole(t)
+	upstream.Register(&fakeLocal{})
+	t.Cleanup(func() { upstream.Unregister(upstream.SourceTraeCN) })
+
+	rec := call(c, http.MethodGet, "/panel/api/session", "", true, "")
+	if rec.Code != 200 {
+		t.Fatalf("code = %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"local_sources":["trae-cn"]`) {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+}
+
 func TestConsoleAuthStartReportsUnregisteredSource(t *testing.T) {
 	c, _, _ := newConsole(t)
 	// No Trae adapter is registered in this console, so an interactive login

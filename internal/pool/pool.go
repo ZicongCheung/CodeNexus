@@ -247,15 +247,19 @@ func (p *Pool) SetCredits(key string, credits int64, known bool) {
 	if e, ok := p.entries[key]; ok {
 		e.credits = credits
 		e.creditsKnown = known
+		e.creditsUnlimited = false
 		p.dirty = true
 	}
 }
 
 // Credits describes the account's credit picture as last observed upstream.
+// Unlimited marks a grant that is not metered, which must not be read as a
+// zero balance.
 type Credits struct {
 	Remain            int64
 	Total             int64
 	Known             bool
+	Unlimited         bool
 	Expiring          int64
 	EarliestAt        time.Time
 	EarliestRemaining int64
@@ -274,10 +278,11 @@ func (p *Pool) SetCreditsDetail(key string, c Credits) {
 	e.credits = c.Remain
 	e.creditsKnown = c.Known
 	e.creditsTotal = c.Total
+	e.creditsUnlimited = c.Unlimited
 	e.expiring = c.Expiring
 	e.earliestAt = c.EarliestAt
 	e.earliestRemaining = c.EarliestRemaining
-	if c.Known && c.Remain > 0 && e.coolKind == upstream.KindQuota {
+	if c.Known && (c.Remain > 0 || c.Unlimited) && e.coolKind == upstream.KindQuota {
 		e.coolingUntil = time.Time{}
 		e.coolKind = ""
 	}
@@ -296,6 +301,7 @@ func (p *Pool) Credits(key string) (Credits, bool) {
 		Remain:            e.credits,
 		Total:             e.creditsTotal,
 		Known:             e.creditsKnown,
+		Unlimited:         e.creditsUnlimited,
 		Expiring:          e.expiring,
 		EarliestAt:        e.earliestAt,
 		EarliestRemaining: e.earliestRemaining,
@@ -449,8 +455,9 @@ func (p *Pool) candidatesLocked(now time.Time, opts PickOptions) []*entry {
 		if !e.selectable(now, opts.Model, p.opts.MaxInFlight) {
 			continue
 		}
-		// credit floor: never spend an account known to be nearly empty
-		if p.opts.CreditFloor > 0 && e.creditsKnown && e.credits < p.opts.CreditFloor {
+		// credit floor: never spend an account known to be nearly empty. An
+		// unmetered grant is not empty, however the number reads.
+		if p.opts.CreditFloor > 0 && e.creditsKnown && !e.creditsUnlimited && e.credits < p.opts.CreditFloor {
 			continue
 		}
 		out = append(out, e)
@@ -514,7 +521,10 @@ func (p *Pool) chooseWeightedLocked(cands []*entry, now time.Time) *entry {
 	scores := make([]scored, 0, len(cands))
 	for _, e := range cands {
 		credit := 0.5
-		if e.creditsKnown {
+		switch {
+		case e.creditsUnlimited:
+			credit = 1
+		case e.creditsKnown:
 			credit = float64(e.credits) / float64(maxCredits)
 			if credit > 1 {
 				credit = 1

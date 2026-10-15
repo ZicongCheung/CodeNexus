@@ -15,12 +15,14 @@ import (
 // as interchangeable, so a fixed one is used.
 const travelLocationID = 1
 
-// target is one account paired with the adapter that serves its tasks and the
-// task families that apply to it.
+// target is one account paired with the adapters that serve it and the task
+// families that apply to it. Full is nil for a source that has no growth
+// surface, which is why the growth-only families check it before use.
 type target struct {
 	Key   string
 	Acc   *account.Account
-	Tasks upstream.Tasks
+	Maint upstream.Maintenance
+	Full  upstream.Tasks
 	Scope upstream.TaskScope
 }
 
@@ -50,15 +52,17 @@ func (s *Scheduler) targets(includeDisabled bool, only *account.Account) []targe
 		if !ok || acc == nil {
 			continue
 		}
-		tasks, ok := s.tasksFor(acc)
+		maint, ok := s.maintenanceFor(acc)
 		if !ok {
 			continue
 		}
+		full, _ := s.tasksFor(acc)
 		out = append(out, target{
 			Key:   st.Key,
 			Acc:   acc,
-			Tasks: tasks,
-			Scope: tasks.Scope(acc),
+			Maint: maint,
+			Full:  full,
+			Scope: maint.Scope(acc),
 		})
 	}
 	return out
@@ -69,6 +73,23 @@ func (s *Scheduler) tasksFor(acc *account.Account) (upstream.Tasks, bool) {
 		return nil, false
 	}
 	return s.tasks(acc.Source)
+}
+
+// maintenanceFor resolves the check-in and balance surface, preferring the
+// narrow lookup so an adapter never has to claim a growth interface it cannot
+// serve.
+func (s *Scheduler) maintenanceFor(acc *account.Account) (upstream.Maintenance, bool) {
+	if s.maintenance != nil {
+		if m, ok := s.maintenance(acc.Source); ok {
+			return m, true
+		}
+	}
+	if s.tasks != nil {
+		if t, ok := s.tasks(acc.Source); ok {
+			return t, true
+		}
+	}
+	return nil, false
 }
 
 // forEach visits the applicable accounts in order, spacing the visits by the
@@ -93,9 +114,9 @@ func (s *Scheduler) forEach(ctx context.Context, includeDisabled bool, only *acc
 
 // checkinOne signs one account in and refreshes its balance.
 func (s *Scheduler) checkinOne(ctx context.Context, t target) {
-	day := s.now().In(s.Location()).Format("2006-01-02")
+	day := s.LocalDay()
 	if t.Scope.Checkin {
-		res, err := t.Tasks.Checkin(ctx, t.Acc)
+		res, err := t.Maint.Checkin(ctx, t.Acc)
 		switch {
 		case err != nil:
 			s.logf("checkin %s: %v", t.Key, err)
@@ -119,12 +140,87 @@ func (s *Scheduler) RunCheckinNow(ctx context.Context) {
 	s.forEach(ctx, s.config().IncludeDisabledInTasks, nil, hasCheckinOrBalance, s.checkinOne)
 }
 
+// RunCheckinRetryNow retries the check-in for accounts that have not completed
+// today's. It is what keeps an account the upstream throttled at the scheduled
+// slot from losing the day: the adapter's own 9074 backoff decides how much of
+// this loop actually reaches upstream, so an account still in backoff costs
+// nothing.
+func (s *Scheduler) RunCheckinRetryNow(ctx context.Context) {
+	today := s.LocalDay()
+	pending := s.pendingCheckins(today)
+	if len(pending) == 0 {
+		return
+	}
+	delay := accountDelay(s.config())
+	first := true
+	for _, t := range pending {
+		if ctx.Err() != nil {
+			return
+		}
+		if !first && !sleepCtx(ctx, delay) {
+			return
+		}
+		first = false
+		s.checkinOne(ctx, t)
+	}
+}
+
+// pendingCheckins returns the targets whose daily check-in is still open.
+func (s *Scheduler) pendingCheckins(today string) []target {
+	var out []target
+	for _, t := range s.targets(s.config().IncludeDisabledInTasks, nil) {
+		if !t.Scope.Checkin {
+			continue
+		}
+		if s.pool != nil && s.pool.CheckinDay(t.Key) == today {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+// StartCheckinRetry starts the independent check-in retry loop. It stops when
+// the context ends.
+func (s *Scheduler) StartCheckinRetry(ctx context.Context) {
+	interval := time.Duration(s.config().CheckinRetrySeconds) * time.Second
+	if !s.config().CheckinRetryEnabled || interval <= 0 {
+		return
+	}
+	go func() {
+		for {
+			timer := time.NewTimer(interval)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+				s.RunCheckinRetryNow(ctx)
+			}
+		}
+	}()
+}
+
 // RunCheckinFor runs the check-in and balance refresh for one account.
 func (s *Scheduler) RunCheckinFor(ctx context.Context, acc *account.Account) {
 	s.forEach(ctx, true, acc, hasCheckinOrBalance, s.checkinOne)
 }
 
 func hasCheckinOrBalance(sc upstream.TaskScope) bool { return sc.Checkin || sc.Balance }
+
+// CheckinScope reports the maintenance families that apply to one account. The
+// console uses it to tell "this source has no check-in" apart from "it did not
+// work", which is the difference between a misleading and an honest message.
+func (s *Scheduler) CheckinScope(acc *account.Account) upstream.TaskScope {
+	if acc == nil {
+		return upstream.TaskScope{}
+	}
+	maint, ok := s.maintenanceFor(acc)
+	if !ok {
+		return upstream.TaskScope{}
+	}
+	return maint.Scope(acc)
+}
 
 // RunBalanceNow refreshes every account's credit balance concurrently. Credits
 // are a minute-scale observation, so this runs on its own interval.
@@ -157,7 +253,7 @@ func hasBalance(sc upstream.TaskScope) bool { return sc.Balance }
 
 // refreshCredits reads and records one account's balance.
 func (s *Scheduler) refreshCredits(ctx context.Context, t target, expiring time.Duration) {
-	c, err := t.Tasks.Credits(ctx, t.Acc, expiring)
+	c, err := t.Maint.Credits(ctx, t.Acc, expiring)
 	if err != nil {
 		s.logf("balance %s: %v", t.Key, err)
 		return
@@ -166,6 +262,7 @@ func (s *Scheduler) refreshCredits(ctx context.Context, t target, expiring time.
 		Remain:            c.Remain,
 		Total:             c.Total,
 		Known:             true,
+		Unlimited:         c.Unlimited,
 		Expiring:          c.Expiring,
 		EarliestAt:        c.EarliestAt,
 		EarliestRemaining: c.EarliestRemaining,
@@ -187,7 +284,10 @@ func (s *Scheduler) RunActivityFor(ctx context.Context, acc *account.Account) {
 func hasActivity(sc upstream.TaskScope) bool { return sc.Activity }
 
 func (s *Scheduler) activityOne(ctx context.Context, t target) {
-	if err := t.Tasks.ReportActivity(ctx, t.Acc, "", ""); err != nil {
+	if t.Full == nil {
+		return
+	}
+	if err := t.Full.ReportActivity(ctx, t.Acc, "", ""); err != nil {
 		s.logf("activity %s: %v", t.Key, err)
 	}
 }
@@ -232,13 +332,16 @@ func (s *Scheduler) RunTravelFor(ctx context.Context, acc *account.Account) {
 func hasTravel(sc upstream.TaskScope) bool { return sc.Travel }
 
 func (s *Scheduler) travelOne(ctx context.Context, t target) {
-	st, err := t.Tasks.Travel(ctx, t.Acc)
+	if t.Full == nil {
+		return
+	}
+	st, err := t.Full.Travel(ctx, t.Acc)
 	if err != nil {
 		s.logf("travel %s: %v", t.Key, err)
 		return
 	}
 	if st.Buddy == nil {
-		if err := t.Tasks.BuddyAdopt(ctx, t.Acc); err != nil {
+		if err := t.Full.BuddyAdopt(ctx, t.Acc); err != nil {
 			s.logf("travel %s: adopt: %v", t.Key, err)
 			return
 		}
@@ -251,7 +354,7 @@ func (s *Scheduler) travelOne(ctx context.Context, t target) {
 			s.logf("travel %s: arrived without a record id", t.Key)
 			return
 		}
-		reward, err := t.Tasks.TravelClaim(ctx, t.Acc, st.State.RecordID)
+		reward, err := t.Full.TravelClaim(ctx, t.Acc, st.State.RecordID)
 		if err != nil {
 			s.logf("travel %s: claim: %v", t.Key, err)
 			return
@@ -261,7 +364,7 @@ func (s *Scheduler) travelOne(ctx context.Context, t target) {
 		if st.State.DailyLimitReached {
 			return
 		}
-		if err := t.Tasks.TravelDepart(ctx, t.Acc, travelLocationID); err != nil {
+		if err := t.Full.TravelDepart(ctx, t.Acc, travelLocationID); err != nil {
 			s.logf("travel %s: depart: %v", t.Key, err)
 			return
 		}
@@ -280,7 +383,10 @@ func (s *Scheduler) RunBlackcatNow(ctx context.Context) {
 func hasNight(sc upstream.TaskScope) bool { return sc.Night }
 
 func (s *Scheduler) blackcatOne(ctx context.Context, t target) {
-	need, err := t.Tasks.NightNeed(ctx, t.Acc)
+	if t.Full == nil {
+		return
+	}
+	need, err := t.Full.NightNeed(ctx, t.Acc)
 	if err != nil {
 		s.logf("blackcat %s: %v", t.Key, err)
 		return
@@ -288,7 +394,7 @@ func (s *Scheduler) blackcatOne(ctx context.Context, t target) {
 	if need <= 0 {
 		return
 	}
-	if err := t.Tasks.NightRun(ctx, t.Acc, int(need)); err != nil {
+	if err := t.Full.NightRun(ctx, t.Acc, int(need)); err != nil {
 		s.logf("blackcat %s: %v", t.Key, err)
 	}
 }

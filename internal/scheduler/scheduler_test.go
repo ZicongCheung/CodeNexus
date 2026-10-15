@@ -401,3 +401,149 @@ func TestNilStateIsSafe(t *testing.T) {
 		t.Fatalf("Last on a nil state = %q", got)
 	}
 }
+
+// fakeMaint implements only upstream.Maintenance: the shape a source with a
+// check-in programme and no growth surface provides.
+type fakeMaint struct {
+	scope upstream.TaskScope
+
+	mu       sync.Mutex
+	checkins int
+	credits  int
+}
+
+func (f *fakeMaint) Scope(*account.Account) upstream.TaskScope { return f.scope }
+
+func (f *fakeMaint) Checkin(context.Context, *account.Account) (*upstream.CheckinResult, error) {
+	f.mu.Lock()
+	f.checkins++
+	f.mu.Unlock()
+	return &upstream.CheckinResult{Credit: 5}, nil
+}
+
+func (f *fakeMaint) Credits(context.Context, *account.Account, time.Duration) (*upstream.Credits, error) {
+	f.mu.Lock()
+	f.credits++
+	f.mu.Unlock()
+	return &upstream.Credits{Remain: 100, Total: 100}, nil
+}
+
+func (f *fakeMaint) counts() (checkins, credits int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.checkins, f.credits
+}
+
+// newMaintScheduler builds a scheduler whose only task surface is Maintenance.
+func newMaintScheduler(t *testing.T, cfg config.ScheduleConfig, f *fakeMaint) *Scheduler {
+	t.Helper()
+	p := pool.New(pool.Options{})
+	acc := &account.Account{Source: account.SourceTraeCN, UID: "u1", Enabled: true}
+	acc.SetCredentials("tok", "refresh", "", 0)
+	p.Add(acc)
+	if cfg.Timezone == "" {
+		cfg.Timezone = "Asia/Shanghai"
+	}
+	return New(Options{
+		Cfg:         cfg,
+		Pool:        p,
+		Maintenance: func(upstream.Source) (upstream.Maintenance, bool) { return f, true },
+		State:       LoadState(filepath.Join(t.TempDir(), "sched.json")),
+		Now:         func() time.Time { return time.Date(2026, 10, 15, 10, 0, 0, 0, time.UTC) },
+		Logf:        func(string, ...any) {},
+	})
+}
+
+func TestMaintenanceOnlySourceIsScheduled(t *testing.T) {
+	f := &fakeMaint{scope: upstream.TaskScope{Checkin: true, Balance: true}}
+	s := newMaintScheduler(t, config.ScheduleConfig{}, f)
+
+	s.RunCheckinNow(context.Background())
+
+	checkins, credits := f.counts()
+	if checkins != 1 || credits != 1 {
+		t.Fatalf("checkins=%d credits=%d, want 1 and 1", checkins, credits)
+	}
+}
+
+func TestCheckinRetrySkipsAccountsAlreadyDoneToday(t *testing.T) {
+	f := &fakeMaint{scope: upstream.TaskScope{Checkin: true}}
+	s := newMaintScheduler(t, config.ScheduleConfig{}, f)
+
+	s.RunCheckinNow(context.Background())
+	s.RunCheckinRetryNow(context.Background())
+
+	if checkins, _ := f.counts(); checkins != 1 {
+		t.Fatalf("checkins=%d, want 1: the retry loop must skip a completed day", checkins)
+	}
+}
+
+func TestCheckinRetryRevisitsPendingAccounts(t *testing.T) {
+	f := &fakeMaint{scope: upstream.TaskScope{Checkin: true}}
+	s := newMaintScheduler(t, config.ScheduleConfig{}, f)
+
+	// No sweep yet, so the day is still open.
+	s.RunCheckinRetryNow(context.Background())
+	if checkins, _ := f.counts(); checkins != 1 {
+		t.Fatalf("checkins=%d, want 1", checkins)
+	}
+}
+
+func TestCheckinRetryIgnoresSourcesWithoutCheckin(t *testing.T) {
+	f := &fakeMaint{scope: upstream.TaskScope{Balance: true}}
+	s := newMaintScheduler(t, config.ScheduleConfig{}, f)
+
+	s.RunCheckinRetryNow(context.Background())
+	if checkins, _ := f.counts(); checkins != 0 {
+		t.Fatalf("checkins=%d, want 0 for a source without a check-in programme", checkins)
+	}
+}
+
+// The console asks for today's check-in state, so the scheduler has to answer
+// it in its own timezone: the host clock may be a day off.
+func TestLocalDayUsesTheScheduleTimezone(t *testing.T) {
+	f := &fakeMaint{scope: upstream.TaskScope{Checkin: true}}
+	// 2026-10-15 22:00 UTC is already the 16th in Shanghai.
+	s := New(Options{
+		Cfg:         config.ScheduleConfig{Timezone: "Asia/Shanghai"},
+		Pool:        pool.New(pool.Options{}),
+		Maintenance: func(upstream.Source) (upstream.Maintenance, bool) { return f, true },
+		Now:         func() time.Time { return time.Date(2026, 10, 15, 22, 0, 0, 0, time.UTC) },
+		Logf:        func(string, ...any) {},
+	})
+	if got := s.LocalDay(); got != "2026-10-16" {
+		t.Fatalf("LocalDay = %q, want 2026-10-16", got)
+	}
+}
+
+// CheckinScope is how the console tells "no check-in programme" apart from
+// "the check-in did not work".
+func TestCheckinScopeReportsTheAdapterFamilies(t *testing.T) {
+	f := &fakeMaint{scope: upstream.TaskScope{Checkin: true, Balance: true}}
+	s := newMaintScheduler(t, config.ScheduleConfig{}, f)
+
+	acc := &account.Account{Source: account.SourceTraeCN, UID: "u1", Enabled: true}
+	acc.SetCredentials("tok", "", "", 0)
+	scope := s.CheckinScope(acc)
+	if !scope.Checkin || !scope.Balance {
+		t.Fatalf("scope = %+v, want check-in and balance", scope)
+	}
+	if scope.Growth || scope.Travel {
+		t.Fatalf("a maintenance-only source must not claim growth: %+v", scope)
+	}
+	if s.CheckinScope(nil) != (upstream.TaskScope{}) {
+		t.Fatal("a nil account has no scope")
+	}
+
+	// A source with no adapter at all reports nothing rather than a blank
+	// check-in family, which is what the console needs to stay honest.
+	empty := New(Options{
+		Cfg:  config.ScheduleConfig{Timezone: "Asia/Shanghai"},
+		Pool: pool.New(pool.Options{}),
+		Now:  func() time.Time { return time.Now() },
+		Logf: func(string, ...any) {},
+	})
+	if got := empty.CheckinScope(acc); got != (upstream.TaskScope{}) {
+		t.Fatalf("scope without an adapter = %+v", got)
+	}
+}

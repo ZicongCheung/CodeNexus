@@ -9,27 +9,32 @@ import (
 // AccountStatus is a read-only snapshot of one account's runtime state, used by
 // the console. It never exposes credential material.
 type AccountStatus struct {
-	Key             string          `json:"key"`
-	Source          upstream.Source `json:"source"`
-	UID             string          `json:"uid"`
-	Label           string          `json:"label,omitempty"`
-	Enabled         bool            `json:"enabled"`
-	Paused          bool            `json:"paused"`
-	Healthy         bool            `json:"healthy"`
-	Cooling         bool            `json:"cooling"`
-	Broken          bool            `json:"broken"`
-	BlockedUntil    time.Time       `json:"blocked_until,omitempty"`
-	Credits         int64           `json:"credits"`
-	CreditsTotal    int64           `json:"credits_total,omitempty"`
-	CreditsKnown    bool            `json:"credits_known"`
-	Expiring        int64           `json:"expiring,omitempty"`
-	EarliestExpiry  int64           `json:"earliest_expiry,omitempty"`
-	InFlight        int             `json:"in_flight"`
-	Success         int64           `json:"success"`
-	Errors          int64           `json:"errors"`
-	HasRefreshToken bool            `json:"has_refresh_token"`
-	ExpiresAt       int64           `json:"expires_at,omitempty"`
-	CheckinDay      string          `json:"checkin_day,omitempty"`
+	Key          string          `json:"key"`
+	Source       upstream.Source `json:"source"`
+	UID          string          `json:"uid"`
+	Label        string          `json:"label,omitempty"`
+	Enabled      bool            `json:"enabled"`
+	Paused       bool            `json:"paused"`
+	Healthy      bool            `json:"healthy"`
+	Cooling      bool            `json:"cooling"`
+	Broken       bool            `json:"broken"`
+	BlockedUntil time.Time       `json:"blocked_until,omitempty"`
+	Credits      int64           `json:"credits"`
+	CreditsTotal int64           `json:"credits_total,omitempty"`
+	CreditsKnown bool            `json:"credits_known"`
+	// Unlimited marks an unmetered grant, which is not a zero balance.
+	Unlimited       bool   `json:"unlimited,omitempty"`
+	Expiring        int64  `json:"expiring,omitempty"`
+	EarliestExpiry  int64  `json:"earliest_expiry,omitempty"`
+	InFlight        int    `json:"in_flight"`
+	Success         int64  `json:"success"`
+	Errors          int64  `json:"errors"`
+	HasRefreshToken bool   `json:"has_refresh_token"`
+	ExpiresAt       int64  `json:"expires_at,omitempty"`
+	CheckinDay      string `json:"checkin_day,omitempty"`
+	// Local marks an entry that stands for this machine's CLI rather than a
+	// credential, so the console can say so instead of showing an empty quota.
+	Local bool `json:"local,omitempty"`
 }
 
 // Describe returns a snapshot of every account in the pool, in pool order.
@@ -54,6 +59,7 @@ func (p *Pool) Describe() []AccountStatus {
 			Credits:         e.credits,
 			CreditsTotal:    e.creditsTotal,
 			CreditsKnown:    e.creditsKnown,
+			Unlimited:       e.creditsUnlimited,
 			Expiring:        e.expiring,
 			InFlight:        e.inFlight,
 			Success:         e.success,
@@ -61,6 +67,7 @@ func (p *Pool) Describe() []AccountStatus {
 			HasRefreshToken: acc.RefreshTokenValue() != "",
 			ExpiresAt:       acc.ExpiresAtValue(),
 			CheckinDay:      e.checkinDay,
+			Local:           acc.Local,
 		}
 		if !e.earliestAt.IsZero() {
 			st.EarliestExpiry = e.earliestAt.Unix()

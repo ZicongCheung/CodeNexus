@@ -127,6 +127,7 @@ func (c *Console) buildMux() *http.ServeMux {
 	mux.HandleFunc("POST /api/auth/start", c.handleAuthStart)
 	mux.HandleFunc("GET /api/auth/poll", c.handleAuthPoll)
 	mux.HandleFunc("POST /api/auth/token", c.handleAuthToken)
+	mux.HandleFunc("POST /api/auth/local", c.handleAuthLocal)
 	mux.HandleFunc("POST /api/auth/import", c.handleImport)
 
 	// Task center: catalogue and per-account operations.
@@ -237,6 +238,7 @@ func (c *Console) handleSession(w http.ResponseWriter, _ *http.Request) {
 		"sources":        sourceNames(),
 		"device_sources": device,
 		"manual_sources": manual,
+		"local_sources":  localSources(),
 		"tasks":          c.sched != nil,
 		"reqlog":         c.reqlog != nil,
 	})

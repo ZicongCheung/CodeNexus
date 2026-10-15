@@ -2,10 +2,14 @@ package api
 
 import (
 	"context"
+	"math"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/ZicongCheung/CodeNexus/internal/account"
 	"github.com/ZicongCheung/CodeNexus/internal/reqlog"
+	"github.com/ZicongCheung/CodeNexus/internal/upstream"
 )
 
 // Request logging records one event per completed chat request. A middleware
@@ -14,11 +18,23 @@ import (
 
 // recHint is the per-request enrichment the handler fills in.
 type recHint struct {
-	Account  string
-	Model    string
-	Stream   bool
-	Attempts int
-	Usage    *struct{ Prompt, Completion, Total int64 }
+	// RequestID is minted before the handler runs so an out-of-band settlement
+	// can find the record it belongs to.
+	RequestID string
+	Account   string
+	Model     string
+	Stream    bool
+	Attempts  int
+	Usage     *struct{ Prompt, Completion, Total int64 }
+	// TurnID is the upstream turn identifier the billing lookup is keyed on.
+	TurnID string
+	// Credits and CreditsSource are a charge the response already reported.
+	Credits       float64
+	CreditsSource string
+	// Snapshot is the open attribution window for the turn in flight. It is
+	// owned by whichever settlement consumes it, and must be released on every
+	// path that leaves the handler.
+	Snapshot *creditSnapshot
 }
 
 type recHintKey struct{}
@@ -74,7 +90,7 @@ func (s *Server) record(source string, h http.HandlerFunc) http.HandlerFunc {
 		return h
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		hint := &recHint{}
+		hint := &recHint{RequestID: reqlog.NewRequestID()}
 		start := time.Now()
 		s.recorder.Begin()
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
@@ -82,7 +98,7 @@ func (s *Server) record(source string, h http.HandlerFunc) http.HandlerFunc {
 		dur := time.Since(start)
 
 		ev := reqlog.Event{
-			RequestID:  reqlog.NewRequestID(),
+			RequestID:  hint.RequestID,
 			Path:       r.URL.Path,
 			Source:     source,
 			Account:    hint.Account,
@@ -100,9 +116,105 @@ func (s *Server) record(source string, h http.HandlerFunc) http.HandlerFunc {
 			ev.TotalTokens = hint.Usage.Total
 			ev.TokensPerSecond = reqlog.Rate(hint.Usage.Completion, dur, 0)
 		}
+		// Tier one: a charge the response already carried.
+		if hint.CreditsSource != "" || hint.Credits > 0 {
+			ev.CreditsConsumed = hint.Credits
+			ev.CreditsSource = hint.CreditsSource
+			if ev.CreditsSource == "" {
+				ev.CreditsSource = creditsSourceUpstream
+			}
+		}
 		s.recorder.Record(ev)
 	}
 }
+
+// Credits source markers. They name where a per-turn charge came from, and an
+// unsettled turn stays pending rather than reading as a charge of zero.
+const (
+	creditsSourceUpstream      = "upstream"
+	creditsSourcePending       = "pending"
+	creditsSourceSnapshotDelta = "snapshot_delta"
+)
+
+// beginSettlement opens the attribution window for the attempt about to run.
+// A window left over from an earlier attempt belongs to an account that is no
+// longer serving the request, so it is retired first.
+func (s *Server) beginSettlement(h *recHint, u upstream.Upstream, acc *account.Account) {
+	if h == nil || s.recorder == nil {
+		return
+	}
+	h.releaseSnapshot()
+	h.Snapshot = s.openSnapshot(u, acc)
+}
+
+// releaseSnapshot retires the hint's open window, if any. It is idempotent, so
+// a handler can defer it once and still let settlement take ownership.
+func (h *recHint) releaseSnapshot() {
+	if h == nil || h.Snapshot == nil {
+		return
+	}
+	h.Snapshot.release()
+	h.Snapshot = nil
+}
+
+// settleCredits fills in the turn's credit charge without making the client
+// wait for a billing lookup. Anything the response already reported wins, so
+// the out-of-band path only runs when there is something to learn.
+func (s *Server) settleCredits(h *recHint, u upstream.Upstream, acc *account.Account) {
+	if s.recorder == nil || h == nil || h.RequestID == "" {
+		h.releaseSnapshot()
+		return
+	}
+	// A charge the response already carried wins; the window closes at once.
+	if h.CreditsSource != "" || h.Credits > 0 {
+		h.releaseSnapshot()
+		return
+	}
+	snap := h.Snapshot
+	h.Snapshot = nil
+	turn := strings.TrimSpace(h.TurnID)
+	billing, ok := u.(upstream.TurnUsage)
+	if turn == "" || !ok {
+		snap.release()
+		return
+	}
+	go func() {
+		defer snap.release()
+		ctx, cancel := context.WithTimeout(context.Background(), settleTimeout)
+		defer cancel()
+		credits, source, err := billing.TurnCredits(ctx, acc, turn)
+		if err == nil {
+			s.recorder.Update(h.RequestID, func(ev *reqlog.Event) {
+				ev.CreditsConsumed = credits
+				ev.CreditsSource = source
+			})
+			return
+		}
+		// The upstream has no per-turn bill for this turn. Fall back to the
+		// account's own counter, but only when the difference across the turn
+		// belongs to this turn alone.
+		credits, source = 0, creditsSourcePending
+		if snap.attributable() {
+			if before, ok := snap.beforeUsed(ctx); ok {
+				if after, ok := billing.UsedCredits(ctx, acc); ok && after >= before {
+					credits, source = roundCredits(after-before), creditsSourceSnapshotDelta
+				}
+			}
+		}
+		s.recorder.Update(h.RequestID, func(ev *reqlog.Event) {
+			ev.CreditsConsumed = credits
+			ev.CreditsSource = source
+		})
+	}()
+}
+
+// settleTimeout bounds a settlement lookup. It is generous because the client
+// is not waiting on it.
+const settleTimeout = 25 * time.Second
+
+// roundCredits trims a credit amount to two decimals, the precision the usage
+// surface displays.
+func roundCredits(v float64) float64 { return math.Round(v*100) / 100 }
 
 func outcomeFor(status int) string {
 	if status < 400 {

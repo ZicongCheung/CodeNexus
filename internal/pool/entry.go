@@ -33,6 +33,9 @@ type entry struct {
 	creditsKnown bool
 	// creditsTotal is the size of the account's credit grant; zero when unknown.
 	creditsTotal int64
+	// creditsUnlimited marks a grant that is not metered. It is not "zero
+	// credits": the credit floor and the credit weighting must ignore it.
+	creditsUnlimited bool
 	// expiring is the part of credits that lapses inside the configured window.
 	expiring int64
 	// earliestAt is when the next batch lapses, with earliestRemaining positive.

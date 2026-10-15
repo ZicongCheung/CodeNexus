@@ -13,8 +13,12 @@ import (
 // part of Remain that lapses inside the requested window, and EarliestAt is
 // when the next batch lapses (zero when nothing lapses).
 type Credits struct {
-	Remain            int64
-	Total             int64
+	Remain int64
+	Total  int64
+	// Used is what the account has consumed in total. It is recorded for
+	// observation only: it is what a single turn's charge is measured against
+	// when the upstream has no per-turn bill, and it never feeds routing.
+	Used              int64
 	Expiring          int64
 	EarliestAt        time.Time
 	EarliestRemaining int64
@@ -110,13 +114,12 @@ type TaskScope struct {
 	Night    bool
 }
 
-// Tasks is implemented by adapters that support scheduled account maintenance
-// and growth tasks. Adapters that only serve chat simply do not implement it;
-// the scheduler then skips them.
-//
-// Every method must be safe to call repeatedly: the scheduler retries, catches
-// up after downtime and lets the console trigger tasks at any time.
-type Tasks interface {
+// Maintenance is the subset of the task surface the scheduled maintenance
+// families need: which families apply, the daily check-in and the balance
+// observation. An adapter that offers only those — Trae CN has a check-in
+// programme but none of the WorkBuddy growth features — implements this and
+// stops there, rather than stubbing out thirty methods it cannot serve.
+type Maintenance interface {
 	// Scope reports which task families apply to acc.
 	Scope(acc *account.Account) TaskScope
 
@@ -126,6 +129,16 @@ type Tasks interface {
 	// Credits reports the account's credit balance and expiry picture. The
 	// expiringWithin window is applied upstream-side where possible.
 	Credits(ctx context.Context, acc *account.Account, expiringWithin time.Duration) (*Credits, error)
+}
+
+// Tasks is implemented by adapters that support scheduled account maintenance
+// and growth tasks. Adapters that only serve chat simply do not implement it;
+// the scheduler then skips them.
+//
+// Every method must be safe to call repeatedly: the scheduler retries, catches
+// up after downtime and lets the console trigger tasks at any time.
+type Tasks interface {
+	Maintenance
 
 	// ReportActivity sends one conversation-activity event, which lights the
 	// consecutive-sign-in day and unlocks dependent tasks.
@@ -220,7 +233,8 @@ type Tasks interface {
 	SetAppearanceTheme(ctx context.Context, acc *account.Account, resourceKey string) error
 }
 
-// TasksFor returns the task adapter for a source, if it supports tasks.
+// TasksFor returns the task adapter for a source, if it supports the full
+// maintenance and growth surface.
 func TasksFor(s Source) (Tasks, bool) {
 	u, ok := Get(s)
 	if !ok {
@@ -228,4 +242,16 @@ func TasksFor(s Source) (Tasks, bool) {
 	}
 	t, ok := u.(Tasks)
 	return t, ok
+}
+
+// MaintenanceFor returns the maintenance adapter for a source. It is the
+// narrower lookup the check-in and balance families use, so a source can opt
+// into account maintenance without claiming a growth surface it does not have.
+func MaintenanceFor(s Source) (Maintenance, bool) {
+	u, ok := Get(s)
+	if !ok {
+		return nil, false
+	}
+	m, ok := u.(Maintenance)
+	return m, ok
 }

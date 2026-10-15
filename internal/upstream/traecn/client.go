@@ -35,6 +35,9 @@ const (
 	DefaultBaseURL       = "https://trae-api-cn.mchost.guru"
 	DefaultRemoteBaseURL = "https://trae-api-cn.mchost.guru/api/remote/v1"
 	DefaultAuthBaseURL   = "https://api.trae.cn"
+	DefaultUGBaseURL     = "https://api.trae.cn"
+	DefaultPayBaseURL    = "https://api.trae.cn"
+	DefaultUsageBaseURL  = "https://api5-normal.mchost.guru"
 	DefaultAuthorizeURL  = "https://www.trae.cn/authorization"
 	DefaultClientID      = "ono9krqynydwx5"
 	DefaultAppID         = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8"
@@ -73,11 +76,28 @@ type Config struct {
 	AppVersion     string
 	IDEVersion     string
 	AppID          string
-	// UpstreamMode pins the executor: remote, solo, ide, work-agent or
+	// UpstreamMode pins the executor: remote, solo, ide, work-agent, cli or
 	// auto-route. Anything unknown falls back to auto-route.
 	UpstreamMode string
 	// AutoRoute splits requests by whether they carry a tool protocol.
 	AutoRoute bool
+	// LocalDataDirs overrides where the desktop client's store is looked for.
+	// Empty means derive the platform defaults.
+	LocalDataDirs []string
+	// CLI tunes the local-CLI executor. Only used when UpstreamMode is "cli".
+	CLI CLIConfig
+	// UGBaseURL serves the daily check-in API.
+	UGBaseURL string
+	// PayBaseURL serves the entitlement-usage API.
+	PayBaseURL string
+	// UsageBaseURL serves the per-turn commercial usage API.
+	UsageBaseURL string
+	// Checkin tunes the daily check-in and its risk-control handling.
+	Checkin CheckinConfig
+	// StateFile persists the check-in device generation and 9074 backoff. It is
+	// what keeps a rate-limited device id from being reused after a restart.
+	// Empty keeps the state in memory only.
+	StateFile string
 }
 
 // Client is the Trae CN upstream adapter.
@@ -86,6 +106,8 @@ type Client struct {
 	http   *http.Client
 	stream *http.Client
 	login  *webLoginHost
+	cli    *cliRunner
+	ck     *checkinState
 }
 
 // New builds an adapter, applying defaults for zero-valued fields.
@@ -98,6 +120,15 @@ func New(cfg Config) *Client {
 	}
 	if cfg.AuthBaseURL == "" {
 		cfg.AuthBaseURL = DefaultAuthBaseURL
+	}
+	if cfg.UGBaseURL == "" {
+		cfg.UGBaseURL = DefaultUGBaseURL
+	}
+	if cfg.PayBaseURL == "" {
+		cfg.PayBaseURL = DefaultPayBaseURL
+	}
+	if cfg.UsageBaseURL == "" {
+		cfg.UsageBaseURL = DefaultUsageBaseURL
 	}
 	if cfg.AuthorizeURL == "" {
 		cfg.AuthorizeURL = DefaultAuthorizeURL
@@ -132,8 +163,10 @@ func New(cfg Config) *Client {
 	if cfg.MaxTokens <= 0 {
 		cfg.MaxTokens = 64000
 	}
+	cfg.CLI = cfg.CLI.normalize()
+	cfg.Checkin = cfg.Checkin.normalize()
 	switch cfg.UpstreamMode {
-	case "remote", "solo", "ide", "work-agent", "auto-route":
+	case "remote", "solo", "ide", "work-agent", "cli", "auto-route":
 	default:
 		cfg.UpstreamMode = "auto-route"
 	}
@@ -158,6 +191,8 @@ func New(cfg Config) *Client {
 		},
 	}
 	c.login = newWebLoginHost(cfg)
+	c.cli = newCLIRunner(cfg.CLI)
+	c.ck = newCheckinState(cfg.StateFile)
 	return c
 }
 
@@ -251,7 +286,17 @@ func (c *Client) ListModels(_ context.Context, _ *account.Account) ([]upstream.M
 // because there is no cheap upstream endpoint that both confirms the token and
 // reports credit; a revoked token surfaces as an auth error on the next real
 // request, which the gateway already recovers from by refreshing.
+//
+// In cli mode there is no credential to inspect: the session belongs to the
+// local installation, so health means "an executable can be found".
 func (c *Client) Probe(_ context.Context, acc *account.Account) (*upstream.Probe, error) {
+	if c.cfg.UpstreamMode == "cli" {
+		path, err := c.cli.command()
+		if err != nil {
+			return &upstream.Probe{Healthy: false, Detail: err.Error()}, nil
+		}
+		return &upstream.Probe{Healthy: true, Detail: "trae cli: " + path}, nil
+	}
 	if acc == nil || strings.TrimSpace(acc.Token()) == "" {
 		return &upstream.Probe{Healthy: false, Detail: "trae: no credential"}, nil
 	}
@@ -376,7 +421,9 @@ func (c *Client) setAgentHeaders(req *http.Request, acc *account.Account) {
 	req.Header.Set("User-Agent", "")
 }
 
-// mode resolves which surface a request should use.
+// mode resolves which executor serves a request. A pinned mode always wins; the
+// cli mode is pinned by definition, since a local installation cannot serve only
+// part of a source's traffic.
 func (c *Client) mode(req *upstream.ChatRequest) string {
 	if c.cfg.UpstreamMode != "auto-route" {
 		return c.cfg.UpstreamMode

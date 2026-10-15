@@ -1,6 +1,8 @@
 package reqlog
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -78,5 +80,137 @@ func TestNilRecorderIsSafe(t *testing.T) {
 	r.Record(Event{})
 	if s := r.Snapshot(); s.Completed != 0 {
 		t.Fatalf("nil recorder snapshot = %+v", s)
+	}
+}
+
+// ── out-of-band settlement updates ───────────────────────────────────────────
+
+func TestUpdateRewritesARecordedEvent(t *testing.T) {
+	r := New(4, false)
+	r.Record(Event{RequestID: "req-1", Path: "/v1/messages"})
+	r.Update("req-1", func(e *Event) {
+		e.CreditsConsumed = 1.25
+		e.CreditsSource = "session_usage"
+	})
+
+	got := r.Snapshot().Recent
+	if len(got) != 1 {
+		t.Fatalf("recent = %d, want 1", len(got))
+	}
+	if got[0].CreditsConsumed != 1.25 || got[0].CreditsSource != "session_usage" {
+		t.Fatalf("settlement was not applied: %+v", got[0])
+	}
+	if len(r.pending) != 0 {
+		t.Fatalf("pending = %d, want 0 (the event was there)", len(r.pending))
+	}
+}
+
+// A settlement can finish before the middleware writes the record; the mutation
+// must then be applied the moment the record lands.
+func TestUpdateHeldUntilTheEventArrives(t *testing.T) {
+	r := New(4, false)
+	r.Update("req-late", func(e *Event) {
+		e.CreditsConsumed = 2
+		e.CreditsSource = "session_usage"
+	})
+	if len(r.pending) != 1 {
+		t.Fatalf("pending = %d, want 1 (held for the unreached record)", len(r.pending))
+	}
+	if s := r.Snapshot(); len(s.Recent) != 0 {
+		t.Fatalf("nothing has been recorded yet: %d", len(s.Recent))
+	}
+
+	r.Record(Event{RequestID: "req-late", Path: "/v1/messages"})
+	got := r.Snapshot().Recent
+	if len(got) != 1 || got[0].CreditsConsumed != 2 {
+		t.Fatalf("the held mutation was not applied: %+v", got)
+	}
+	if len(r.pending) != 0 {
+		t.Fatalf("pending = %d, want 0 (consumed on arrival)", len(r.pending))
+	}
+}
+
+func TestUpdateOnlyTouchesItsOwnEvent(t *testing.T) {
+	r := New(4, false)
+	r.Record(Event{RequestID: "req-1"})
+	r.Record(Event{RequestID: "req-2"})
+	r.Update("req-1", func(e *Event) { e.CreditsConsumed = 5 })
+
+	recent := r.Snapshot().Recent
+	if recent[0].RequestID != "req-2" || recent[0].CreditsConsumed != 0 {
+		t.Fatalf("the newest event must be untouched: %+v", recent[0])
+	}
+	if recent[1].CreditsConsumed != 5 {
+		t.Fatalf("the addressed event was not updated: %+v", recent[1])
+	}
+}
+
+func TestUpdateIgnoresEmptyIDAndNilFunc(t *testing.T) {
+	r := New(4, false)
+	r.Record(Event{RequestID: "req-1"})
+	r.Update("", func(e *Event) { e.CreditsConsumed = 9 })
+	r.Update("req-1", nil)
+	if len(r.pending) != 0 {
+		t.Fatalf("pending = %d, want 0", len(r.pending))
+	}
+	if got := r.Snapshot().Recent[0].CreditsConsumed; got != 0 {
+		t.Fatalf("credits = %v, want 0", got)
+	}
+}
+
+// Held mutations are bounded: a settlement whose record never arrives must not
+// grow the map without limit.
+func TestUpdateHeldMutationsAreBounded(t *testing.T) {
+	r := New(4, false)
+	for i := 0; i < maxPendingUpdates*3; i++ {
+		r.Update(fmt.Sprintf("req-%d", i), func(e *Event) { e.CreditsConsumed = 1 })
+	}
+	if len(r.pending) > maxPendingUpdates {
+		t.Fatalf("pending = %d, want at most %d", len(r.pending), maxPendingUpdates)
+	}
+	// Whatever survived must still apply cleanly.
+	r.Record(Event{RequestID: fmt.Sprintf("req-%d", maxPendingUpdates*3-1)})
+}
+
+// An evicted event is no longer addressable, so the mutation is held instead of
+// panicking on a stale slot.
+func TestUpdateAfterEvictionIsHeld(t *testing.T) {
+	r := New(2, false)
+	r.Record(Event{RequestID: "old"})
+	r.Record(Event{RequestID: "mid"})
+	r.Record(Event{RequestID: "new"}) // "old" is pushed out
+	r.Update("old", func(e *Event) { e.CreditsConsumed = 1 })
+	if len(r.pending) != 1 {
+		t.Fatalf("pending = %d, want 1 (the record was evicted)", len(r.pending))
+	}
+}
+
+func TestUpdateIsSafeUnderConcurrency(t *testing.T) {
+	const n = 16
+	r := New(2*n, false)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			id := fmt.Sprintf("req-%d", i)
+			r.Begin()
+			r.Record(Event{RequestID: id, OK: true})
+			r.Update(id, func(e *Event) {
+				e.CreditsConsumed = 0.5
+				e.CreditsSource = "session_usage"
+			})
+		}(i)
+	}
+	wg.Wait()
+
+	recent := r.Snapshot().Recent
+	if len(recent) != n {
+		t.Fatalf("recent = %d, want %d", len(recent), n)
+	}
+	for _, e := range recent {
+		if e.CreditsConsumed != 0.5 || e.CreditsSource != "session_usage" {
+			t.Fatalf("event %s was not updated: %+v", e.RequestID, e)
+		}
 	}
 }

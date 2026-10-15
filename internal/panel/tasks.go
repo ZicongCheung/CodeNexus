@@ -319,9 +319,15 @@ func (c *Console) handleAccountAction(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()
+	resp := map[string]any{"ok": true}
 	switch r.PathValue("op") {
 	case "checkin":
 		c.sched.RunCheckinFor(ctx, acc)
+		// The sweep logs a failure and moves on, so the console reports what
+		// actually happened rather than a blanket "done": a 9074 rate limit
+		// leaves today's check-in open, and the automatic retry will pick it up.
+		resp["checkin_applicable"] = c.checkinApplicable(acc.Key())
+		resp["checkin_done"] = c.checkinDone(acc.Key())
 	case "activity":
 		c.sched.RunActivityFor(ctx, acc)
 	case "balance":
@@ -337,7 +343,7 @@ func (c *Console) handleAccountAction(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "unknown account operation")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleAccountPackages reports the detailed credit picture of one account.

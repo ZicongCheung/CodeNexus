@@ -132,6 +132,9 @@ func run(configPath string) error {
 			AuthBaseURL:    cfg.Upstreams.TraeCN.AuthBaseURL,
 			AuthorizeURL:   cfg.Upstreams.TraeCN.AuthorizeURL,
 			ClientID:       cfg.Upstreams.TraeCN.ClientID,
+			UGBaseURL:      cfg.Upstreams.TraeCN.UGBaseURL,
+			PayBaseURL:     cfg.Upstreams.TraeCN.PayBaseURL,
+			UsageBaseURL:   cfg.Upstreams.TraeCN.UsageBaseURL,
 			TimeoutSeconds: cfg.Upstreams.TraeCN.TimeoutSeconds,
 			MaxTokens:      cfg.Upstreams.TraeCN.MaxTokens,
 			WebLoginPort:   cfg.Upstreams.TraeCN.WebLoginPort,
@@ -143,7 +146,38 @@ func run(configPath string) error {
 			AppID:          cfg.Upstreams.TraeCN.AppID,
 			UpstreamMode:   cfg.Upstreams.TraeCN.UpstreamMode,
 			AutoRoute:      cfg.Upstreams.TraeCN.AutoRoute,
+			LocalDataDirs:  cfg.Upstreams.TraeCN.LocalDataDirs,
+			CLI: traecn.CLIConfig{
+				Command:         cfg.Upstreams.TraeCN.CLI.Command,
+				Args:            cfg.Upstreams.TraeCN.CLI.Args,
+				WorkDir:         cfg.Upstreams.TraeCN.CLI.WorkDir,
+				ModelMode:       cfg.Upstreams.TraeCN.CLI.ModelMode,
+				OutputMode:      cfg.Upstreams.TraeCN.CLI.OutputMode,
+				PromptStdin:     cfg.Upstreams.TraeCN.CLI.PromptStdin,
+				MaxConcurrency:  cfg.Upstreams.TraeCN.CLI.MaxConcurrency,
+				TimeoutSeconds:  cfg.Upstreams.TraeCN.CLI.TimeoutSeconds,
+				DisableTools:    cfg.Upstreams.TraeCN.CLI.DisableTools,
+				DisallowedTools: cfg.Upstreams.TraeCN.CLI.DisallowedTools,
+				MaxMessages:     cfg.Upstreams.TraeCN.CLI.MaxMessages,
+				MaxPromptChars:  cfg.Upstreams.TraeCN.CLI.MaxPromptChars,
+			},
+			Checkin: traecn.CheckinConfig{
+				IntervalSeconds:    cfg.Upstreams.TraeCN.Checkin.IntervalSeconds,
+				RetryAfterSeconds:  cfg.Upstreams.TraeCN.Checkin.RetryAfterSeconds,
+				MaxBackoffSeconds:  cfg.Upstreams.TraeCN.Checkin.MaxBackoffSeconds,
+				BackoffExponentCap: cfg.Upstreams.TraeCN.Checkin.BackoffExponentCap,
+				RotateDeviceID:     cfg.Upstreams.TraeCN.Checkin.RotateDeviceID,
+				DeviceIDs:          cfg.Upstreams.TraeCN.Checkin.DeviceIDs,
+			},
+			StateFile: filepath.Join(cfg.DataDir, "trae-checkin.json"),
 		}))
+		// The CLI executor owns its own identity, so it has no credential to
+		// pool. It still needs one entry for the dispatcher to route to; the
+		// entry is local-only and never persisted.
+		if cfg.Upstreams.TraeCN.UpstreamMode == traecn.CLIMode {
+			p.Add(traecn.LocalCLIAccount())
+			logx.Infof("trae upstream pinned to the local CLI; running requests through the installed Trae CLI")
+		}
 	}
 
 	// Background credential refresh keeps tokens from expiring unnoticed.
@@ -159,15 +193,17 @@ func run(configPath string) error {
 	// request never fight over the same credential.
 	statePath := filepath.Join(cfg.DataDir, "scheduler-state.json")
 	sched := scheduler.New(scheduler.Options{
-		Cfg:     cfg.Schedule,
-		Pool:    p,
-		Tasks:   upstream.TasksFor,
-		Refresh: refresher,
-		State:   scheduler.LoadState(statePath),
-		Logf:    func(format string, args ...any) { logx.Infof(format, args...) },
+		Cfg:         cfg.Schedule,
+		Pool:        p,
+		Tasks:       upstream.TasksFor,
+		Maintenance: upstream.MaintenanceFor,
+		Refresh:     refresher,
+		State:       scheduler.LoadState(statePath),
+		Logf:        func(format string, args ...any) { logx.Infof(format, args...) },
 	})
 	go sched.Run(ctx)
 	sched.StartBalanceRefresh(ctx)
+	sched.StartCheckinRetry(ctx)
 	if cfg.Schedule.CheckinEnabled || cfg.Schedule.TravelEnabled || cfg.Schedule.ActivityEnabled ||
 		cfg.Schedule.KeepaliveEnabled || cfg.Schedule.BlackcatEnabled || cfg.Schedule.GrowthEnabled {
 		logx.Infof("scheduler active (timezone %s)", cfg.Schedule.Timezone)
