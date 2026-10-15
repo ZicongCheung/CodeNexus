@@ -21,6 +21,7 @@
 | v1.6 | 2026-10-15 | 追加 ADR-41~44（`auto` 一键导入 / `cli` 作为上游模式 / `cli` 输出来自原生 JSON / P3 全量一次交付）；新增 §9.6 P3 调研事实（**修正旧文档中 `storage.json` 解密的错误描述**） | 张 |
 | v1.7 | 2026-10-15 | 追加 ADR-45（结算三级取值全量对齐参考，含**并发归属闸门**）；补全 §9.7 结算小节（快照差值的闸门、before 快照不阻塞首字节、`used` 取值口径）；新增 §9.8 P3 实现纪实 | 张 |
 | v1.8 | 2026-10-15 | P3 完成并入档；追加 ADR-46~49（P4 交付节奏 / Responses 会话状态 / Anthropic 保真度 / 遥测落库范围） | 张 |
+| v1.9 | 2026-10-15 | P4 第一块（协议中立对话核心）与 #43（工具与 thinking 中立下层）完成并入档；记录第二轮 P4 决策与 P4 实现纪实 | 张 |
 
 **阅读指引**
 
@@ -252,8 +253,10 @@ CodeNexus/
 │   │   ├── status.go           # /status · /healthz
 │   │   └── ssewriter.go        # 统一 SSE 出站（心跳、delta 组装）
 │   ├── upstream/
-│   │   ├── upstream.go         # ★ Upstream 接口 + 注册表
+│   │   ├── upstream.go         # ★ Upstream 接口 + 注册表 + 中立消息/工具模型
 │   │   ├── types.go            # 统一请求/响应/事件类型
+│   │   ├── toolcall.go         # 中立工具分片追踪器（index 键控，增量/快照/乱序/重复）
+│   │   ├── toolpair.go         # 中立工具配对校验（丢孤儿并回传修复清单）
 │   │   ├── sse.go              # 共享 SSE 重建（复用 WB）
 │   │   ├── thinking.go         # 思维链（复用 WB）
 │   │   ├── sanitize.go         # 指纹脱敏（复用 WB）
@@ -1024,6 +1027,26 @@ TraeWork（Trae 桌面 Agent 客户端）相关能力是**两件方向相反的�
 | 任务 | ① `/v1/responses`（含 `previous_response_id`，内存 LRU）；② `/v1/messages` + `count_tokens`（Anthropic，严格官方语义）；③ 工具调用（`delta.tool_calls`/`tool_use`/`function_call` 三向映射与配对）；④ thinking 分离；⑤ 用量与积分 + 请求日志摘要落 SQLite（`modernc.org/sqlite`）；⑥ 待探测项按 §4.2 结果决定（图片输入 / 1M Max / 自动续写 / `reasoning_effort` 映射） |
 | 不做 | 自动续写在 `finish_reason` 不可判时不做（宁可不续写，也不把用户的一轮变成多轮计费）；图片输入若上游不真收则明确报错而非静默丢弃；`previous_response_id` 的正文绝不落盘 |
 | 验收 | **Claude Code / Codex / OpenAI SDK 三客户端直连成功**；工具调用端到端闭环；面板「用量/额度」出趋势与明细；重启后历史用量可查而正文不可查 |
+
+> **P4 决策（第二轮 · #43 工具与 thinking 中立下层，用户拍板：全部取推荐档）**
+> - Anthropic `thinking` 块：**保真输出并附合成 `signature`**（确定性、`cnx-` 命名空间化的占位值；客户端无从校验，回程剥离）
+> - Responses 推理：**输出独立 `reasoning` 输出项**（`response.reasoning_summary_text.delta`），而非丢进正文
+> - 入站工具配对不合法：**自动修复并记日志**（丢孤儿 `tool_result`；无 id 或无从判断时保留，绝不因脏历史阻塞）；**不合成**缺失的工具结果，避免把捏造内容塞进模型上下文
+> - 分片保真：**不制造假分片**——上游给分片就转发分片，给整发就整发；中立层只保证按 `index` 键控、乱序与重复可容错
+
+**P4 实现纪实（as-built，随交付推进更新）**
+
+| 项 | 落点 | 状态 |
+|---|---|---|
+| 中立消息模型：`Message.ToolCalls`/`ToolCallID` 让工具调用与结果成一等字段，不再是某协议的直通 | `internal/upstream/upstream.go` | ✅ |
+| 中立工具分片追踪器：按 `index` 键控，增量 / 累积快照 / 乱序 / 重复统一折叠（`ToolCallTracker` + `NewToolCall`） | `internal/upstream/toolcall.go` | ✅ |
+| 中立配对校验：丢孤儿结果并回传修复清单（`RepairToolPairing`），接入 OpenAI 入站并记日志 | `internal/upstream/toolpair.go`、`internal/api/wire_chat.go` | ✅ |
+| OpenAI 入站补齐工具字段（`parseMessages`/`parseToolCalls`；对象形态的 arguments 兜底为 JSON 字符串） | `internal/api/wire_chat.go` | ✅ |
+| Trae 适配器：入站回填 `tool_calls`/`tool_call_id`（**修正多轮工具闭环丢调用**），出站工具改用共享追踪器（`toolStream`，无 index 时按身份映射稳定槽位） | `internal/upstream/traecn/{ide,cli}.go` | ✅ |
+| OpenAI 出站：流式 `tool_calls` 恒带 `index`（含 0）、续片不写空 `id`/`name`；非流式不含 `index` | `internal/api/wire_chat.go` | ✅ |
+| thinking 助手：`syntheticSignature`（确定性、命名空间化） | `internal/api/thinking.go` | ✅ |
+| 单测：追踪器（增量/快照/重复/乱序/首见胜出）、配对（孤儿/正确/错配/重复/无 id/断链/系统消息）、入站端到端（工具字段透传 + 孤儿丢弃）、出站渲染（`index` 恒在、续片不空写）、`agentMessages` 回填 | `internal/upstream/{toolcall,toolpair}_test.go`、`internal/api/{wire_chat,thinking}_test.go`、`internal/upstream/traecn/messages_test.go` | ✅ |
+| `/v1/responses`（含 LRU）、`/v1/messages` + `count_tokens`、用量落库 | 见任务 #41/#42/#44 | ⏳ |
 
 ### P5 · 统一面板重设计 + 任务合并 + 配置热生效
 

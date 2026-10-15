@@ -94,10 +94,13 @@
 
 ## P4 · 协议超集与高级能力（进行中）
 > 决策 ADR-46~49：全量一次交付 · `previous_response_id` = 内存有界 LRU（不落盘）· Anthropic = 严格对齐官方语义 · 落库 = 用量/积分 + 请求日志摘要（窄字段，正文与凭证永不落）。
+> 第二轮决策（#43）：Anthropic `thinking` 保真并附**合成 signature** · Responses 推理出**独立 `reasoning` 项** · 入站工具配对不合法**自动修复并记日志** · 分片**保真不造假**。
+- [x] 协议中立对话核心（选号 / 首字节前故障转移 / 401 自愈 / 记账 / 结算；wire 决定形态）
+- [x] 工具调用与 thinking 的中立下层：中立消息模型（`Message.ToolCalls`/`ToolCallID`）、分片追踪器（`index` 键控，增量/快照/乱序/重复）、配对校验（丢孤儿并记日志）、`syntheticSignature`
 - [ ] `/v1/responses`（Codex，含 `previous_response_id`，内存 LRU）
 - [ ] `/v1/messages` + `/v1/messages/count_tokens`（Anthropic，严格官方语义）
-- [ ] 工具调用三向映射与配对（`delta.tool_calls` / `tool_use` / `function_call`）
-- [ ] thinking 分离、`reasoning_effort` 映射
+- [ ] 工具调用三向映射与配对落地到两个新入口（`delta.tool_calls` / `tool_use` / `function_call`）
+- [ ] thinking 分离落地到两个新入口、`reasoning_effort` 映射
 - [ ] 用量与积分 + 请求日志摘要迁入 SQLite（`modernc.org/sqlite`，纯 Go 无 CGO）
 - [ ] 待探测后再定：图片输入、1M Max、自动续写（见 EXECUTION_PLAN §4.2）
 - [ ] 来源 B 桌面端「自定义模型」入站兼容（纯协议翻译，无原生依赖；可选、可裁剪）
