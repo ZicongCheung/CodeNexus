@@ -22,6 +22,7 @@
 | v1.7 | 2026-10-15 | 追加 ADR-45（结算三级取值全量对齐参考，含**并发归属闸门**）；补全 §9.7 结算小节（快照差值的闸门、before 快照不阻塞首字节、`used` 取值口径）；新增 §9.8 P3 实现纪实 | 张 |
 | v1.8 | 2026-10-15 | P3 完成并入档；追加 ADR-46~49（P4 交付节奏 / Responses 会话状态 / Anthropic 保真度 / 遥测落库范围） | 张 |
 | v1.9 | 2026-10-15 | P4 第一块（协议中立对话核心）与 #43（工具与 thinking 中立下层）完成并入档；记录第二轮 P4 决策与 P4 实现纪实 | 张 |
+| v1.10 | 2026-10-15 | #42 完成并入档；记录第三轮 P4 决策（`count_tokens` 估算 / 图片透传 / 校验从宽 / `signature` 空串 / 看门狗保活）；**按参考实现修订 ADR-48 为「形状严格、校验从宽」** | 张 |
 
 **阅读指引**
 
@@ -173,7 +174,7 @@
 | **ADR-45** | 结算三级取值的完整度 | **全量对齐参考，含第三级快照差值**，并且**必须连同并发归属闸门一起照抄**：以每账号"在飞请求数"为闸门，只有该账号**独享**一个回合时才允许用「本账号已用额度前后差」结算；`begin` 时若已有在飞请求则该账号标记为不可归属（**连 before 快照都不读**），结算前复查一次，不通过即退回 `pending`；before 快照走**后台任务**、不阻塞首字节；`after < before` 直接放弃；**额度读取走适配器直连，绝不写回池** | 初判认为第三级"多一跳 + 污染路由状态 + 并发记错账"，逐行读参考后三条**全部被推翻**：①before 读是后台任务，`begin()` 只让出一次事件循环，**不延迟首字节**；②参考的额度读直连 `trae_client`，**完全不碰账号池状态**，观测不会影响择优/冷却；③并发错配正是参考显式防住的——闸门保证只有独享回合才做差值，落在并发里就退回 `session_usage`，再不行退回 `pending`，**从不写错的数字**。因此第三级是"诚实度提升"而非"拿观测去凑数"。两条铁律仍守住：ADR-39「池里只有一份额度真相」（差值只进日志、不回写池）与「绝不把未知值伪装成 0」（读不到就 `pending`） |
 | **ADR-46** | P4 交付节奏 | **全量一次交付**：Responses + Anthropic 两个入站入口 + 工具调用 + thinking 分离 + 用量/日志落库一次做完 | 两个入站协议共用同一套"入站协议 → 统一 `ChatRequest` → 出站事件流"翻译层，工具调用与 thinking 分离又是它们的**共同下层**；拆开做会让 `api` 层与事件模型改两遍，且 Anthropic 的 `tool_use`/`tool_result` 与 Responses 的 `function_call` 分两次落地必然返工（同 ADR-40/44 的理由） |
 | **ADR-47** | Responses `previous_response_id` 的状态 | **内存有界 LRU**：缓存上一轮的 input+output 以重建上下文，**TTL 过期即弃、绝不落盘**；未命中时提示客户端带全量 `input` 重试 | Codex 确实会用该字段做同进程多轮，纯无状态会直接断掉体验；而磁盘持久化等于让网关在**磁盘上存提示词与回答**，与"日志绝不记正文"的红线正面冲突。内存 + TTL 是唯一同时满足"能用"与"不留痕"的档位 |
-| **ADR-48** | Anthropic 入站保真度 | **严格对齐官方语义**：`tool_use`/`tool_result` 严格配对校验、`thinking` 块按官方形态回传、`stop_reason` 全枚举映射、`count_tokens` 真实实现（含工具与图片的计数规则） | Claude Code 对配对与终止原因很敏感，"够用"实现的典型症状是**能连上但一用工具就崩**，届时排查成本远高于一次做对（体验优先于实现复杂度） |
+| **ADR-48** | Anthropic 入站保真度 | **形状严格对齐官方、入站校验从宽**：`tool_use`/`tool_result` 配对校验（不合法则自动修复并记日志）、`thinking` 块按官方形态回传（`signature` 空串）、`stop_reason` 全枚举映射、`count_tokens` 按**参考口径的本地估算**实现（图片按固定值计，不把 base64 当文本） | Claude Code 对配对与终止原因很敏感，"够用"实现的典型症状是**能连上但一用工具就崩**，届时排查成本远高于一次做对。但**"严格"只适用于我们自己吐出的形状**：入站校验若照官方 400，会让手写调用与宽松客户端突然失败，而 relay 的价值在于让一轮请求跑完 —— 参考实现在这一点上也是从宽的（`max_tokens` 缺失填默认值、`budget_tokens` 映射档位）。`count_tokens` 更是物理上做不到"真实"：官方用的是私有 tokenizer，参考只能用启发式估算，我们照此并**明示为估算** |
 | **ADR-49** | 遥测落库范围 | **用量/积分 + 请求日志摘要落 SQLite**（承接 ADR-11 的 `modernc.org/sqlite`，纯 Go 无 CGO）：表存的是现有窄字段（时间/来源/账号标签/模型/token/积分/耗时/状态）；**提示词、回答正文与凭证永不落库** | 面板的「用量 / 额度」页要有趋势与明细就只能落库；只落用量而请求日志留内存，会让"这条积分记在哪次请求上"在重启后失去对应关系。字段沿用既有窄集，红线不动 |
 
 ### 4.1 P3 待验证项（实测结论）
@@ -1019,20 +1020,27 @@ TraeWork（Trae 桌面 Agent 客户端）相关能力是**两件方向相反的�
 > **P4 决策（ADR-46~49，用户拍板：全部取推荐档）**
 > - ADR-46 交付节奏：**全量一次交付**（两个入站入口 + 工具调用 + thinking 分离 + 落库）
 > - ADR-47 `previous_response_id`：**内存有界 LRU**（TTL 过期即弃、绝不落盘；未命中提示带全量 `input` 重试）
-> - ADR-48 Anthropic 保真度：**严格对齐官方语义**（`tool_use`/`tool_result` 配对、`thinking` 块、`stop_reason` 全枚举、`count_tokens`）
+> - ADR-48 Anthropic 保真度：**形状严格、校验从宽**（`tool_use`/`tool_result` 配对、`thinking` 块、`stop_reason` 全枚举、`count_tokens` 估算；第三轮按参考实现修订）
 > - ADR-49 落库范围：**用量/积分 + 请求日志摘要落 SQLite**（窄字段；提示词、正文与凭证永不落库）
 
 | 项 | 内容 |
 |---|---|
-| 任务 | ① `/v1/responses`（含 `previous_response_id`，内存 LRU）；② `/v1/messages` + `count_tokens`（Anthropic，严格官方语义）；③ 工具调用（`delta.tool_calls`/`tool_use`/`function_call` 三向映射与配对）；④ thinking 分离；⑤ 用量与积分 + 请求日志摘要落 SQLite（`modernc.org/sqlite`）；⑥ 待探测项按 §4.2 结果决定（图片输入 / 1M Max / 自动续写 / `reasoning_effort` 映射） |
-| 不做 | 自动续写在 `finish_reason` 不可判时不做（宁可不续写，也不把用户的一轮变成多轮计费）；图片输入若上游不真收则明确报错而非静默丢弃；`previous_response_id` 的正文绝不落盘 |
+| 任务 | ① `/v1/responses`（含 `previous_response_id`，内存 LRU）；② `/v1/messages` + `count_tokens`（Anthropic，形状严格、校验从宽，见 ADR-48）；③ 工具调用（`delta.tool_calls`/`tool_use`/`function_call` 三向映射与配对）；④ thinking 分离；⑤ 用量与积分 + 请求日志摘要落 SQLite（`modernc.org/sqlite`）；⑥ 待探测项按 §4.2 结果决定（图片输入 / 1M Max / 自动续写 / `reasoning_effort` 映射） |
+| 不做 | 自动续写在 `finish_reason` 不可判时不做（宁可不续写，也不把用户的一轮变成多轮计费）；**图片透传（顶层真透传、工具结果内降级为可见占位），绝不静默丢弃**；`previous_response_id` 的正文绝不落盘 |
 | 验收 | **Claude Code / Codex / OpenAI SDK 三客户端直连成功**；工具调用端到端闭环；面板「用量/额度」出趋势与明细；重启后历史用量可查而正文不可查 |
 
 > **P4 决策（第二轮 · #43 工具与 thinking 中立下层，用户拍板：全部取推荐档）**
-> - Anthropic `thinking` 块：**保真输出并附合成 `signature`**（确定性、`cnx-` 命名空间化的占位值；客户端无从校验，回程剥离）
+> - Anthropic `thinking` 块：**保真输出并附 `signature`**（详见第三轮：最终取**空串**）
 > - Responses 推理：**输出独立 `reasoning` 输出项**（`response.reasoning_summary_text.delta`），而非丢进正文
 > - 入站工具配对不合法：**自动修复并记日志**（丢孤儿 `tool_result`；无 id 或无从判断时保留，绝不因脏历史阻塞）；**不合成**缺失的工具结果，避免把捏造内容塞进模型上下文
 > - 分片保真：**不制造假分片**——上游给分片就转发分片，给整发就整发；中立层只保证按 `index` 键控、乱序与重复可容错
+
+> **P4 决策（第三轮 · #42 Anthropic，用户拍板：全部取推荐档；均以参考实现 `Trae2api-cn` 为准）**
+> - **`count_tokens`**：参考确实实现了该端点，用的是**本地启发式估算**（宽字符 1.5 / 其余 0.25，图片固定 1000，工具按 JSON 串计），并自述 "does not bill"。我们照此实现，并据此**修订 ADR-48 的"真实实现"表述为"参考口径的估算实现"**——官方用私有 tokenizer，"真实"物理不可达。
+> - **图片入站**：**对齐参考**——顶层 `image` 真透传为 OpenAI `image_url`（base64 → data URL / url 直传）；`tool_result` 内的图片降级为可见占位 `[image tool result omitted]`。
+> - **入站参数校验**：**对齐参考（从宽）**——`max_tokens` 缺失/非法填默认 `32000`，`thinking.budget_tokens` 映射思考档位，不因参数把请求挡在门外（ADR-48 据此改为"形状严格、校验从宽"）。
+> - **`thinking.signature`**：**对齐参考取空串**（字段在场但不发 `signature_delta`；该字段对客户端不透明，参考已在 Claude Code 上验证）。据此**移除 #43 的 `syntheticSignature`**，避免死代码。
+> - **流式开场**：**偏离参考、取看门狗折中**——首个 delta 前仍可故障转移；静默超过 15s 则补发 `message_start`+`ping`。参考是"一进上游就发"（放弃换号），我们保留换号以不把一次 429 变成用户可见错误；风险是上游慢而无错时被 Claude Code 在 ~60s 处中断，看门狗即为此设。
 
 **P4 实现纪实（as-built，随交付推进更新）**
 
@@ -1040,13 +1048,16 @@ TraeWork（Trae 桌面 Agent 客户端）相关能力是**两件方向相反的�
 |---|---|---|
 | 中立消息模型：`Message.ToolCalls`/`ToolCallID` 让工具调用与结果成一等字段，不再是某协议的直通 | `internal/upstream/upstream.go` | ✅ |
 | 中立工具分片追踪器：按 `index` 键控，增量 / 累积快照 / 乱序 / 重复统一折叠（`ToolCallTracker` + `NewToolCall`） | `internal/upstream/toolcall.go` | ✅ |
-| 中立配对校验：丢孤儿结果并回传修复清单（`RepairToolPairing`），接入 OpenAI 入站并记日志 | `internal/upstream/toolpair.go`、`internal/api/wire_chat.go` | ✅ |
+| 中立配对校验：丢孤儿结果并回传修复清单（`RepairToolPairing`），接入 OpenAI 与 Anthropic 入站并记日志 | `internal/upstream/toolpair.go`、`internal/api/wire_{chat,anthropic}.go` | ✅ |
 | OpenAI 入站补齐工具字段（`parseMessages`/`parseToolCalls`；对象形态的 arguments 兜底为 JSON 字符串） | `internal/api/wire_chat.go` | ✅ |
 | Trae 适配器：入站回填 `tool_calls`/`tool_call_id`（**修正多轮工具闭环丢调用**），出站工具改用共享追踪器（`toolStream`，无 index 时按身份映射稳定槽位） | `internal/upstream/traecn/{ide,cli}.go` | ✅ |
 | OpenAI 出站：流式 `tool_calls` 恒带 `index`（含 0）、续片不写空 `id`/`name`；非流式不含 `index` | `internal/api/wire_chat.go` | ✅ |
-| thinking 助手：`syntheticSignature`（确定性、命名空间化） | `internal/api/thinking.go` | ✅ |
-| 单测：追踪器（增量/快照/重复/乱序/首见胜出）、配对（孤儿/正确/错配/重复/无 id/断链/系统消息）、入站端到端（工具字段透传 + 孤儿丢弃）、出站渲染（`index` 恒在、续片不空写）、`agentMessages` 回填 | `internal/upstream/{toolcall,toolpair}_test.go`、`internal/api/{wire_chat,thinking}_test.go`、`internal/upstream/traecn/messages_test.go` | ✅ |
-| `/v1/responses`（含 LRU）、`/v1/messages` + `count_tokens`、用量落库 | 见任务 #41/#42/#44 | ⏳ |
+| 核心：`turn.IdleAfter` + `streamOpener`（看门狗保活；串行化首个写，`Finish`/`Abort` 封口后不误写已决定重试的响应）；`turn.Fail` 让各协议自带错误形状 | `internal/api/chatcore.go`、`internal/api/handlers.go` | ✅ |
+| Anthropic 入站：`anthropicToOpenAI` 一次性翻译（`system`→system 消息、`tool_use`→`tool_calls`、`tool_result`→`role:"tool"`、`image`→`image_url`、`tools`/`tool_choice` 映射、`max_tokens` 从宽），中立消息与 `Raw` 同源，两个来源因此看到同一份调用 | `internal/api/wire_anthropic.go` | ✅ |
+| Anthropic 出站：`message_start`+`ping`（看门狗兜底）→ `content_block_start/delta/stop`（thinking `""` 签名 / text / tool_use `input_json_delta`）→ `message_delta`（`stop_reason` 七值全枚举）→ `message_stop`；错误走官方 `{"type":"error","error":{...}}` 信封（池耗尽 = 529 `overloaded_error`） | `internal/api/wire_anthropic.go` | ✅ |
+| `count_tokens`：`POST /v1/messages/count_tokens` 本地估算（图片固定 1000），从不触达上游、从不计费 | `internal/api/tokens.go`、`internal/api/wire_anthropic.go` | ✅ |
+| 单测：追踪器（增量/快照/重复/乱序/首见胜出）、配对（孤儿/正确/错配/重复/无 id/断链/系统消息）、入站端到端（工具字段透传 + 孤儿丢弃）、出站渲染（`index` 恒在、续片不空写）、Anthropic（入站四项翻译、非流式块、流式事件序列、thinking/tool_use 分片、count_tokens、**看门狗先于首 token 开流**） | `internal/upstream/{toolcall,toolpair}_test.go`、`internal/api/{wire_chat,wire_anthropic}_test.go`、`internal/upstream/traecn/messages_test.go` | ✅ |
+| `/v1/responses`（含 LRU）、用量落库 | 见任务 #41/#44 | ⏳ |
 
 ### P5 · 统一面板重设计 + 任务合并 + 配置热生效
 
