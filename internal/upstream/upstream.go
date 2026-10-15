@@ -5,6 +5,7 @@ package upstream
 import (
 	"context"
 	"sort"
+	"sync/atomic"
 
 	"github.com/ZicongCheung/CodeNexus/internal/account"
 )
@@ -211,24 +212,47 @@ type TurnUsage interface {
 	UsedCredits(ctx context.Context, acc *account.Account) (float64, bool)
 }
 
-var registry = map[Source]Upstream{}
+// registry is swapped as a whole rather than mutated: the console can rebuild
+// an upstream when its settings change, and requests read the registry
+// concurrently. A copy-on-write map keeps that from becoming a data race.
+var registry atomic.Pointer[map[Source]Upstream]
 
-// Register makes an upstream available to the router.
-func Register(u Upstream) { registry[u.Source()] = u }
+func init() { registry.Store(&map[Source]Upstream{}) }
+
+// Register makes an upstream available to the router. Registering a source
+// again replaces it, which is how a settings change reaches the running
+// gateway without a restart.
+func Register(u Upstream) {
+	next := make(map[Source]Upstream)
+	for s, v := range *registry.Load() {
+		next[s] = v
+	}
+	next[u.Source()] = u
+	registry.Store(&next)
+}
 
 // Unregister removes an upstream from the router.
-func Unregister(s Source) { delete(registry, s) }
+func Unregister(s Source) {
+	next := make(map[Source]Upstream)
+	for k, v := range *registry.Load() {
+		if k != s {
+			next[k] = v
+		}
+	}
+	registry.Store(&next)
+}
 
 // Get returns the registered upstream for a source.
 func Get(s Source) (Upstream, bool) {
-	u, ok := registry[s]
+	u, ok := (*registry.Load())[s]
 	return u, ok
 }
 
 // Sources lists the currently registered sources in a stable order.
 func Sources() []Source {
-	out := make([]Source, 0, len(registry))
-	for s := range registry {
+	reg := *registry.Load()
+	out := make([]Source, 0, len(reg))
+	for s := range reg {
 		out = append(out, s)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })

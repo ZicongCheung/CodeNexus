@@ -42,18 +42,19 @@ func (c *Console) usageLocation() *time.Location {
 }
 
 func (c *Console) handleUsageSummary(w http.ResponseWriter, r *http.Request) {
-	if c.usage == nil {
+	st := c.usage.Load()
+	if st == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"available": false})
 		return
 	}
 	days := usageWindow(r)
 	tz := c.usageLocation()
-	summary, err := c.usage.Summary(days, tz)
+	summary, err := st.Summary(days, tz)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	models, err := c.usage.Models(days, tz)
+	models, err := st.Models(days, tz)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -70,12 +71,13 @@ func (c *Console) handleUsageSummary(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Console) handleUsageDaily(w http.ResponseWriter, r *http.Request) {
-	if c.usage == nil {
+	st := c.usage.Load()
+	if st == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"available": false})
 		return
 	}
 	days := usageWindow(r)
-	daily, err := c.usage.Daily(days, dayOffsetSeconds(c.usageLocation()), c.usageLocation())
+	daily, err := st.Daily(days, dayOffsetSeconds(c.usageLocation()), c.usageLocation())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -88,7 +90,8 @@ func (c *Console) handleUsageDaily(w http.ResponseWriter, r *http.Request) {
 
 // handleUsageRecords serves the filterable detail table.
 func (c *Console) handleUsageRecords(w http.ResponseWriter, r *http.Request) {
-	if c.usage == nil {
+	st := c.usage.Load()
+	if st == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"available": false})
 		return
 	}
@@ -111,7 +114,7 @@ func (c *Console) handleUsageRecords(w http.ResponseWriter, r *http.Request) {
 		To:      parseTimeParam(q.Get("to")),
 		Limit:   limit,
 	}
-	records, err := c.usage.Records(filter)
+	records, err := st.Records(filter)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return

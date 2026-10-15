@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ZicongCheung/CodeNexus/internal/account"
@@ -48,9 +49,17 @@ type Console struct {
 	pool   *pool.Pool
 	sched  *scheduler.Scheduler
 	reqlog *reqlog.Recorder
-	usage  *usagestore.Store
+	// usage is swapped atomically so the console can turn the history on or off
+	// without a restart.
+	usage  atomic.Pointer[usagestore.Store]
 	static http.Handler
 	logf   func(string, ...any)
+
+	// cfgPath is the file the console rewrites, and applyHot/restart let a save
+	// take effect without the operator touching the terminal.
+	cfgPath  string
+	applyHot func(next *config.Config, diff []string) (applied, restart []string)
+	restart  func() error
 
 	mux *http.ServeMux
 
@@ -77,7 +86,24 @@ func WithReqLog(r *reqlog.Recorder) Option { return func(c *Console) { c.reqlog 
 
 // WithUsage connects the console to the persisted usage history, enabling the
 // usage page. Without it the page reports itself as unavailable.
-func WithUsage(s *usagestore.Store) Option { return func(c *Console) { c.usage = s } }
+func WithUsage(s *usagestore.Store) Option { return func(c *Console) { c.usage.Store(s) } }
+
+// WithConfigPath points the console at the file it may rewrite. Without it the
+// settings page is read-only.
+func WithConfigPath(path string) Option { return func(c *Console) { c.cfgPath = path } }
+
+// WithHotApply installs the hook that pushes a saved config into the running
+// components. It reports which paths took effect and which need a restart.
+func WithHotApply(fn func(next *config.Config, diff []string) (applied, restart []string)) Option {
+	return func(c *Console) { c.applyHot = fn }
+}
+
+// WithRestart enables the restart button for changes that cannot be applied in
+// place. Without it the console tells the user to restart by hand.
+func WithRestart(fn func() error) Option { return func(c *Console) { c.restart = fn } }
+
+// SetUsage swaps the persisted usage history at runtime.
+func (c *Console) SetUsage(s *usagestore.Store) { c.usage.Store(s) }
 
 // New builds the console handler. store and p may be nil to disable account
 // management (the static console still serves).
@@ -149,6 +175,11 @@ func (c *Console) buildMux() *http.ServeMux {
 	// Task center: whole-pool operations.
 	mux.HandleFunc("POST /api/batch/{op}", c.handleBatch)
 	mux.HandleFunc("POST /api/tasks/scan_all", c.handleScanAll)
+	mux.HandleFunc("GET /api/config", c.handleConfigGet)
+	mux.HandleFunc("POST /api/config", c.handleConfigSave)
+	mux.HandleFunc("GET /api/config/snapshots", c.handleConfigSnapshots)
+	mux.HandleFunc("POST /api/config/rollback", c.handleConfigRollback)
+	mux.HandleFunc("POST /api/restart", c.handleRestart)
 	mux.HandleFunc("GET /api/usage/summary", c.handleUsageSummary)
 	mux.HandleFunc("GET /api/usage/daily", c.handleUsageDaily)
 	mux.HandleFunc("GET /api/usage/records", c.handleUsageRecords)

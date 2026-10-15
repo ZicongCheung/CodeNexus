@@ -20,6 +20,7 @@ import (
 	"github.com/ZicongCheung/CodeNexus/internal/authrefresh"
 	"github.com/ZicongCheung/CodeNexus/internal/authstore"
 	"github.com/ZicongCheung/CodeNexus/internal/config"
+	"github.com/ZicongCheung/CodeNexus/internal/configschema"
 	"github.com/ZicongCheung/CodeNexus/internal/crypto"
 	"github.com/ZicongCheung/CodeNexus/internal/logx"
 	"github.com/ZicongCheung/CodeNexus/internal/panel"
@@ -117,69 +118,13 @@ func run(configPath string) error {
 	}()
 	logx.Infof("loaded %d account(s) from %s", len(accts), cfg.AuthDir)
 
-	if cfg.Upstreams.WorkBuddy.Enabled {
-		upstream.Register(workbuddy.New(workbuddy.Config{
-			BaseURL:             cfg.Upstreams.WorkBuddy.BaseURL,
-			UserAgent:           cfg.Upstreams.WorkBuddy.UserAgent,
-			TimeoutSeconds:      cfg.Upstreams.WorkBuddy.TimeoutSeconds,
-			DisableSanitize:     !cfg.Features.SanitizeFingerprints,
-			DisableMarkupRepair: !cfg.Features.RepairToolMarkup,
-		}))
-	}
-	if cfg.Upstreams.TraeCN.Enabled {
-		upstream.Register(traecn.New(traecn.Config{
-			BaseURL:        cfg.Upstreams.TraeCN.BaseURL,
-			RemoteBaseURL:  cfg.Upstreams.TraeCN.RemoteBaseURL,
-			AuthBaseURL:    cfg.Upstreams.TraeCN.AuthBaseURL,
-			AuthorizeURL:   cfg.Upstreams.TraeCN.AuthorizeURL,
-			ClientID:       cfg.Upstreams.TraeCN.ClientID,
-			UGBaseURL:      cfg.Upstreams.TraeCN.UGBaseURL,
-			PayBaseURL:     cfg.Upstreams.TraeCN.PayBaseURL,
-			UsageBaseURL:   cfg.Upstreams.TraeCN.UsageBaseURL,
-			TimeoutSeconds: cfg.Upstreams.TraeCN.TimeoutSeconds,
-			MaxTokens:      cfg.Upstreams.TraeCN.MaxTokens,
-			WebLoginPort:   cfg.Upstreams.TraeCN.WebLoginPort,
-			DeviceBrand:    cfg.Upstreams.TraeCN.DeviceBrand,
-			DeviceType:     cfg.Upstreams.TraeCN.DeviceType,
-			OSVersion:      cfg.Upstreams.TraeCN.OSVersion,
-			AppVersion:     cfg.Upstreams.TraeCN.AppVersion,
-			IDEVersion:     cfg.Upstreams.TraeCN.IDEVersion,
-			AppID:          cfg.Upstreams.TraeCN.AppID,
-			UpstreamMode:   cfg.Upstreams.TraeCN.UpstreamMode,
-			DebugUpstream:  cfg.Upstreams.TraeCN.DebugUpstream,
-			AutoRoute:      cfg.Upstreams.TraeCN.AutoRoute,
-			LocalDataDirs:  cfg.Upstreams.TraeCN.LocalDataDirs,
-			CLI: traecn.CLIConfig{
-				Command:         cfg.Upstreams.TraeCN.CLI.Command,
-				Args:            cfg.Upstreams.TraeCN.CLI.Args,
-				WorkDir:         cfg.Upstreams.TraeCN.CLI.WorkDir,
-				ModelMode:       cfg.Upstreams.TraeCN.CLI.ModelMode,
-				OutputMode:      cfg.Upstreams.TraeCN.CLI.OutputMode,
-				PromptStdin:     cfg.Upstreams.TraeCN.CLI.PromptStdin,
-				MaxConcurrency:  cfg.Upstreams.TraeCN.CLI.MaxConcurrency,
-				TimeoutSeconds:  cfg.Upstreams.TraeCN.CLI.TimeoutSeconds,
-				DisableTools:    cfg.Upstreams.TraeCN.CLI.DisableTools,
-				DisallowedTools: cfg.Upstreams.TraeCN.CLI.DisallowedTools,
-				MaxMessages:     cfg.Upstreams.TraeCN.CLI.MaxMessages,
-				MaxPromptChars:  cfg.Upstreams.TraeCN.CLI.MaxPromptChars,
-			},
-			Checkin: traecn.CheckinConfig{
-				IntervalSeconds:    cfg.Upstreams.TraeCN.Checkin.IntervalSeconds,
-				RetryAfterSeconds:  cfg.Upstreams.TraeCN.Checkin.RetryAfterSeconds,
-				MaxBackoffSeconds:  cfg.Upstreams.TraeCN.Checkin.MaxBackoffSeconds,
-				BackoffExponentCap: cfg.Upstreams.TraeCN.Checkin.BackoffExponentCap,
-				RotateDeviceID:     cfg.Upstreams.TraeCN.Checkin.RotateDeviceID,
-				DeviceIDs:          cfg.Upstreams.TraeCN.Checkin.DeviceIDs,
-			},
-			StateFile: filepath.Join(cfg.DataDir, "trae-checkin.json"),
-		}))
+	registerUpstreams(cfg)
+	if cfg.Upstreams.TraeCN.Enabled && cfg.Upstreams.TraeCN.UpstreamMode == traecn.CLIMode {
 		// The CLI executor owns its own identity, so it has no credential to
 		// pool. It still needs one entry for the dispatcher to route to; the
 		// entry is local-only and never persisted.
-		if cfg.Upstreams.TraeCN.UpstreamMode == traecn.CLIMode {
-			p.Add(traecn.LocalCLIAccount())
-			logx.Infof("trae upstream pinned to the local CLI; running requests through the installed Trae CLI")
-		}
+		p.Add(traecn.LocalCLIAccount())
+		logx.Infof("trae upstream pinned to the local CLI; running requests through the installed Trae CLI")
 	}
 
 	// Background credential refresh keeps tokens from expiring unnoticed.
@@ -213,6 +158,11 @@ func run(configPath string) error {
 		logx.Warnf("scheduler inactive: every task family is disabled")
 	}
 
+	// console and srv are declared early: the hot-apply hook above closes over
+	// both, and the console needs the server to reach its own components.
+	var console *panel.Console
+	var srv *api.Server
+
 	// The request log feeds the console's observability panels and is shared
 	// with the HTTP layer that records every chat request.
 	recorder := reqlog.New(cfg.ReqLog.RecentLimit, cfg.ReqLog.Stdout)
@@ -240,23 +190,147 @@ func run(configPath string) error {
 		}
 	}
 
-	console := panel.New(cfg, store, p,
+	// httpSrv is a pointer because a restart replaces it: the old one has to
+	// let go of the port before the replacement can bind it.
+	httpServer := func() *http.Server {
+		return &http.Server{
+			Addr:              cfg.Listen,
+			Handler:           srv,
+			ReadHeaderTimeout: 15 * time.Second,
+		}
+	}
+	var httpSrv *http.Server
+
+	// applyHot pushes a saved config into the running components. It reports
+	// what took effect and what still needs a restart, so the console never has
+	// to claim more than it delivered.
+	applyHot := func(next *config.Config, diff []string) (applied, restart []string) {
+		// Only the paths that actually changed are reported, so the console
+		// never says "41 settings applied" when the user edited one.
+		inDiff := func(paths []string) []string {
+			var out []string
+			for _, p := range paths {
+				if containsString(diff, p) {
+					out = append(out, p)
+				}
+			}
+			return out
+		}
+		for _, kind := range []struct {
+			paths []string
+			apply func()
+			name  string
+		}{
+			{[]string{"log_level"}, func() { logx.SetLevel(logx.ParseLevel(next.LogLevel)) }, "日志级别"},
+			{[]string{"schedule.timezone", "schedule.checkin_hours", "schedule.growth_hours",
+				"schedule.activity_hours", "schedule.travel_hours", "schedule.keepalive_hours",
+				"schedule.blackcat_hours", "schedule.checkin_enabled", "schedule.growth_enabled",
+				"schedule.activity_enabled", "schedule.travel_enabled", "schedule.keepalive_enabled",
+				"schedule.blackcat_enabled", "schedule.balance_refresh_enabled",
+				"schedule.balance_refresh_minutes", "schedule.checkin_retry_enabled",
+				"schedule.checkin_retry_seconds", "schedule.catch_up_on_start",
+				"schedule.include_disabled_in_tasks", "schedule.account_delay_ms",
+				"schedule.expiring_soon_hours"}, func() { sched.Reconfigure(next.Schedule) }, "任务调度"},
+			{[]string{"router.naming", "router.same_name_policy", "router.allow_prefix"},
+				func() { srv.SetRouterConfig(next.Router) }, "模型路由"},
+			{[]string{"request_log.recent_limit", "request_log.stdout"},
+				func() { recorder.Reconfigure(next.ReqLog.RecentLimit, next.ReqLog.Stdout) }, "请求日志"},
+			{[]string{"usage_store.max_records"}, func() {
+				if usage != nil {
+					usage.SetMaxRecords(next.UsageStore.MaxRecords)
+				}
+			}, "用量保留条数"},
+		} {
+			if len(inDiff(kind.paths)) == 0 {
+				continue
+			}
+			kind.apply()
+			applied = append(applied, inDiff(kind.paths)...)
+		}
+
+		// The pool is rebuilt from the new options; live accounts and their
+		// in-flight counts are untouched.
+		if changedPool(cfg, next) {
+			p.Reconfigure(poolOptions(next))
+			applied = append(applied, inDiff(poolPaths)...)
+		}
+		// Upstreams are re-registered as a whole: a new base URL, timeout or
+		// feature flag only reaches the wire through a rebuilt client.
+		if changedUpstream(cfg, next) {
+			registerUpstreams(next)
+			applied = append(applied, inDiff(upstreamPaths)...)
+		}
+		// Turning the usage history on or off means opening or dropping the
+		// database; the path itself cannot move, so that stays a restart.
+		if cfg.UsageStore.Enabled != next.UsageStore.Enabled {
+			if next.UsageStore.Enabled {
+				path := next.UsageStore.Path
+				if path == "" {
+					path = filepath.Join(next.DataDir, "usage.db")
+				}
+				maxRecords := next.UsageStore.MaxRecords
+				if maxRecords <= 0 {
+					maxRecords = 100000
+				}
+				if u, err := usagestore.Open(path, maxRecords); err == nil {
+					usage = u
+					srv.SetUsage(u)
+					console.SetUsage(u)
+					applied = append(applied, "usage_store.enabled")
+				} else {
+					logx.Warnf("usage store could not be opened: %v", err)
+					restart = append(restart, "usage_store.enabled")
+				}
+			} else {
+				if usage != nil {
+					_ = usage.Close()
+				}
+				usage = nil
+				srv.SetUsage(nil)
+				console.SetUsage(nil)
+				applied = append(applied, "usage_store.enabled")
+			}
+		}
+		// Anything structural has to wait for a restart; the console lists it
+		// rather than pretending it took effect.
+		for _, path := range configschema.Restart {
+			a, _ := configschema.ValueAt(cfg, path)
+			b, _ := configschema.ValueAt(next, path)
+			if fmt.Sprint(a) != fmt.Sprint(b) {
+				restart = append(restart, path)
+			}
+		}
+		return applied, restart
+	}
+
+	// relisten re-binds the port if a restart cannot spawn its replacement, so a
+	// failed restart never leaves the gateway down.
+	relisten := func() {
+		httpSrv = httpServer()
+		logx.Infof("restart failed; still serving on http://%s", cfg.Listen)
+		go func() {
+			if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logx.Warnf("listen: %v", err)
+			}
+		}()
+	}
+
+	console = panel.New(cfg, store, p,
 		panel.WithLogger(func(format string, args ...any) { logx.Infof(format, args...) }),
 		panel.WithScheduler(sched),
 		panel.WithReqLog(recorder),
-		panel.WithUsage(usage))
-	srv := api.NewServer(cfg, p, console,
+		panel.WithUsage(usage),
+		panel.WithConfigPath(configPath),
+		panel.WithHotApply(applyHot),
+		panel.WithRestart(restartProcess(cfg.Listen, func() *http.Server { return httpSrv }, relisten)))
+	srv = api.NewServer(cfg, p, console,
 		api.WithRefresher(refresher),
 		api.WithRecorder(recorder),
 		api.WithUsageStore(usage))
+	httpSrv = httpServer()
 	// Model catalogues drive cross-source routing; loading them in the
 	// background keeps the first request from paying for it.
 	srv.WarmModels(ctx)
-	httpSrv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           srv,
-		ReadHeaderTimeout: 15 * time.Second,
-	}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -416,6 +490,69 @@ func resolvePassphrase(flagVal string) (string, error) {
 		return "", errors.New("empty passphrase")
 	}
 	return p, nil
+}
+
+// registerUpstreams (re)builds the upstream clients from the current config.
+// It is called at start-up and again whenever the console saves a change to an
+// upstream section, so a setting takes effect without a restart.
+func registerUpstreams(cfg *config.Config) {
+	if cfg.Upstreams.WorkBuddy.Enabled {
+		upstream.Register(workbuddy.New(workbuddy.Config{
+			BaseURL:             cfg.Upstreams.WorkBuddy.BaseURL,
+			UserAgent:           cfg.Upstreams.WorkBuddy.UserAgent,
+			TimeoutSeconds:      cfg.Upstreams.WorkBuddy.TimeoutSeconds,
+			DisableSanitize:     !cfg.Features.SanitizeFingerprints,
+			DisableMarkupRepair: !cfg.Features.RepairToolMarkup,
+		}))
+	}
+	if cfg.Upstreams.TraeCN.Enabled {
+		upstream.Register(traecn.New(traecn.Config{
+			BaseURL:        cfg.Upstreams.TraeCN.BaseURL,
+			RemoteBaseURL:  cfg.Upstreams.TraeCN.RemoteBaseURL,
+			AuthBaseURL:    cfg.Upstreams.TraeCN.AuthBaseURL,
+			AuthorizeURL:   cfg.Upstreams.TraeCN.AuthorizeURL,
+			ClientID:       cfg.Upstreams.TraeCN.ClientID,
+			UGBaseURL:      cfg.Upstreams.TraeCN.UGBaseURL,
+			PayBaseURL:     cfg.Upstreams.TraeCN.PayBaseURL,
+			UsageBaseURL:   cfg.Upstreams.TraeCN.UsageBaseURL,
+			TimeoutSeconds: cfg.Upstreams.TraeCN.TimeoutSeconds,
+			MaxTokens:      cfg.Upstreams.TraeCN.MaxTokens,
+			WebLoginPort:   cfg.Upstreams.TraeCN.WebLoginPort,
+			DeviceBrand:    cfg.Upstreams.TraeCN.DeviceBrand,
+			DeviceType:     cfg.Upstreams.TraeCN.DeviceType,
+			OSVersion:      cfg.Upstreams.TraeCN.OSVersion,
+			AppVersion:     cfg.Upstreams.TraeCN.AppVersion,
+			IDEVersion:     cfg.Upstreams.TraeCN.IDEVersion,
+			AppID:          cfg.Upstreams.TraeCN.AppID,
+			UpstreamMode:   cfg.Upstreams.TraeCN.UpstreamMode,
+			DebugUpstream:  cfg.Upstreams.TraeCN.DebugUpstream,
+			AutoRoute:      cfg.Upstreams.TraeCN.AutoRoute,
+			LocalDataDirs:  cfg.Upstreams.TraeCN.LocalDataDirs,
+			CLI: traecn.CLIConfig{
+				Command:         cfg.Upstreams.TraeCN.CLI.Command,
+				Args:            cfg.Upstreams.TraeCN.CLI.Args,
+				WorkDir:         cfg.Upstreams.TraeCN.CLI.WorkDir,
+				ModelMode:       cfg.Upstreams.TraeCN.CLI.ModelMode,
+				OutputMode:      cfg.Upstreams.TraeCN.CLI.OutputMode,
+				PromptStdin:     cfg.Upstreams.TraeCN.CLI.PromptStdin,
+				MaxConcurrency:  cfg.Upstreams.TraeCN.CLI.MaxConcurrency,
+				TimeoutSeconds:  cfg.Upstreams.TraeCN.CLI.TimeoutSeconds,
+				DisableTools:    cfg.Upstreams.TraeCN.CLI.DisableTools,
+				DisallowedTools: cfg.Upstreams.TraeCN.CLI.DisallowedTools,
+				MaxMessages:     cfg.Upstreams.TraeCN.CLI.MaxMessages,
+				MaxPromptChars:  cfg.Upstreams.TraeCN.CLI.MaxPromptChars,
+			},
+			Checkin: traecn.CheckinConfig{
+				IntervalSeconds:    cfg.Upstreams.TraeCN.Checkin.IntervalSeconds,
+				RetryAfterSeconds:  cfg.Upstreams.TraeCN.Checkin.RetryAfterSeconds,
+				MaxBackoffSeconds:  cfg.Upstreams.TraeCN.Checkin.MaxBackoffSeconds,
+				BackoffExponentCap: cfg.Upstreams.TraeCN.Checkin.BackoffExponentCap,
+				RotateDeviceID:     cfg.Upstreams.TraeCN.Checkin.RotateDeviceID,
+				DeviceIDs:          cfg.Upstreams.TraeCN.Checkin.DeviceIDs,
+			},
+			StateFile: filepath.Join(cfg.DataDir, "trae-checkin.json"),
+		}))
+	}
 }
 
 // buildPool translates configuration into pool options.

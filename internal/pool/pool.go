@@ -114,6 +114,16 @@ func New(opts Options) *Pool {
 	}
 }
 
+// Reconfigure swaps the pool's tuning without disturbing live accounts. It
+// exists so a config edit takes effect immediately instead of waiting for a
+// restart: entries, bindings and in-flight counts are untouched.
+func (p *Pool) Reconfigure(opts Options) {
+	opts = opts.withDefaults()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.opts = opts
+}
+
 func (p *Pool) now() time.Time { return p.opts.Clock() }
 
 // Replace swaps the whole account set, preserving runtime state for accounts

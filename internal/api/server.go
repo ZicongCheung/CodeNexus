@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ZicongCheung/CodeNexus/internal/account"
@@ -39,7 +40,15 @@ func WithRecorder(r *reqlog.Recorder) Option { return func(s *Server) { s.record
 
 // WithUsageStore installs the persisted usage history. Nil disables persistence
 // and the console falls back to the in-memory ring alone.
-func WithUsageStore(s *usagestore.Store) Option { return func(srv *Server) { srv.usage = s } }
+func WithUsageStore(s *usagestore.Store) Option { return func(srv *Server) { srv.usage.Store(s) } }
+
+// SetUsage swaps the persisted usage history at runtime, so the console's
+// on/off switch takes effect without a restart. Nil turns persistence off.
+func (s *Server) SetUsage(st *usagestore.Store) { s.usage.Store(st) }
+
+// SetRouterConfig rebuilds model naming and cross-source policy in place. The
+// loaded catalogues are kept, so a naming change does not cost a refetch.
+func (s *Server) SetRouterConfig(cfg config.RouterConfig) { s.router.SetConfig(cfg) }
 
 // Server wires the gateway routes.
 type Server struct {
@@ -48,7 +57,9 @@ type Server struct {
 	panel     http.Handler
 	refresher Refresher
 	recorder  *reqlog.Recorder
-	usage     *usagestore.Store
+	// usage is swapped atomically: the console can turn the history on or off
+	// without a restart, and request handlers read it concurrently.
+	usage     atomic.Pointer[usagestore.Store]
 	router    *modelRouter
 	gate      *snapshotGate
 	respCache *responsesCache

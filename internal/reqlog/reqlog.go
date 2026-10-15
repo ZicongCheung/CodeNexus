@@ -130,6 +130,27 @@ func (r *Recorder) Begin() {
 
 // Record finishes a request: it stores the event, updates the counters and
 // optionally mirrors a summary line to the process log.
+// Reconfigure applies request-log tuning at runtime. Shrinking the ring keeps
+// the newest events; growing it just raises the ceiling.
+func (r *Recorder) Reconfigure(limit int, stdout bool) {
+	if limit < 1 {
+		limit = 1
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.limit = limit
+	r.stdout = stdout
+	if len(r.ring) > limit {
+		kept := make([]Event, limit)
+		for i := 0; i < limit; i++ {
+			kept[i] = r.ring[(r.next-limit+i+len(r.ring))%len(r.ring)]
+		}
+		r.ring = kept
+		r.next = 0
+		r.size = limit
+	}
+}
+
 func (r *Recorder) Record(e Event) {
 	if r == nil {
 		return

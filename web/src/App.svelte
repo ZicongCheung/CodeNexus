@@ -1,6 +1,7 @@
 <script>
   // CodeNexus console. Sources are a first-class concept: every account carries
   // the upstream it belongs to, and the whole UI is grouped around that.
+  import Settings from './Settings.svelte'
 
   const API = '/panel/api'
 
@@ -10,6 +11,28 @@
   let banner = $state('')
 
   let tab = $state('accounts')
+
+  // ── theme ───────────────────────────────────────────────────────────────
+  // The console follows the system by default but remembers an explicit choice,
+  // because "I want the light one" should not be undone by the clock.
+  const THEME_KEY = 'codenexus-theme'
+  let theme = $state(localStorage.getItem(THEME_KEY) || 'system')
+  let systemDark = $state(window.matchMedia('(prefers-color-scheme: dark)').matches)
+
+  const media = window.matchMedia('(prefers-color-scheme: dark)')
+  media.addEventListener('change', (e) => (systemDark = e.matches))
+
+  let effectiveTheme = $derived(theme === 'system' ? (systemDark ? 'dark' : 'light') : theme)
+
+  $effect(() => {
+    document.documentElement.dataset.theme = effectiveTheme
+  })
+
+  function setTheme(next) {
+    theme = next
+    if (next === 'system') localStorage.removeItem(THEME_KEY)
+    else localStorage.setItem(THEME_KEY, next)
+  }
 
   // ── onboarding (device authorization) ────────────────────────────────────
   let addMode = $state('device') // device | manual | local
@@ -712,6 +735,17 @@
     <button class:active={tab === 'usage'} onclick={() => switchTab('usage')}>用量</button>
     <button class:active={tab === 'add'} onclick={() => switchTab('add')}>添加账号</button>
     <button class:active={tab === 'import'} onclick={() => switchTab('import')}>导入</button>
+    <button class:active={tab === 'settings'} onclick={() => switchTab('settings')}>设置</button>
+    <span class="spacer"></span>
+    <div class="theme-switch" role="group" aria-label="外观">
+      {#each [['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']] as [value, label]}
+        <button
+          class:active={theme === value}
+          aria-pressed={theme === value}
+          onclick={() => setTheme(value)}>{label}</button
+        >
+      {/each}
+    </div>
   </nav>
 
   {#if tab === 'accounts'}
@@ -1143,6 +1177,10 @@
     </section>
   {/if}
 
+  {#if tab === 'settings'}
+    <Settings />
+  {/if}
+
   {#if tab === 'add'}
     <section class="card">
       <div class="segmented">
@@ -1334,7 +1372,7 @@
     --idle-bg: #eef1f5;
   }
   @media (prefers-color-scheme: dark) {
-    :global(:root) {
+    :global(:root:not([data-theme])) {
       --bg: #14161a;
       --surface: #1c1f24;
       --border: #2b3037;
@@ -1585,5 +1623,100 @@
   .filters select,
   .filters input {
     max-width: 180px;
+  }
+
+  :global(:root[data-theme='dark']) {
+    --bg: #14161a;
+    --surface: #1c1f24;
+    --border: #2b3037;
+    --text: #e6e8eb;
+    --muted: #9aa2ad;
+    --accent: #5b8dff;
+    --ok: #4ade80;
+    --ok-bg: #14291d;
+    --warn: #fbbf24;
+    --warn-bg: #2a2113;
+    --bad: #f87171;
+    --bad-bg: #2c1618;
+    --idle-bg: #23272e;
+    color-scheme: dark;
+  }
+  :global(:root[data-theme='light']) {
+    color-scheme: light;
+  }
+
+  /* Every interactive element shows where the keyboard is, which is the whole
+     difference between "usable" and "usable without a mouse". */
+  :global(:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  .tabs {
+    align-items: center;
+  }
+  .tabs .spacer {
+    flex: 1;
+  }
+  .theme-switch {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    overflow: hidden;
+    background: var(--surface);
+  }
+  .theme-switch button {
+    border: none;
+    background: none;
+    color: var(--muted);
+    font: inherit;
+    font-size: 0.72rem;
+    padding: 3px 10px;
+    cursor: pointer;
+  }
+  .theme-switch button.active {
+    background: var(--accent);
+    color: #fff;
+  }
+  .theme-switch button + button {
+    border-left: 1px solid var(--border);
+  }
+
+  /* Tables scroll instead of squeezing on a narrow screen. */
+  .table {
+    overflow-x: auto;
+  }
+  .row:hover {
+    background: color-mix(in srgb, var(--accent) 5%, transparent);
+  }
+
+  @media (max-width: 720px) {
+    .tabs {
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      scrollbar-width: thin;
+    }
+    .tabs button {
+      white-space: nowrap;
+    }
+    .theme-switch {
+      display: none;
+    }
+    .stats {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .card {
+      padding: 12px;
+    }
+    footer {
+      padding-bottom: 20px;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
   }
 </style>

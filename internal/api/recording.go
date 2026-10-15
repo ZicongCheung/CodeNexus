@@ -128,8 +128,8 @@ func (s *Server) record(source string, h http.HandlerFunc) http.HandlerFunc {
 		s.recorder.Record(ev)
 		// The persisted row is the console's history; the in-memory record is
 		// its live view. Neither waits on the other.
-		if s.usage != nil {
-			go s.usage.Insert(usageRecord(ev))
+		if st := s.usage.Load(); st != nil {
+			go st.Insert(usageRecord(ev))
 		}
 	}
 }
@@ -228,8 +228,8 @@ func (s *Server) settleCredits(h *recHint, u upstream.Upstream, acc *account.Acc
 				ev.CreditsConsumed = credits
 				ev.CreditsSource = source
 			})
-			if s.usage != nil {
-				_ = s.usage.SetCredits(h.RequestID, credits, source)
+			if st := s.usage.Load(); st != nil {
+				_ = st.SetCredits(h.RequestID, credits, source)
 			}
 			return
 		}
@@ -248,8 +248,8 @@ func (s *Server) settleCredits(h *recHint, u upstream.Upstream, acc *account.Acc
 			ev.CreditsConsumed = credits
 			ev.CreditsSource = source
 		})
-		if s.usage != nil {
-			_ = s.usage.SetCredits(h.RequestID, credits, source)
+		if st := s.usage.Load(); st != nil {
+			_ = st.SetCredits(h.RequestID, credits, source)
 		}
 	}()
 }

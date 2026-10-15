@@ -62,6 +62,14 @@ type catalogEntry struct {
 // catalogTTL is how long a source catalogue is trusted.
 const catalogTTL = 10 * time.Minute
 
+// SetConfig replaces the naming and policy in place. The loaded catalogues are
+// kept, so switching between flat and prefixed naming costs no refetch.
+func (r *modelRouter) SetConfig(cfg config.RouterConfig) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cfg = cfg
+}
+
 func newModelRouter(cfg config.RouterConfig, p PoolView) *modelRouter {
 	return &modelRouter{
 		cfg:        cfg,

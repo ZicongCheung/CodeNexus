@@ -155,6 +155,15 @@ func (s *Store) Close() error { return s.mu.Close() }
 
 // Insert stores one row, replacing any earlier row with the same request id, and
 // prunes past the configured bound.
+// SetMaxRecords raises or lowers the retention ceiling at runtime. Lowering it
+// does not prune immediately; the next insert brings the row count down.
+func (s *Store) SetMaxRecords(max int) {
+	if max < 100 {
+		max = 100
+	}
+	s.max = max
+}
+
 func (s *Store) Insert(r Record) error {
 	if s == nil || s.mu == nil {
 		return nil
