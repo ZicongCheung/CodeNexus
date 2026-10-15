@@ -330,7 +330,7 @@ func (c *Client) cliChat(ctx context.Context, req *upstream.ChatRequest, write f
 
 	out := &upstream.ChatResponse{Model: req.Model}
 	st := &snapshotState{emit: write}
-	var tools toolAccumulator
+	tools := &toolStream{}
 
 	onValue := func(value map[string]any) error {
 		text, reasoning := cliValueText(value)
@@ -340,8 +340,7 @@ func (c *Client) cliChat(ctx context.Context, req *upstream.ChatRequest, write f
 		if usage := cliValueUsage(value); usage != nil {
 			out.Usage = *usage
 		}
-		if calls := tools.add(value); len(calls) > 0 {
-			out.ToolCalls = append(out.ToolCalls, calls...)
+		if calls := tools.feed(value); len(calls) > 0 {
 			if err := write(upstream.StreamDelta{ToolCalls: calls}); err != nil {
 				return err
 			}
@@ -363,6 +362,7 @@ func (c *Client) cliChat(ctx context.Context, req *upstream.ChatRequest, write f
 	if err != nil {
 		return nil, err
 	}
+	out.ToolCalls = tools.calls()
 	if out.Content == "" && out.ReasoningContent == "" && len(out.ToolCalls) == 0 {
 		return nil, upstream.NewError(upstream.KindServer, 0, "trae: local CLI returned no answer")
 	}

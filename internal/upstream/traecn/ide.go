@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -88,7 +87,7 @@ func (c *Client) agentChat(ctx context.Context, acc *account.Account, req *upstr
 
 	out := &upstream.ChatResponse{ID: requestID, Model: req.Model}
 	st := &snapshotState{emit: write}
-	tools := &toolAccumulator{}
+	tools := &toolStream{}
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	var event string
@@ -137,10 +136,9 @@ func (c *Client) agentChat(ctx context.Context, acc *account.Account, req *upstr
 		if err := st.write(text, reasoning, out); err != nil {
 			return out, err
 		}
-		if calls := tools.add(obj); len(calls) > 0 {
-			out.ToolCalls = append(out.ToolCalls, calls...)
+		if frags := tools.feed(obj); len(frags) > 0 {
 			if write != nil {
-				if err := write(upstream.StreamDelta{ToolCalls: calls, FinishReason: "tool_calls"}); err != nil {
+				if err := write(upstream.StreamDelta{ToolCalls: frags, FinishReason: "tool_calls"}); err != nil {
 					return out, err
 				}
 			}
@@ -161,6 +159,7 @@ func (c *Client) agentChat(ctx context.Context, acc *account.Account, req *upstr
 		return out, upstream.Classify(err)
 	}
 	_ = finished
+	out.ToolCalls = tools.calls()
 	if out.FinishReason == "" {
 		out.FinishReason = "stop"
 	}
@@ -169,7 +168,9 @@ func (c *Client) agentChat(ctx context.Context, acc *account.Account, req *upstr
 
 // agentMessages converts normalized messages into the upstream's shape. The
 // agent surface takes the OpenAI message array as-is, including tool roles and
-// structured content, so this is a pass-through with defaults filled in.
+// structured content, so this is a pass-through with defaults filled in. The
+// tool call and its result are re-expanded here: they arrived as neutral fields,
+// and the upstream only understands the OpenAI spelling.
 func agentMessages(req *upstream.ChatRequest) []any {
 	out := make([]any, 0, len(req.Messages))
 	for _, m := range req.Messages {
@@ -181,6 +182,12 @@ func agentMessages(req *upstream.ChatRequest) []any {
 		}
 		if m.Name != "" {
 			msg["name"] = m.Name
+		}
+		if len(m.ToolCalls) > 0 {
+			msg["tool_calls"] = m.ToolCalls
+		}
+		if m.ToolCallID != "" {
+			msg["tool_call_id"] = m.ToolCallID
 		}
 		out = append(out, msg)
 	}
@@ -228,38 +235,63 @@ func choiceDeltaText(obj map[string]any) string {
 	return firstString(delta, "content", "reasoning_content")
 }
 
-// toolAccumulator collects tool calls, de-duplicating the ones the upstream
-// repeats across events.
-type toolAccumulator struct {
-	seen map[string]bool
-	next int
+// toolStream adapts this upstream's tool-call spellings onto the shared
+// tracker. The events usually omit an index, so a call is identified by its id
+// — or, failing that, its name and arguments — and mapped to a stable slot.
+// Without that, a repeated snapshot would open a new call on every event
+// instead of collapsing into the one it repeats. Argument assembly and
+// de-duplication are the tracker's job, not this one's.
+type toolStream struct {
+	tracker upstream.ToolCallTracker
+	slots   map[string]int
+	next    int
 }
 
-// add extracts any tool calls in an event and returns only the new ones.
-func (a *toolAccumulator) add(obj map[string]any) []upstream.ToolCall {
+// feed folds the tool calls of one event and returns the fragments to forward.
+func (s *toolStream) feed(obj map[string]any) []upstream.ToolCall {
 	raw := toolCallsRaw(obj)
 	if len(raw) == 0 {
 		return nil
 	}
-	var out []upstream.ToolCall
+	frags := make([]upstream.ToolCall, 0, len(raw))
 	for _, item := range raw {
-		tc, key := normalizeToolCall(item, a.next)
-		if key == "" {
+		tc, hasIndex, ok := toolCallFrom(item)
+		if !ok {
 			continue
 		}
-		if a.seen == nil {
-			a.seen = map[string]bool{}
+		if !hasIndex {
+			tc.Index = s.slotFor(tc)
 		}
-		if a.seen[key] {
-			continue
-		}
-		a.seen[key] = true
-		a.next++
-		tc.Index = a.next - 1
-		out = append(out, tc)
+		frags = append(frags, tc)
+	}
+	chunks := s.tracker.Feed(frags)
+	out := make([]upstream.ToolCall, 0, len(chunks))
+	for _, c := range chunks {
+		out = append(out, upstream.NewToolCall(c.Index, c.ID, c.Name, c.Args))
 	}
 	return out
 }
+
+// slotFor returns the stable slot of a call that named no index.
+func (s *toolStream) slotFor(tc upstream.ToolCall) int {
+	key := tc.ID
+	if key == "" {
+		key = tc.Function.Name + "#" + tc.Function.Arguments
+	}
+	if s.slots == nil {
+		s.slots = map[string]int{}
+	}
+	if idx, ok := s.slots[key]; ok {
+		return idx
+	}
+	idx := s.next
+	s.slots[key] = idx
+	s.next++
+	return idx
+}
+
+// calls returns the calls assembled so far.
+func (s *toolStream) calls() []upstream.ToolCall { return s.tracker.Calls() }
 
 // toolCallsRaw finds the tool-call list of an event. The upstream nests it
 // differently per executor, so several shapes are accepted.
@@ -295,14 +327,18 @@ func toolCallsRaw(obj map[string]any) []any {
 	return nil
 }
 
-// normalizeToolCall flattens one tool-call object and returns a stable key used
-// to de-duplicate repeated emissions.
-func normalizeToolCall(item any, index int) (upstream.ToolCall, string) {
-	obj, ok := item.(map[string]any)
-	if !ok {
-		return upstream.ToolCall{}, ""
+// toolCallFrom flattens one tool-call object. hasIndex reports whether the
+// object carried an index of its own; an explicit index always wins, so a
+// fragmented upstream keeps its own numbering.
+func toolCallFrom(item any) (tc upstream.ToolCall, hasIndex, ok bool) {
+	obj, isMap := item.(map[string]any)
+	if !isMap {
+		return upstream.ToolCall{}, false, false
 	}
-	tc := upstream.ToolCall{Type: "function", Index: index}
+	tc = upstream.ToolCall{Type: "function"}
+	if idx, had := intField(obj, "index"); had {
+		tc.Index, hasIndex = idx, true
+	}
 	tc.ID = firstString(obj, "id", "tool_call_id", "call_id")
 	fn, _ := obj["function"].(map[string]any)
 	if fn == nil {
@@ -311,13 +347,22 @@ func normalizeToolCall(item any, index int) (upstream.ToolCall, string) {
 	tc.Function.Name = firstString(fn, "name", "tool_name", "function_name")
 	tc.Function.Arguments = argumentsText(fn)
 	if tc.Function.Name == "" {
-		return upstream.ToolCall{}, ""
+		return upstream.ToolCall{}, false, false
 	}
-	key := tc.ID
-	if key == "" {
-		key = fmt.Sprintf("%s#%s", tc.Function.Name, tc.Function.Arguments)
+	return tc, hasIndex, true
+}
+
+// intField reads an integer field that may have arrived as a JSON number.
+func intField(m map[string]any, key string) (int, bool) {
+	switch v := m[key].(type) {
+	case float64:
+		return int(v), true
+	case json.Number:
+		if n, err := v.Int64(); err == nil {
+			return int(n), true
+		}
 	}
-	return tc, key
+	return 0, false
 }
 
 // argumentsText renders tool arguments as the JSON string the OpenAI protocol

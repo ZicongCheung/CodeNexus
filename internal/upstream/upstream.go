@@ -34,18 +34,34 @@ type Usage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
-// Message is one chat message in the normalized form.
+// Message is one chat message in the normalized form. Tool calls and their
+// results are first-class fields rather than a passthrough of one protocol's
+// spelling: every wire format folds its own shape (OpenAI tool_calls/tool role,
+// Anthropic tool_use/tool_result, Responses function_call/function_call_output)
+// onto ToolCalls/ToolCallID on the way in, and re-expands them on the way out.
 type Message struct {
 	Role    string `json:"role"`
 	Content any    `json:"content"`
 	Name    string `json:"name,omitempty"`
+	// ToolCalls is set on an assistant turn that asked for tools.
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	// ToolCallID is set on the tool turn that answers one call.
+	ToolCallID string `json:"tool_call_id,omitempty"`
 }
 
 // ToolCall is a normalized tool invocation.
+//
+// Index is the ordinal slot the call occupies within one assistant turn. A
+// streaming upstream may describe a call across several fragments that share
+// an index; the ordinal is what lets a renderer group them again, so it must be
+// stable for the whole turn.
 type ToolCall struct {
-	ID       string `json:"id"`
-	Type     string `json:"type"`
-	Index    int    `json:"index,omitempty"`
+	ID    string `json:"id"`
+	Type  string `json:"type"`
+	Index int    `json:"index,omitempty"`
+	// Function holds the invoked name and its JSON arguments. In a stream the
+	// arguments may be a prefix increment rather than a whole value; the
+	// tracker below is what folds those fragments together.
 	Function struct {
 		Name      string `json:"name"`
 		Arguments string `json:"arguments"`
