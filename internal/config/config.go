@@ -29,6 +29,7 @@ type Config struct {
 	Router        RouterConfig        `json:"router"`
 	Schedule      ScheduleConfig      `json:"schedule"`
 	ReqLog        ReqLogConfig        `json:"request_log"`
+	UsageStore    UsageStoreConfig    `json:"usage_store"`
 	Upstreams     UpstreamsConfig     `json:"upstreams"`
 }
 
@@ -94,6 +95,17 @@ type ReqLogConfig struct {
 	RecentLimit int `json:"recent_limit"`
 	// Stdout mirrors each record to the process log.
 	Stdout bool `json:"stdout"`
+}
+
+// UsageStoreConfig controls the persisted usage history.
+type UsageStoreConfig struct {
+	// Enabled turns the SQLite usage history on. Off keeps the console on the
+	// in-memory ring alone and writes nothing to disk.
+	Enabled bool `json:"enabled"`
+	// Path is the database file. Empty puts it in DataDir.
+	Path string `json:"path"`
+	// MaxRecords bounds how many rows are kept; the oldest are pruned.
+	MaxRecords int `json:"max_records"`
 }
 
 // SecurityConfig controls how credentials are protected at rest.
@@ -320,7 +332,8 @@ func Default() Config {
 			AccountDelayMS:        1500,
 			ExpiringSoonHours:     168,
 		},
-		ReqLog: ReqLogConfig{RecentLimit: 100, Stdout: true},
+		ReqLog:     ReqLogConfig{RecentLimit: 100, Stdout: true},
+		UsageStore: UsageStoreConfig{Enabled: true, MaxRecords: 100000},
 		Upstreams: UpstreamsConfig{
 			WorkBuddy: WorkBuddyConfig{Enabled: true, TimeoutSeconds: 120},
 			TraeCN: TraeCNConfig{

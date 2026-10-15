@@ -23,6 +23,7 @@ import (
 	"github.com/ZicongCheung/CodeNexus/internal/pool"
 	"github.com/ZicongCheung/CodeNexus/internal/reqlog"
 	"github.com/ZicongCheung/CodeNexus/internal/scheduler"
+	"github.com/ZicongCheung/CodeNexus/internal/usagestore"
 )
 
 //go:embed dist
@@ -47,6 +48,7 @@ type Console struct {
 	pool   *pool.Pool
 	sched  *scheduler.Scheduler
 	reqlog *reqlog.Recorder
+	usage  *usagestore.Store
 	static http.Handler
 	logf   func(string, ...any)
 
@@ -72,6 +74,10 @@ func WithScheduler(s *scheduler.Scheduler) Option { return func(c *Console) { c.
 // WithReqLog connects the console to the request log, enabling the
 // observability endpoints.
 func WithReqLog(r *reqlog.Recorder) Option { return func(c *Console) { c.reqlog = r } }
+
+// WithUsage connects the console to the persisted usage history, enabling the
+// usage page. Without it the page reports itself as unavailable.
+func WithUsage(s *usagestore.Store) Option { return func(c *Console) { c.usage = s } }
 
 // New builds the console handler. store and p may be nil to disable account
 // management (the static console still serves).
@@ -143,6 +149,9 @@ func (c *Console) buildMux() *http.ServeMux {
 	// Task center: whole-pool operations.
 	mux.HandleFunc("POST /api/batch/{op}", c.handleBatch)
 	mux.HandleFunc("POST /api/tasks/scan_all", c.handleScanAll)
+	mux.HandleFunc("GET /api/usage/summary", c.handleUsageSummary)
+	mux.HandleFunc("GET /api/usage/daily", c.handleUsageDaily)
+	mux.HandleFunc("GET /api/usage/records", c.handleUsageRecords)
 	mux.HandleFunc("GET /api/tasks/queue", c.handleQueue)
 	mux.HandleFunc("POST /api/tasks/run_queue", c.handleRunQueue)
 

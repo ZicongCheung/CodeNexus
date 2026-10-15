@@ -29,6 +29,7 @@ import (
 	"github.com/ZicongCheung/CodeNexus/internal/upstream"
 	"github.com/ZicongCheung/CodeNexus/internal/upstream/traecn"
 	"github.com/ZicongCheung/CodeNexus/internal/upstream/workbuddy"
+	"github.com/ZicongCheung/CodeNexus/internal/usagestore"
 )
 
 // The WorkBuddy adapter implements interactive device login; the console relies
@@ -215,13 +216,38 @@ func run(configPath string) error {
 	// with the HTTP layer that records every chat request.
 	recorder := reqlog.New(cfg.ReqLog.RecentLimit, cfg.ReqLog.Stdout)
 
+	// The usage history is the persisted layer under the console's usage page.
+	// It is optional: without it the console keeps working from the in-memory
+	// ring and nothing is written to disk.
+	var usage *usagestore.Store
+	if cfg.UsageStore.Enabled {
+		path := cfg.UsageStore.Path
+		if path == "" {
+			path = filepath.Join(cfg.DataDir, "usage.db")
+		}
+		maxRecords := cfg.UsageStore.MaxRecords
+		if maxRecords <= 0 {
+			maxRecords = 100000
+		}
+		u, err := usagestore.Open(path, maxRecords)
+		if err != nil {
+			logx.Warnf("usage store disabled: %v", err)
+		} else {
+			usage = u
+			defer usage.Close()
+			logx.Infof("usage history at %s (keeping up to %d rows)", path, maxRecords)
+		}
+	}
+
 	console := panel.New(cfg, store, p,
 		panel.WithLogger(func(format string, args ...any) { logx.Infof(format, args...) }),
 		panel.WithScheduler(sched),
-		panel.WithReqLog(recorder))
+		panel.WithReqLog(recorder),
+		panel.WithUsage(usage))
 	srv := api.NewServer(cfg, p, console,
 		api.WithRefresher(refresher),
-		api.WithRecorder(recorder))
+		api.WithRecorder(recorder),
+		api.WithUsageStore(usage))
 	// Model catalogues drive cross-source routing; loading them in the
 	// background keeps the first request from paying for it.
 	srv.WarmModels(ctx)

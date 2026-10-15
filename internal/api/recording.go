@@ -10,6 +10,7 @@ import (
 	"github.com/ZicongCheung/CodeNexus/internal/account"
 	"github.com/ZicongCheung/CodeNexus/internal/reqlog"
 	"github.com/ZicongCheung/CodeNexus/internal/upstream"
+	"github.com/ZicongCheung/CodeNexus/internal/usagestore"
 )
 
 // Request logging records one event per completed chat request. A middleware
@@ -125,6 +126,45 @@ func (s *Server) record(source string, h http.HandlerFunc) http.HandlerFunc {
 			}
 		}
 		s.recorder.Record(ev)
+		// The persisted row is the console's history; the in-memory record is
+		// its live view. Neither waits on the other.
+		if s.usage != nil {
+			go s.usage.Insert(usageRecord(ev))
+		}
+	}
+}
+
+// usageRecord narrows an event into the row the usage history keeps. A label
+// identifies the account; no prompt, answer or credential is carried.
+func usageRecord(ev reqlog.Event) usagestore.Record {
+	return usagestore.Record{
+		Time:             ev.Time,
+		RequestID:        ev.RequestID,
+		Wire:             ev.Source,
+		Source:           string(sourceOfPath(ev.Path)),
+		Account:          ev.Account,
+		Model:            ev.Model,
+		Stream:           ev.Stream,
+		Status:           ev.Status,
+		Outcome:          ev.Outcome,
+		Attempts:         ev.Attempts,
+		DurationMS:       ev.DurationMS,
+		PromptTokens:     ev.PromptTokens,
+		CompletionTokens: ev.CompletionTokens,
+		TotalTokens:      ev.TotalTokens,
+		Credits:          ev.CreditsConsumed,
+		CreditsSource:    ev.CreditsSource,
+	}
+}
+
+// sourceOfPath names the upstream family a request was served by, when the
+// account label does not already say so.
+func sourceOfPath(path string) upstream.Source {
+	switch {
+	case strings.Contains(path, "responses"):
+		return "responses"
+	default:
+		return ""
 	}
 }
 
@@ -188,6 +228,9 @@ func (s *Server) settleCredits(h *recHint, u upstream.Upstream, acc *account.Acc
 				ev.CreditsConsumed = credits
 				ev.CreditsSource = source
 			})
+			if s.usage != nil {
+				_ = s.usage.SetCredits(h.RequestID, credits, source)
+			}
 			return
 		}
 		// The upstream has no per-turn bill for this turn. Fall back to the
@@ -205,6 +248,9 @@ func (s *Server) settleCredits(h *recHint, u upstream.Upstream, acc *account.Acc
 			ev.CreditsConsumed = credits
 			ev.CreditsSource = source
 		})
+		if s.usage != nil {
+			_ = s.usage.SetCredits(h.RequestID, credits, source)
+		}
 	}()
 }
 

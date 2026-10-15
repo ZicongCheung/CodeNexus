@@ -62,6 +62,17 @@
   // ── request log ──────────────────────────────────────────────────────────
   let metrics = $state(null)
   let logEvents = $state([])
+
+  // ── persisted usage history ─────────────────────────────────────────────
+  let usageDays = $state(30)
+  let usageAvailable = $state(null)
+  let usageSummary = $state(null)
+  let usageModels = $state([])
+  let usageDaily = $state([])
+  let usageRecords = $state([])
+  let usageFilter = $state({ wire: '', model: '', outcome: '' })
+  let usageLoading = $state(false)
+  let usageMsg = $state('')
   let logTimer = null
 
   const sources = $derived(session?.sources ?? ['workbuddy'])
@@ -347,6 +358,8 @@
       loadQueue()
     } else if (name === 'logs') {
       startLogPolling()
+    } else if (name === 'usage') {
+      loadUsage()
     }
   }
 
@@ -582,6 +595,66 @@
     }
   }
 
+  async function loadUsage() {
+    usageLoading = true
+    usageMsg = ''
+    try {
+      const days = usageDays
+      const [sum, daily] = await Promise.all([
+        api(`/usage/summary?days=${days}`),
+        api(`/usage/daily?days=${days}`),
+      ])
+      usageAvailable = sum.available !== false
+      usageSummary = sum.summary ?? null
+      usageModels = sum.models ?? []
+      usageDaily = daily.daily ?? []
+      await loadUsageRecords()
+    } catch (err) {
+      usageMsg = err.message
+    } finally {
+      usageLoading = false
+    }
+  }
+
+  async function loadUsageRecords() {
+    const params = new URLSearchParams({ limit: '300' })
+    for (const [k, v] of Object.entries(usageFilter)) {
+      if (v) params.set(k, v)
+    }
+    const rec = await api(`/usage/records?${params}`)
+    usageAvailable = rec.available !== false
+    usageRecords = rec.records ?? []
+  }
+
+  function changeUsageDays(d) {
+    usageDays = d
+    loadUsage()
+  }
+
+  function usageBarHeight(row) {
+    if (!usageDaily.length) return 0
+    const peak = Math.max(...usageDaily.map((r) => r.total_tokens || 0), 1)
+    return Math.max(2, Math.round(((row.total_tokens || 0) / peak) * 100))
+  }
+
+  function fmtTokens(n) {
+    n = Number(n || 0)
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k'
+    return String(n)
+  }
+
+  function fmtCredits(n) {
+    return Number(n || 0).toFixed(2)
+  }
+
+  function fmtDateTime(t) {
+    if (!t) return '—'
+    const d = new Date(t)
+    if (Number.isNaN(d.getTime())) return '—'
+    return d.toLocaleString()
+  }
+
   function fmtClock(t) {
     if (!t) return '—'
     const d = new Date(t)
@@ -636,6 +709,7 @@
     <button class:active={tab === 'accounts'} onclick={() => switchTab('accounts')}>账号</button>
     <button class:active={tab === 'tasks'} onclick={() => switchTab('tasks')}>任务中心</button>
     <button class:active={tab === 'logs'} onclick={() => switchTab('logs')}>运行日志</button>
+    <button class:active={tab === 'usage'} onclick={() => switchTab('usage')}>用量</button>
     <button class:active={tab === 'add'} onclick={() => switchTab('add')}>添加账号</button>
     <button class:active={tab === 'import'} onclick={() => switchTab('import')}>导入</button>
   </nav>
@@ -941,6 +1015,129 @@
               </span>
             </div>
           {/each}
+        </div>
+      {/if}
+    </section>
+  {/if}
+
+  {#if tab === 'usage'}
+    <section>
+      {#if usageAvailable === false}
+        <div class="card">
+          <h2>用量</h2>
+          <p class="muted small">
+            用量历史未启用。在配置中设置 <code>usage_store.enabled</code> 后，这里会按日汇总请求数、令牌与积分，
+            并保留可筛选的明细；提示词、回复内容与任何凭据都不会落库。
+          </p>
+        </div>
+      {:else}
+        <div class="segmented">
+          {#each [7, 30, 90, 365] as d}
+            <button class:active={usageDays === d} onclick={() => changeUsageDays(d)}>{d} 天</button>
+          {/each}
+          <button onclick={loadUsage} disabled={usageLoading}>{usageLoading ? '刷新中…' : '刷新'}</button>
+        </div>
+        {#if usageMsg}<p class="msg error">{usageMsg}</p>{/if}
+
+        {#if usageSummary}
+          <div class="stats">
+            <div class="stat-card"><span class="k">请求</span><span class="v">{usageSummary.requests}</span></div>
+            <div class="stat-card"><span class="k">成功率</span><span class="v">{usageSummary.requests ? Math.round((usageSummary.ok / usageSummary.requests) * 100) : 0}%</span></div>
+            <div class="stat-card"><span class="k">输入</span><span class="v">{fmtTokens(usageSummary.input_tokens)}</span></div>
+            <div class="stat-card"><span class="k">输出</span><span class="v">{fmtTokens(usageSummary.output_tokens)}</span></div>
+            <div class="stat-card"><span class="k">总令牌</span><span class="v">{fmtTokens(usageSummary.total_tokens)}</span></div>
+            <div class="stat-card"><span class="k">积分</span><span class="v">{fmtCredits(usageSummary.credits)}</span></div>
+          </div>
+        {/if}
+
+        {#if usageDaily.length}
+          <div class="card">
+            <h2>每日趋势</h2>
+            <div class="bars" role="img" aria-label="每日总令牌用量">
+              {#each usageDaily as row (row.date)}
+                <div class="bar-col" title="{row.date} · {row.total_tokens || 0} tok · {fmtCredits(row.credits)} 积分">
+                  <div class="bar" style="height:{usageBarHeight(row)}%"></div>
+                </div>
+              {/each}
+            </div>
+            <p class="muted small">峰值日 {fmtTokens(Math.max(...usageDaily.map((r) => r.total_tokens || 0)))} tok</p>
+          </div>
+
+          <div class="table">
+            <div class="row head"><span>日期</span><span>请求</span><span>成功</span><span>失败</span><span>输入</span><span>输出</span><span>积分</span></div>
+            {#each usageDaily.filter((r) => r.requests > 0) as row (row.date)}
+              <div class="row">
+                <span class="mono small">{row.date}</span>
+                <span class="small">{row.requests}</span>
+                <span class="small">{row.ok}</span>
+                <span class="small">{row.failed}</span>
+                <span class="muted small">{fmtTokens(row.input_tokens)}</span>
+                <span class="muted small">{fmtTokens(row.output_tokens)}</span>
+                <span class="muted small">{fmtCredits(row.credits)}</span>
+              </div>
+            {/each}
+          </div>
+        {:else}
+          <div class="empty"><p>这段时间还没有请求记录。</p></div>
+        {/if}
+
+        {#if usageModels.length}
+          <div class="card">
+            <h2>模型分布</h2>
+            <div class="table">
+              <div class="row head"><span>模型</span><span>请求</span><span>输入</span><span>输出</span><span>总令牌</span><span>积分</span></div>
+              {#each usageModels as m (m.model)}
+                <div class="row">
+                  <span class="mono small">{m.model || '—'}</span>
+                  <span class="small">{m.requests}</span>
+                  <span class="muted small">{fmtTokens(m.input_tokens)}</span>
+                  <span class="muted small">{fmtTokens(m.output_tokens)}</span>
+                  <span class="small">{fmtTokens(m.total_tokens)}</span>
+                  <span class="muted small">{fmtCredits(m.credits)}</span>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
+
+        <div class="card">
+          <h2>请求明细</h2>
+          <div class="segmented filters">
+            <select bind:value={usageFilter.wire} onchange={loadUsageRecords}>
+              <option value="">全部接口</option>
+              <option value="chat">chat</option>
+              <option value="anthropic">anthropic</option>
+              <option value="responses">responses</option>
+            </select>
+            <input placeholder="模型筛选" bind:value={usageFilter.model} onchange={loadUsageRecords} />
+            <select bind:value={usageFilter.outcome} onchange={loadUsageRecords}>
+              <option value="">全部结果</option>
+              <option value="success">成功</option>
+              <option value="http_error">HTTP 错误</option>
+            </select>
+          </div>
+          <div class="table">
+            <div class="row head"><span>时间</span><span>接口</span><span>账号</span><span>模型</span><span>状态</span><span>耗时</span><span>Token</span><span>积分</span></div>
+            {#if usageRecords.length === 0}
+              <div class="row"><span class="muted small">没有匹配的记录</span></div>
+            {/if}
+            {#each usageRecords as rec (rec.request_id)}
+              <div class="row">
+                <span class="muted small">{fmtDateTime(rec.time)}</span>
+                <span class="mono small">{rec.wire || '—'}</span>
+                <span class="muted small">{rec.account || '—'}</span>
+                <span class="mono small">{rec.model || '—'}</span>
+                <span><span class="badge {rec.outcome === 'success' ? 'ok' : 'bad'}">{rec.status}</span></span>
+                <span class="muted small">{rec.duration_ms}ms{#if rec.stream} · 流式{/if}</span>
+                <span class="muted small">{fmtTokens(rec.total_tokens)}</span>
+                <span class="muted small" title={rec.credits_source || ''}>
+                  {#if rec.credits_source === 'pending'}<span class="badge warn">待结算</span>
+                  {:else if rec.credits_source}{fmtCredits(rec.credits)}
+                  {:else}—{/if}
+                </span>
+              </div>
+            {/each}
+          </div>
         </div>
       {/if}
     </section>
@@ -1363,4 +1560,30 @@
 
   .row.logrow { grid-template-columns: 1fr 1.7fr 1.2fr 1.1fr .7fr 1.3fr .8fr .9fr; }
   .row.loghead { background: var(--bg); color: var(--muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .04em; }
+
+  .bars {
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 120px;
+    margin: 8px 0 4px;
+  }
+  .bar-col {
+    flex: 1 1 0;
+    min-width: 3px;
+    height: 100%;
+    display: flex;
+    align-items: flex-end;
+  }
+  .bar {
+    width: 100%;
+    min-height: 2px;
+    border-radius: 2px 2px 0 0;
+    background: var(--accent, #4a7dff);
+    opacity: 0.85;
+  }
+  .filters select,
+  .filters input {
+    max-width: 180px;
+  }
 </style>

@@ -15,6 +15,7 @@ import (
 	"github.com/ZicongCheung/CodeNexus/internal/pool"
 	"github.com/ZicongCheung/CodeNexus/internal/reqlog"
 	"github.com/ZicongCheung/CodeNexus/internal/upstream"
+	"github.com/ZicongCheung/CodeNexus/internal/usagestore"
 )
 
 // ServiceName is reported by /healthz and /status.
@@ -36,6 +37,10 @@ func WithRefresher(r Refresher) Option { return func(s *Server) { s.refresher = 
 // observability endpoints.
 func WithRecorder(r *reqlog.Recorder) Option { return func(s *Server) { s.recorder = r } }
 
+// WithUsageStore installs the persisted usage history. Nil disables persistence
+// and the console falls back to the in-memory ring alone.
+func WithUsageStore(s *usagestore.Store) Option { return func(srv *Server) { srv.usage = s } }
+
 // Server wires the gateway routes.
 type Server struct {
 	cfg       *config.Config
@@ -43,6 +48,7 @@ type Server struct {
 	panel     http.Handler
 	refresher Refresher
 	recorder  *reqlog.Recorder
+	usage     *usagestore.Store
 	router    *modelRouter
 	gate      *snapshotGate
 	respCache *responsesCache
