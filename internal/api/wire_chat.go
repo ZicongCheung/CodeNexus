@@ -276,17 +276,33 @@ func callType(t string) string {
 	return t
 }
 
+// parseFloat reads a numeric field that may have arrived as JSON (float64) or
+// been synthesized from another protocol as a Go integer.
 func parseFloat(v any) *float64 {
-	if f, ok := v.(float64); ok {
+	switch n := v.(type) {
+	case float64:
+		return &n
+	case int:
+		f := float64(n)
+		return &f
+	case int64:
+		f := float64(n)
 		return &f
 	}
 	return nil
 }
 
 func parseInt(v any) *int {
-	if f, ok := v.(float64); ok {
-		n := int(f)
-		return &n
+	switch n := v.(type) {
+	case float64:
+		i := int(n)
+		return &i
+	case int:
+		i := n
+		return &i
+	case int64:
+		i := int(n)
+		return &i
 	}
 	return nil
 }

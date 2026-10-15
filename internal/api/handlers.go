@@ -124,6 +124,22 @@ func decodeBody(r *http.Request) (map[string]any, error) {
 	return body, nil
 }
 
+// defaultTurnFail renders a failure in the OpenAI error shape: a client-side
+// failure becomes a 400, and a pool or upstream failure is dispatched on its
+// own type.
+func defaultTurnFail(w http.ResponseWriter, err error, client bool) {
+	if client {
+		writeError(w, http.StatusBadRequest, err.Error(), "")
+		return
+	}
+	var ue *upstream.Error
+	if errors.As(err, &ue) {
+		writeUpstreamError(w, ue)
+		return
+	}
+	writePoolError(w, err)
+}
+
 // writePoolError reports that no account could be leased.
 func writePoolError(w http.ResponseWriter, err error) {
 	var na *pool.ErrNoAccount

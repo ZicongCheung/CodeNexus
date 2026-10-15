@@ -62,6 +62,8 @@ func NewServer(cfg *config.Config, p *pool.Pool, panel http.Handler, opts ...Opt
 	mux.HandleFunc("/status", s.withAuth(s.handleStatus))
 	mux.HandleFunc("/v1/models", s.withAuth(s.handleModels))
 	mux.HandleFunc("/v1/chat/completions", s.record("chat", s.withAuth(s.handleChat)))
+	mux.HandleFunc("/v1/messages", s.record("anthropic", s.withAuth(s.handleAnthropicMessages)))
+	mux.HandleFunc("/v1/messages/count_tokens", s.withAuth(s.handleAnthropicCountTokens))
 	if panel != nil {
 		mux.Handle("/panel/", panel)
 		mux.Handle("/panel", panel)

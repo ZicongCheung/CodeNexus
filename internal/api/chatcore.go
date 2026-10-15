@@ -11,6 +11,8 @@ package api
 import (
 	"context"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/ZicongCheung/CodeNexus/internal/account"
 	"github.com/ZicongCheung/CodeNexus/internal/logx"
@@ -38,6 +40,24 @@ type turn struct {
 	// delta worth showing, so a failure before that can still be retried on
 	// another account without the client having seen a status code.
 	Open func(w http.ResponseWriter) (responder, error)
+	// IdleAfter, when positive, bounds how long the upstream may stay silent
+	// before the answer is opened anyway. A protocol whose clients abort on a
+	// missing opening (Anthropic's message_start) sets it; a protocol that can
+	// simply wait leaves it zero and keeps failover open for the whole wait.
+	IdleAfter time.Duration
+	// Fail renders a failure in the protocol's own error shape. client
+	// distinguishes a request the gateway rejected from one the pool or an
+	// upstream failed; nil means the OpenAI shape.
+	Fail func(w http.ResponseWriter, err error, client bool)
+}
+
+// fail renders a failure through the turn's own error shape.
+func (t *turn) fail(w http.ResponseWriter, err error, client bool) {
+	if t.Fail != nil {
+		t.Fail(w, err, client)
+		return
+	}
+	defaultTurnFail(w, err, client)
 }
 
 // responder renders a streamed answer. Delta receives every upstream delta,
@@ -64,7 +84,7 @@ func (s *Server) runChat(w http.ResponseWriter, r *http.Request, t *turn) {
 
 	sources, modelName, err := s.router.Plan(t.Model)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error(), "")
+		t.fail(w, err, true)
 		return
 	}
 	t.Request.Model = modelName
@@ -89,7 +109,7 @@ func (s *Server) runChat(w http.ResponseWriter, r *http.Request, t *turn) {
 				// Keep the upstream's own explanation when there is one.
 				break
 			}
-			writePoolError(w, aerr)
+			t.fail(w, aerr, false)
 			return
 		}
 		// Each source resolves the flat model name in its own vocabulary, so
@@ -129,7 +149,7 @@ func (s *Server) runChat(w http.ResponseWriter, r *http.Request, t *turn) {
 				return
 			}
 			if !ue.Retryable() || i == attempts-1 {
-				writeUpstreamError(w, ue)
+				t.fail(w, ue, false)
 				return
 			}
 			tried[lease.Account.Key()] = true
@@ -155,13 +175,13 @@ func (s *Server) runChat(w http.ResponseWriter, r *http.Request, t *turn) {
 		ue := lease.Fail(cerr)
 		logx.Warnf("chat attempt %d/%d failed: %v", i+1, attempts, cerr)
 		if !ue.Retryable() || i == attempts-1 {
-			writeUpstreamError(w, ue)
+			t.fail(w, ue, false)
 			return
 		}
 		tried[lease.Account.Key()] = true
 		lastErr = ue
 	}
-	writeUpstreamError(w, lastErr)
+	t.fail(w, lastErr, false)
 }
 
 // finishNonStream records the answer's accounting and renders it.
@@ -181,9 +201,25 @@ func finishNonStream(hint *recHint, t *turn, w http.ResponseWriter, resp *upstre
 // client, which decides whether a retry on another account is still possible,
 // and the upstream turn id when the stream carried one.
 func (s *Server) runStream(w http.ResponseWriter, r *http.Request, t *turn, u upstream.Upstream, acc *account.Account) (bool, string, error) {
-	var out responder
+	op := &streamOpener{open: func() (responder, error) { return t.Open(w) }}
 	turnID := ""
-	started := false
+
+	// The keepalive opens the answer if the upstream stays silent past the
+	// window. It races the deltas deliberately: whichever gets there first
+	// opens, and the opener makes sure only one of them does.
+	var stop chan struct{}
+	if t.IdleAfter > 0 {
+		stop = make(chan struct{})
+		go func() {
+			timer := time.NewTimer(t.IdleAfter)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+				op.Keepalive()
+			case <-stop:
+			}
+		}()
+	}
 
 	emit := func(d upstream.StreamDelta) error {
 		if turnID == "" && d.TurnID != "" {
@@ -194,35 +230,111 @@ func (s *Server) runStream(w http.ResponseWriter, r *http.Request, t *turn, u up
 		if !renderable(d) {
 			return nil
 		}
-		if !started {
-			var err error
-			out, err = t.Open(w)
-			if err != nil {
-				return err
-			}
-			started = true
-		}
-		return out.Delta(d)
+		return op.Emit(d)
 	}
 
-	if err := u.ChatStream(r.Context(), acc, t.Request, emit); err != nil {
+	err := u.ChatStream(r.Context(), acc, t.Request, emit)
+	if stop != nil {
+		close(stop)
+	}
+
+	if err != nil {
+		out, started := op.Abort()
 		if !started {
 			return false, turnID, err
 		}
 		out.Fail(err)
 		return true, turnID, err
 	}
+	out, started := op.Finish()
 	if !started {
-		// The upstream produced nothing renderable but did succeed. Open now so
-		// the client still receives a well-formed, empty answer.
-		var err error
-		out, err = t.Open(w)
-		if err != nil {
-			return false, turnID, err
-		}
+		// Nothing was written and the answer could not be opened.
+		return false, turnID, op.err()
 	}
 	out.End()
 	return true, turnID, nil
+}
+
+// streamOpener serializes the first write of a streaming answer between the
+// upstream's deltas and the optional keepalive timer, so exactly one of them
+// opens the response. After Finish or Abort the attempt is sealed and a late
+// keepalive can no longer write into a response the caller means to retry.
+type streamOpener struct {
+	open func() (responder, error)
+
+	mu      sync.Mutex
+	out     responder
+	started bool
+	sealed  bool
+	openErr error
+}
+
+// Emit forwards a renderable delta, opening the answer first when needed.
+func (o *streamOpener) Emit(d upstream.StreamDelta) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.sealed {
+		return nil
+	}
+	if err := o.openLocked(); err != nil {
+		return err
+	}
+	return o.out.Delta(d)
+}
+
+// Keepalive opens the answer on the idle path. It is a no-op once a delta has
+// opened it or the attempt has been sealed.
+func (o *streamOpener) Keepalive() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.sealed {
+		return
+	}
+	if err := o.openLocked(); err != nil {
+		logx.Warnf("keepalive could not open the stream: %v", err)
+	}
+}
+
+// Finish concludes a successful attempt, opening an empty answer when the
+// upstream produced nothing renderable. It reports whether the answer is open.
+func (o *streamOpener) Finish() (responder, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if !o.sealed && !o.started {
+		_ = o.openLocked()
+	}
+	o.sealed = true
+	return o.out, o.started
+}
+
+// Abort ends a failed attempt without opening anything, and reports whether a
+// write already happened so the caller knows the failure is committed.
+func (o *streamOpener) Abort() (responder, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.sealed = true
+	return o.out, o.started
+}
+
+// err returns the error from the last failed open, if any.
+func (o *streamOpener) err() error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.openErr
+}
+
+// openLocked opens the answer once. The caller must hold mu.
+func (o *streamOpener) openLocked() error {
+	if o.started {
+		return nil
+	}
+	out, err := o.open()
+	if err != nil {
+		o.openErr = err
+		return err
+	}
+	o.out, o.started = out, true
+	return nil
 }
 
 // renderable reports whether a delta carries anything a client should see. A
