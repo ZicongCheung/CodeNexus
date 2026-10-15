@@ -92,12 +92,14 @@
 - [x] 不做：`src/auth_cli.py` 的 OAuth 设备码流程（上游 404、源码自述不可用）；CLI 多方言文本内工具块解析（ADR-43）；上游模式运行时热切换（留 P5）
 - [x] 调研副本 `_deps/` 已删除（P3 收尾）
 
-## P4 · 协议超集与高级能力
-- [ ] `/v1/responses`（Codex，含 `previous_response_id`）
-- [ ] `/v1/messages` + `/v1/messages/count_tokens`（Anthropic）
-- [ ] 工具调用（`delta.tool_calls` / `tool_use` / `function_call`）
-- [ ] thinking 分离、自动续写、1M 上下文、图片输入、思考强度映射
-- [ ] 用量与积分记录迁入 SQLite
+## P4 · 协议超集与高级能力（进行中）
+> 决策 ADR-46~49：全量一次交付 · `previous_response_id` = 内存有界 LRU（不落盘）· Anthropic = 严格对齐官方语义 · 落库 = 用量/积分 + 请求日志摘要（窄字段，正文与凭证永不落）。
+- [ ] `/v1/responses`（Codex，含 `previous_response_id`，内存 LRU）
+- [ ] `/v1/messages` + `/v1/messages/count_tokens`（Anthropic，严格官方语义）
+- [ ] 工具调用三向映射与配对（`delta.tool_calls` / `tool_use` / `function_call`）
+- [ ] thinking 分离、`reasoning_effort` 映射
+- [ ] 用量与积分 + 请求日志摘要迁入 SQLite（`modernc.org/sqlite`，纯 Go 无 CGO）
+- [ ] 待探测后再定：图片输入、1M Max、自动续写（见 EXECUTION_PLAN §4.2）
 - [ ] 来源 B 桌面端「自定义模型」入站兼容（纯协议翻译，无原生依赖；可选、可裁剪）
 
 ## P5 · 统一面板重设计 + 任务合并 + 配置热生效
