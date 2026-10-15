@@ -24,6 +24,7 @@
 | v1.9 | 2026-10-15 | P4 第一块（协议中立对话核心）与 #43（工具与 thinking 中立下层）完成并入档；记录第二轮 P4 决策与 P4 实现纪实 | 张 |
 | v1.10 | 2026-10-15 | #42 完成并入档；记录第三轮 P4 决策（`count_tokens` 估算 / 图片透传 / 校验从宽 / `signature` 空串 / 看门狗保活）；**按参考实现修订 ADR-48 为「形状严格、校验从宽」** | 张 |
 | v1.11 | 2026-10-15 | #41 完成并入档；记录第四轮 P4 决策（推理默认隐藏 / 孤儿工具输出保留为惰性块 / 工具类型全量 / LRU 参数与哨兵）；**P4 三客户端直连的协议面至此补齐** | 张 |
+| v1.12 | 2026-10-15 | #44 完成并入档；记录第五轮 P4 决策（纯 SQL 聚合 / 明细 10 万条 / 面板最小可用含趋势 / 与 reqlog 各司其职）；**P4 全部编码工作至此完成，仅剩真机探测项** | 张 |
 
 **阅读指引**
 
@@ -1050,6 +1051,14 @@ TraeWork（Trae 桌面 Agent 客户端）相关能力是**两件方向相反的�
 > - **LRU 参数**：**全对齐参考**——`ttl=3600s` / `1024` 条 / `2MiB` / `256` 条消息；**超限哨兵**（存"不可用"条目 → 下次明确报错，而非静默当作未命中）；未命中/过期 → 400 并提示"重发全量 input"（ADR-47 的"提示"落地于此）；`store:false` 则本轮不入缓存。
 > - **刻意不做 `_StreamDeltaReconciler`**：参考为"同一字段混发增量与累积快照"的 Trae 上游而设；我们的适配器已在 `remote.go`/`toolcall.go` 统一为增量，无需再做启发式判别。
 
+> **P4 决策（第五轮 · #44 落库，用户拍板：全部取推荐档）**
+> - **参考事实**：两个参考都**不用 SQLite**——Trae2api 用 `usage_records.json`（明细，默认仅 1000 条）+ `usage_stats.json`（日聚合 400 天，靠"减旧加新"的符号修正保持精确）；wb2api 面板只有内存 ring + JSONL 归档，无持久用量页。因此 ADR-49 的 SQLite 是**有意升级**，参考能借的是**口径**（窄字段 / 明细剥离计费关联 id / 日聚合维度）。
+> - **每日聚合**：**纯 SQL 实时聚合**（查询时按日分组），不建聚合表——行被原地更新（积分事后结算）后聚合天然精确，参考那套易错的符号修正整个不需要。
+> - **明细保留**：**默认 10 万条（可配置）**。参考的 1000 条上限是其"每次全量重写 JSON 文件"成本的产物；SQLite 逐行插入没有这个成本，保留更久即可免费拿到数月趋势。
+> - **面板「用量」页**：**最小可用含趋势**——总览卡（请求/成功率/输入/输出/总令牌/积分）+ 每日趋势柱状图 + 模型分布 + 可筛选明细表（接口/模型/结果）。视觉增强留 P5（ADR-27 不重构）。
+> - **与内存 reqlog 的分工**：**各司其职**——reqlog（内存环形）继续做"最近请求"实时视图（TTFB/速率/零 IO）；SQLite 只做持久层与聚合/历史查询，落库异步挂在现有记录路径上，事后结算按 `request_id` 原地 UPDATE。
+> - **红线重申**：表里只有窄字段（时间/线格式/账号标签/模型/状态/token/积分/耗时）；提示词、回答正文与凭证永不落库，对外剥离计费关联 id。
+
 **P4 实现纪实（as-built，随交付推进更新）**
 
 | 项 | 落点 | 状态 |
@@ -1072,7 +1081,13 @@ TraeWork（Trae 桌面 Agent 客户端）相关能力是**两件方向相反的�
 | Responses 推理：默认隐藏、显式 `thinking`/`include_reasoning` 才出，输出前压缩（≤6 行/800 字符、去重）；历史里只保留压缩后的摘要 | `internal/api/responses_state.go`、`internal/api/wire_responses.go` | ✅ |
 | 中立模型补一项：`Message.ReasoningContent`（有界推理摘要随历史延续），`parseMessages`/`agentMessages` 同步携带 | `internal/upstream/upstream.go`、`internal/api/wire_chat.go`、`internal/upstream/traecn/ide.go` | ✅ |
 | 单测（Responses）：字符串/`instructions`、`function_call`+`output` 配对、孤儿输出惰性化、`tool_choice` 与 custom 降级、`previous_response_id` 续链 / **重叠去重** / 未命中 400 / `store:false`、非流式 output 项与推理门槛、流式事件序列与 `sequence_number`、推理默认不泄漏、函数参数增量、**流式回合的 call 绑定可被下一轮配对**、`max_output_tokens` 钳制 | `internal/api/wire_responses_test.go` | ✅ |
-| 用量落库 | 见任务 #44 | ⏳ |
+| SQLite 依赖：`modernc.org/sqlite`（纯 Go 无 CGO），国内镜像单命令 `GOPROXY` 覆盖引入 | `go.mod` | ✅ |
+| 存储层：`usagestore`（WAL + 单连接 + 建表迁移 + `Insert` upsert + `SetCredits` 原地改账 + `prune` 按条数上界裁剪 + `Records` 过滤 + `Daily`/`Summary`/`Models` 实时聚合，日界按操作者时区偏移） | `internal/usagestore/usagestore.go` | ✅ |
+| 落库接线：`WithUsageStore`；请求完成后异步插行；事后结算按 `request_id` 原地 UPDATE；`usage_store` 配置段（enabled/path/max_records，默认 10 万条，落 `DataDir/usage.db`） | `internal/api/{server,recording}.go`、`internal/config/config.go`、`cmd/codenexus/main.go` | ✅ |
+| 面板 API：`/panel/api/usage/{summary,daily,records}`（时间窗 1~366 天、明细支持线格式/模型/结果/时间区间过滤；未启用时返回 `available:false`） | `internal/panel/usage.go` | ✅ |
+| 面板「用量」页：总览卡 + 每日趋势柱状图 + 模型分布 + 可筛选明细表（接口/模型/结果），未启用时给出开启指引 | `web/src/App.svelte` → `internal/panel/dist` | ✅ |
+| 单测：落库/读回/积分事后改账、四类过滤、日聚合随改账自动正确且不串日、按条数裁剪丢最旧、nil 存储全 no-op | `internal/usagestore/usagestore_test.go` | ✅ |
+| 真机探测项（图片输入 / 1M Max / `reasoning_effort` / 三客户端实连） | P4 收尾 | ⏳ |
 
 ### P5 · 统一面板重设计 + 任务合并 + 配置热生效
 
