@@ -23,6 +23,7 @@
 | v1.8 | 2026-10-15 | P3 完成并入档；追加 ADR-46~49（P4 交付节奏 / Responses 会话状态 / Anthropic 保真度 / 遥测落库范围） | 张 |
 | v1.9 | 2026-10-15 | P4 第一块（协议中立对话核心）与 #43（工具与 thinking 中立下层）完成并入档；记录第二轮 P4 决策与 P4 实现纪实 | 张 |
 | v1.10 | 2026-10-15 | #42 完成并入档；记录第三轮 P4 决策（`count_tokens` 估算 / 图片透传 / 校验从宽 / `signature` 空串 / 看门狗保活）；**按参考实现修订 ADR-48 为「形状严格、校验从宽」** | 张 |
+| v1.11 | 2026-10-15 | #41 完成并入档；记录第四轮 P4 决策（推理默认隐藏 / 孤儿工具输出保留为惰性块 / 工具类型全量 / LRU 参数与哨兵）；**P4 三客户端直连的协议面至此补齐** | 张 |
 
 **阅读指引**
 
@@ -1042,6 +1043,13 @@ TraeWork（Trae 桌面 Agent 客户端）相关能力是**两件方向相反的�
 > - **`thinking.signature`**：**对齐参考取空串**（字段在场但不发 `signature_delta`；该字段对客户端不透明，参考已在 Claude Code 上验证）。据此**移除 #43 的 `syntheticSignature`**，避免死代码。
 > - **流式开场**：**偏离参考、取看门狗折中**——首个 delta 前仍可故障转移；静默超过 15s 则补发 `message_start`+`ping`。参考是"一进上游就发"（放弃换号），我们保留换号以不把一次 429 变成用户可见错误；风险是上游慢而无错时被 Claude Code 在 ~60s 处中断，看门狗即为此设。
 
+> **P4 决策（第四轮 · #41 Responses，用户拍板：全部取推荐档；均以参考实现 `Trae2api-cn/src/responses_api.py` 为准）**
+> - **推理可见性**：**默认隐藏**——仅当客户端显式 `thinking` / `include_reasoning` 才输出 `reasoning` 项，且**压缩**（≤6 行 / 800 字符、行级去重）；`reasoning_effort` 只调生成质量、**绝不**顺带泄漏思维链（修订第二轮的"默认出 reasoning 项"）。参考源码注释明示：上游本就会内部产出思维链，"不请自来地外泄"是隐私问题。
+> - **孤儿工具输出**：**保留为惰性块**——降级为带安全包裹的 user 消息（`item_type/call_id/reason/result`，明示"不可执行、不得重复调用"），而非沿用 #43 的"丢弃"。Codex 回放历史时丢内容会让模型"忘掉"工具结果；Responses 的孤儿可证实（`call_id` 查不到绑定），不违反 #43 的"只丢可证实的孤儿"原则。
+> - **工具类型**：**全量对齐参考**——`function` / `custom`（降级为单 `input` 字符串参数）/ `namespace`（`ns__name` 拼接 + 名字净化去重）/ `tool_search`，以及 `local_shell` / `shell` / `apply_patch` / `program` 固定名调用。任何客户端发什么都能正确翻译。
+> - **LRU 参数**：**全对齐参考**——`ttl=3600s` / `1024` 条 / `2MiB` / `256` 条消息；**超限哨兵**（存"不可用"条目 → 下次明确报错，而非静默当作未命中）；未命中/过期 → 400 并提示"重发全量 input"（ADR-47 的"提示"落地于此）；`store:false` 则本轮不入缓存。
+> - **刻意不做 `_StreamDeltaReconciler`**：参考为"同一字段混发增量与累积快照"的 Trae 上游而设；我们的适配器已在 `remote.go`/`toolcall.go` 统一为增量，无需再做启发式判别。
+
 **P4 实现纪实（as-built，随交付推进更新）**
 
 | 项 | 落点 | 状态 |
@@ -1057,7 +1065,14 @@ TraeWork（Trae 桌面 Agent 客户端）相关能力是**两件方向相反的�
 | Anthropic 出站：`message_start`+`ping`（看门狗兜底）→ `content_block_start/delta/stop`（thinking `""` 签名 / text / tool_use `input_json_delta`）→ `message_delta`（`stop_reason` 七值全枚举）→ `message_stop`；错误走官方 `{"type":"error","error":{...}}` 信封（池耗尽 = 529 `overloaded_error`） | `internal/api/wire_anthropic.go` | ✅ |
 | `count_tokens`：`POST /v1/messages/count_tokens` 本地估算（图片固定 1000），从不触达上游、从不计费 | `internal/api/tokens.go`、`internal/api/wire_anthropic.go` | ✅ |
 | 单测：追踪器（增量/快照/重复/乱序/首见胜出）、配对（孤儿/正确/错配/重复/无 id/断链/系统消息）、入站端到端（工具字段透传 + 孤儿丢弃）、出站渲染（`index` 恒在、续片不空写）、Anthropic（入站四项翻译、非流式块、流式事件序列、thinking/tool_use 分片、count_tokens、**看门狗先于首 token 开流**） | `internal/upstream/{toolcall,toolpair}_test.go`、`internal/api/{wire_chat,wire_anthropic}_test.go`、`internal/upstream/traecn/messages_test.go` | ✅ |
-| `/v1/responses`（含 LRU）、用量落库 | 见任务 #41/#44 | ⏳ |
+| Responses 状态：`responsesSessionCache`（内存 LRU：TTL/条数/字节/消息数四重上界 + 超限哨兵 + `get` 返回深拷贝）、`responsesBinding`（chat 名 ↔ Responses 名双向绑定） | `internal/api/responses_state.go` | ✅ |
+| Responses 入站：`responsesToOpenAI`（`instructions`→developer、`input` 字符串/items 折叠、工具重放合并、`previous_response_id` 历史合并 + **重叠去重**、`max_output_tokens` 钳制、`reasoning.effort`→`reasoning_effort`） | `internal/api/wire_responses.go`、`internal/api/responses_items.go` | ✅ |
+| Responses 工具全量：function / custom（降级为 `input` 参数）/ namespace（`ns__name`）/ tool_search（合成 `query` 参数）/ local_shell·shell·apply_patch·program 固定名；孤儿输出降级为惰性 untrusted 块 | `internal/api/responses_state.go`、`internal/api/responses_items.go` | ✅ |
+| Responses 出站：`response.created`+`in_progress`（看门狗兜底）→ `output_item.added` → `content_part.added` → `output_text.delta` / `function_call_arguments.delta` / `reasoning_summary_*` → 各 `.done` → `response.completed`/`incomplete`/`failed`，每事件带 `sequence_number`；错误走 `{"error":{...}}` 信封 | `internal/api/wire_responses.go` | ✅ |
+| Responses 推理：默认隐藏、显式 `thinking`/`include_reasoning` 才出，输出前压缩（≤6 行/800 字符、去重）；历史里只保留压缩后的摘要 | `internal/api/responses_state.go`、`internal/api/wire_responses.go` | ✅ |
+| 中立模型补一项：`Message.ReasoningContent`（有界推理摘要随历史延续），`parseMessages`/`agentMessages` 同步携带 | `internal/upstream/upstream.go`、`internal/api/wire_chat.go`、`internal/upstream/traecn/ide.go` | ✅ |
+| 单测（Responses）：字符串/`instructions`、`function_call`+`output` 配对、孤儿输出惰性化、`tool_choice` 与 custom 降级、`previous_response_id` 续链 / **重叠去重** / 未命中 400 / `store:false`、非流式 output 项与推理门槛、流式事件序列与 `sequence_number`、推理默认不泄漏、函数参数增量、**流式回合的 call 绑定可被下一轮配对**、`max_output_tokens` 钳制 | `internal/api/wire_responses_test.go` | ✅ |
+| 用量落库 | 见任务 #44 | ⏳ |
 
 ### P5 · 统一面板重设计 + 任务合并 + 配置热生效
 

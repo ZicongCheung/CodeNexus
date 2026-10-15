@@ -96,14 +96,15 @@
 > 决策 ADR-46~49：全量一次交付 · `previous_response_id` = 内存有界 LRU（不落盘）· Anthropic = 形状严格、校验从宽（第三轮按参考实现修订）· 落库 = 用量/积分 + 请求日志摘要（窄字段，正文与凭证永不落）。
 > 第二轮决策（#43）：Anthropic `thinking` 保真（`signature` 最终取空串）· Responses 推理出**独立 `reasoning` 项** · 入站工具配对不合法**自动修复并记日志** · 分片**保真不造假**。
 > 第三轮决策（#42）：`count_tokens` 本地估算 · 图片透传（工具结果内降级为可见占位）· 校验从宽（`max_tokens` 缺失填默认值）· `message_start` 看门狗保活（保留首字节前故障转移）。
+> 第四轮决策（#41）：推理**默认隐藏**（显式 `thinking`/`include_reasoning` 才出，且压缩）· 孤儿工具输出**保留为惰性块**（不丢弃）· 工具类型**全量**（function/custom/namespace/tool_search + shell/patch 系列）· LRU 参数全对齐参考（含超限哨兵）。
 - [x] 协议中立对话核心（选号 / 首字节前故障转移 / 401 自愈 / 记账 / 结算；wire 决定形态）
 - [x] 工具调用与 thinking 的中立下层：中立消息模型（`Message.ToolCalls`/`ToolCallID`）、分片追踪器（`index` 键控，增量/快照/乱序/重复）、配对校验（丢孤儿并记日志）
 - [x] `/v1/messages`（Anthropic：`content_block` 流式事件、`stop_reason` 全枚举、thinking 块、`tool_use` `input_json_delta`、错误信封）
 - [x] `/v1/messages/count_tokens`（本地估算，不触达上游、不计费）
 - [x] 核心看门狗保活（`turn.IdleAfter` + `streamOpener`：静默超时即开流并 `ping`，仍保留首字节前换号）
-- [ ] `/v1/responses`（Codex，含 `previous_response_id`，内存 LRU）
-- [ ] 工具调用三向映射与配对落地到 Responses 入口（`function_call`）
-- [ ] thinking 分离落地到 Responses 入口、`reasoning_effort` 映射
+- [x] `/v1/responses`（Codex：带 `sequence_number` 的事件流、`previous_response_id` 内存 LRU + 超限哨兵、工具名双向绑定、推理默认隐藏、孤儿输出惰性化）
+- [x] 工具调用三向映射与配对落地（`delta.tool_calls` / `tool_use` / `function_call`）
+- [ ] `reasoning_effort` 映射真机探测（§4.2 待验证项）
 - [ ] 用量与积分 + 请求日志摘要迁入 SQLite（`modernc.org/sqlite`，纯 Go 无 CGO）
 - [ ] 待探测后再定：图片输入真机链路、1M Max、自动续写（见 EXECUTION_PLAN §4.2）
 - [ ] 来源 B 桌面端「自定义模型」入站兼容（纯协议翻译，无原生依赖；可选、可裁剪）
