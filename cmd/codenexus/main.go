@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ZicongCheung/CodeNexus/internal/account"
 	"github.com/ZicongCheung/CodeNexus/internal/api"
 	"github.com/ZicongCheung/CodeNexus/internal/authrefresh"
 	"github.com/ZicongCheung/CodeNexus/internal/authstore"
@@ -26,12 +27,14 @@ import (
 	"github.com/ZicongCheung/CodeNexus/internal/reqlog"
 	"github.com/ZicongCheung/CodeNexus/internal/scheduler"
 	"github.com/ZicongCheung/CodeNexus/internal/upstream"
+	"github.com/ZicongCheung/CodeNexus/internal/upstream/traecn"
 	"github.com/ZicongCheung/CodeNexus/internal/upstream/workbuddy"
 )
 
 // The WorkBuddy adapter implements interactive device login; the console relies
 // on it being registered.
 var _ upstream.DeviceAuth = (*workbuddy.Client)(nil)
+var _ upstream.DeviceAuth = (*traecn.Client)(nil)
 
 // version is overridable at build time via -ldflags "-X main.version=...".
 var version = "0.0.0-dev"
@@ -97,6 +100,7 @@ func run(configPath string) error {
 		logx.Infof("upgraded %d credential file(s) to encrypted storage", n)
 	}
 	if env := authstore.AccountsFromEnv(); len(env) > 0 {
+		env = identifyEnvAccounts(env)
 		logx.Infof("loaded %d account(s) from environment variables", len(env))
 		accts = append(accts, env...)
 	}
@@ -121,7 +125,26 @@ func run(configPath string) error {
 			DisableMarkupRepair: !cfg.Features.RepairToolMarkup,
 		}))
 	}
-	// Trae CN upstream is registered in a later phase.
+	if cfg.Upstreams.TraeCN.Enabled {
+		upstream.Register(traecn.New(traecn.Config{
+			BaseURL:        cfg.Upstreams.TraeCN.BaseURL,
+			RemoteBaseURL:  cfg.Upstreams.TraeCN.RemoteBaseURL,
+			AuthBaseURL:    cfg.Upstreams.TraeCN.AuthBaseURL,
+			AuthorizeURL:   cfg.Upstreams.TraeCN.AuthorizeURL,
+			ClientID:       cfg.Upstreams.TraeCN.ClientID,
+			TimeoutSeconds: cfg.Upstreams.TraeCN.TimeoutSeconds,
+			MaxTokens:      cfg.Upstreams.TraeCN.MaxTokens,
+			WebLoginPort:   cfg.Upstreams.TraeCN.WebLoginPort,
+			DeviceBrand:    cfg.Upstreams.TraeCN.DeviceBrand,
+			DeviceType:     cfg.Upstreams.TraeCN.DeviceType,
+			OSVersion:      cfg.Upstreams.TraeCN.OSVersion,
+			AppVersion:     cfg.Upstreams.TraeCN.AppVersion,
+			IDEVersion:     cfg.Upstreams.TraeCN.IDEVersion,
+			AppID:          cfg.Upstreams.TraeCN.AppID,
+			UpstreamMode:   cfg.Upstreams.TraeCN.UpstreamMode,
+			AutoRoute:      cfg.Upstreams.TraeCN.AutoRoute,
+		}))
+	}
 
 	// Background credential refresh keeps tokens from expiring unnoticed.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -163,6 +186,9 @@ func run(configPath string) error {
 	srv := api.NewServer(cfg, p, console,
 		api.WithRefresher(refresher),
 		api.WithRecorder(recorder))
+	// Model catalogues drive cross-source routing; loading them in the
+	// background keeps the first request from paying for it.
+	srv.WarmModels(ctx)
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           srv,
@@ -349,4 +375,39 @@ func buildPool(cfg *config.Config) *pool.Pool {
 	p.SetStatePath(filepath.Join(cfg.DataDir, "pool-state.json"))
 	p.SetErrorHandler(func(err error) { logx.Warnf("flush pool state: %v", err) })
 	return p
+}
+
+// identifyEnvAccounts fills in the identity of environment-injected accounts
+// and drops the ones whose identity cannot be determined, because an account
+// without a uid cannot be keyed in the pool.
+//
+// A Trae token is a JWT that carries its own user id, so an operator only has
+// to supply the credential; the identity is read back out of it.
+func identifyEnvAccounts(in []*account.Account) []*account.Account {
+	out := make([]*account.Account, 0, len(in))
+	for _, acc := range in {
+		if acc == nil {
+			continue
+		}
+		if acc.UID == "" && acc.Source == account.SourceTraeCN {
+			acc.UID = traecn.TokenUserID(acc.AccessToken)
+			if acc.Label == "" || acc.Label == "env" {
+				acc.Label = shortLabel(acc.UID)
+			}
+		}
+		if acc.UID == "" {
+			logx.Warnf("skipping environment %s account: no uid and none derivable from the token", acc.Source)
+			continue
+		}
+		out = append(out, acc)
+	}
+	return out
+}
+
+// shortLabel renders a display label from an account id.
+func shortLabel(uid string) string {
+	if len(uid) > 12 {
+		return uid[:12]
+	}
+	return uid
 }

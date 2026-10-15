@@ -137,6 +137,16 @@ type DeviceAuth interface {
 	DevicePoll(ctx context.Context, realm, state string) (*account.Account, bool, error)
 }
 
+// CredentialAcceptor is implemented by adapters that can turn a manually pasted
+// credential (a long-lived token, optionally with a refresh token) into a ready
+// account. The console drives it so a user can onboard without an interactive
+// browser flow; adapters without it simply report manual entry as unsupported.
+type CredentialAcceptor interface {
+	// AcceptCredential validates and normalizes a pasted credential. uid and
+	// label may be empty and are then derived from the token when possible.
+	AcceptCredential(token, refreshToken, uid, label string) (*account.Account, error)
+}
+
 var registry = map[Source]Upstream{}
 
 // Register makes an upstream available to the router.

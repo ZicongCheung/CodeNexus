@@ -362,11 +362,29 @@ func (p *Pool) Paused(key string) bool {
 
 // PickOptions describes one acquisition attempt.
 type PickOptions struct {
-	Source     upstream.Source
+	Source upstream.Source
+	// Sources, when non-empty, replaces Source with an allow-list. Selection
+	// then weighs the accounts of every listed source on the same scale, which
+	// is how a model served by several sources is routed to whichever source
+	// currently holds the most attractive account.
+	Sources    []upstream.Source
 	Model      string
 	SessionKey string
 	// Exclude holds account keys already tried for this request.
 	Exclude map[string]bool
+}
+
+// allowsSource reports whether an account of src may serve this request.
+func (o PickOptions) allowsSource(src upstream.Source) bool {
+	if len(o.Sources) == 0 {
+		return src == o.Source
+	}
+	for _, s := range o.Sources {
+		if s == src {
+			return true
+		}
+	}
+	return false
 }
 
 // Acquire reserves an account for a request. When every matching account is
@@ -425,7 +443,7 @@ func (p *Pool) candidatesLocked(now time.Time, opts PickOptions) []*entry {
 	out := make([]*entry, 0, len(p.order))
 	for _, k := range p.order {
 		e := p.entries[k]
-		if e.acc.Source != opts.Source || opts.Exclude[k] {
+		if !opts.allowsSource(e.acc.Source) || opts.Exclude[k] {
 			continue
 		}
 		if !e.selectable(now, opts.Model, p.opts.MaxInFlight) {
@@ -447,7 +465,7 @@ func (p *Pool) nextReadyLocked(now time.Time, opts PickOptions) time.Duration {
 	busy := false
 	for _, k := range p.order {
 		e := p.entries[k]
-		if e.acc.Source != opts.Source || opts.Exclude[k] || !e.active() {
+		if !opts.allowsSource(e.acc.Source) || opts.Exclude[k] || !e.active() {
 			continue
 		}
 		if e.inFlight >= p.opts.MaxInFlight &&

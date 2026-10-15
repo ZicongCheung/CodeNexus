@@ -153,3 +153,48 @@ func TestAccountsFromEnv(t *testing.T) {
 		t.Fatal("expected no account without a token")
 	}
 }
+
+func TestTraeFromEnv(t *testing.T) {
+	// Isolate from any ambient variables so the assertions below are exact.
+	t.Setenv(EnvWorkBuddyToken, "")
+	t.Setenv(EnvTraeToken, "")
+	t.Setenv(EnvTraeRefreshToken, "")
+	t.Setenv(EnvTraeUID, "")
+	t.Setenv(EnvTraeLabel, "")
+	t.Setenv(EnvTraeExpiresAt, "")
+	t.Setenv(EnvTraeExpiresIn, "")
+
+	t.Setenv(EnvTraeToken, "trae-token")
+	t.Setenv(EnvTraeUID, "t7")
+	t.Setenv(EnvTraeRefreshToken, "trae-refresh")
+	t.Setenv(EnvTraeLabel, "my-trae")
+	t.Setenv(EnvTraeExpiresIn, "120")
+
+	got := AccountsFromEnv()
+	if len(got) != 1 {
+		t.Fatalf("len = %d", len(got))
+	}
+	acc := got[0]
+	if acc.Source != account.SourceTraeCN {
+		t.Fatalf("source = %q", acc.Source)
+	}
+	if acc.UID != "t7" || acc.AccessToken != "trae-token" || acc.RefreshToken != "trae-refresh" {
+		t.Fatalf("got %+v", acc)
+	}
+	if acc.Label != "my-trae" {
+		t.Fatalf("label = %q", acc.Label)
+	}
+	if acc.ExpiresAt <= 0 {
+		t.Fatal("expected expiry from EXPIRES_IN")
+	}
+	// An ephemeral account is usable but never written to disk.
+	if !acc.Ephemeral {
+		t.Fatal("env account should be ephemeral")
+	}
+
+	t.Setenv(EnvTraeToken, "")
+	t.Setenv(EnvWorkBuddyToken, "")
+	if len(AccountsFromEnv()) != 0 {
+		t.Fatal("expected no account without a token")
+	}
+}

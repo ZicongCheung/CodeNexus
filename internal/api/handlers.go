@@ -64,13 +64,16 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	seen := map[string]bool{}
 	data := make([]modelItem, 0)
 
+	// The live catalogue is the authority, because it carries what an account is
+	// actually entitled to. Reading it also primes the router's cache, so a
+	// client that lists models gets faster routing afterwards.
 	for _, src := range upstream.Sources() {
 		u, ok := upstream.Get(src)
 		if !ok {
 			continue
 		}
 		acc := s.pool.Candidate(src)
-		if acc == nil {
+		if acc == nil && !s.pool.HasSource(src) {
 			continue
 		}
 		models, err := u.ListModels(ctx, acc)
@@ -78,6 +81,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			logx.Warnf("models: %s: %v", src, err)
 			continue
 		}
+		s.router.prime(src, models)
 		for _, m := range models {
 			if m.ID == "" || seen[m.ID] {
 				continue
@@ -85,6 +89,15 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			seen[m.ID] = true
 			data = append(data, modelItem{ID: m.ID, Object: "model", OwnedBy: string(m.Source)})
 		}
+	}
+	// Fall back to the cached union for any source that could not be read
+	// live, so a transient upstream failure does not empty the list.
+	for _, m := range s.router.ModelCatalog() {
+		if m.ID == "" || seen[m.ID] {
+			continue
+		}
+		seen[m.ID] = true
+		data = append(data, modelItem{ID: m.ID, Object: "model", OwnedBy: string(m.Source)})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 }
@@ -111,14 +124,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	hint.Model = model
 	hint.Stream = stream
 
-	src, modelName, err := s.resolveSource(model)
+	sources, modelName, err := s.router.Plan(model)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error(), "")
-		return
-	}
-	u, ok := upstream.Get(src)
-	if !ok {
-		writeError(w, http.StatusBadRequest, "upstream not available: "+string(src), "")
 		return
 	}
 
@@ -144,14 +152,25 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	for i := 0; i < attempts; i++ {
 		lease, aerr := s.pool.Acquire(r.Context(), pool.PickOptions{
-			Source:     src,
+			Sources:    sources,
 			Model:      modelName,
 			SessionKey: sk,
 			Exclude:    tried,
 		})
 		if aerr != nil {
+			if i > 0 && lastErr != nil {
+				// Keep the upstream's own explanation when there is one.
+				break
+			}
 			writePoolError(w, aerr)
 			return
+		}
+		// Each source resolves the flat model name in its own vocabulary, so
+		// the adapter is chosen from the lease rather than assumed.
+		u, ok := upstream.Get(lease.Account.Source)
+		if !ok {
+			lease.Fail(upstream.NewError(upstream.KindUnknown, 0, "upstream not available: "+string(lease.Account.Source)))
+			continue
 		}
 		hint.Attempts = i + 1
 		hint.Account = accountLabel(lease.Account)

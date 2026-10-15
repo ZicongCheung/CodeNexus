@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -131,8 +132,17 @@ type SessionStickyConfig struct {
 
 // RouterConfig controls model naming and cross-source selection.
 type RouterConfig struct {
-	Naming         string `json:"naming"`
+	// Naming selects the model-name surface: "flat" exposes bare model ids and
+	// resolves them across sources, "prefixed" exposes source/model only.
+	Naming string `json:"naming"`
+	// SameNamePolicy decides what happens when several sources serve the same
+	// bare model id: "auto_healthy" picks the healthiest account across all of
+	// them, "first" pins the first registered source.
 	SameNamePolicy string `json:"same_name_policy"`
+	// AllowPrefix keeps the "source/model" form usable as an explicit channel
+	// even when Naming is flat, so a client can pin a source without changing
+	// global naming.
+	AllowPrefix bool `json:"allow_prefix"`
 }
 
 // UpstreamsConfig holds one section per source.
@@ -151,10 +161,42 @@ type WorkBuddyConfig struct {
 
 // TraeCNConfig configures the Trae CN upstream.
 type TraeCNConfig struct {
-	Enabled      bool   `json:"enabled"`
-	AuthSource   string `json:"auth_source"`
+	Enabled bool `json:"enabled"`
+	// AuthSource selects the interactive/credential source: manual, env,
+	// web-login. The auto (local storage.json) and cli sources arrive later.
+	AuthSource string `json:"auth_source"`
+	// UpstreamMode pins the executor: remote, solo, ide, work-agent, or
+	// auto-route (tools → IDE Agent, plain chat → Remote).
 	UpstreamMode string `json:"upstream_mode"`
-	AutoRoute    bool   `json:"auto_route"`
+	// AutoRoute enables the tools/chat split when UpstreamMode is auto-route.
+	AutoRoute bool `json:"auto_route"`
+
+	// BaseURL is the model gateway host serving the IDE Agent / Solo endpoint.
+	BaseURL string `json:"base_url"`
+	// RemoteBaseURL is the web/remote chat base (chat_sessions + events).
+	RemoteBaseURL string `json:"remote_base_url"`
+	// AuthBaseURL serves the OAuth token exchange.
+	AuthBaseURL string `json:"auth_base_url"`
+	// AuthorizeURL is the page the interactive login opens.
+	AuthorizeURL string `json:"authorize_url"`
+	// ClientID is sent with the token exchange.
+	ClientID string `json:"client_id"`
+
+	TimeoutSeconds int `json:"timeout_seconds"`
+	// MaxTokens caps a single completion.
+	MaxTokens int `json:"max_tokens"`
+	// WebLoginPort pins the loopback port of the interactive authorization
+	// helper. Zero picks a free port, which is the friendlier default.
+	WebLoginPort int `json:"web_login_port"`
+
+	// Device identity presented to the upstream. Defaults mirror the desktop
+	// client so the requests look like a real installation.
+	DeviceBrand string `json:"device_brand"`
+	DeviceType  string `json:"device_type"`
+	OSVersion   string `json:"os_version"`
+	AppVersion  string `json:"app_version"`
+	IDEVersion  string `json:"ide_version"`
+	AppID       string `json:"app_id"`
 }
 
 // Default returns the built-in defaults.
@@ -181,7 +223,7 @@ func Default() Config {
 		SessionSticky: SessionStickyConfig{Enabled: true, TTLSeconds: 1800},
 		Features:      FeaturesConfig{SanitizeFingerprints: true, RepairToolMarkup: true},
 		Security:      SecurityConfig{KeyProvider: "auto", EncryptCredentials: true},
-		Router:        RouterConfig{Naming: "flat", SameNamePolicy: "auto_healthy"},
+		Router:        RouterConfig{Naming: "flat", SameNamePolicy: "auto_healthy", AllowPrefix: true},
 		Schedule: ScheduleConfig{
 			Timezone:              "Asia/Shanghai",
 			CheckinHours:          []int{9, 21},
@@ -205,7 +247,25 @@ func Default() Config {
 		ReqLog: ReqLogConfig{RecentLimit: 100, Stdout: true},
 		Upstreams: UpstreamsConfig{
 			WorkBuddy: WorkBuddyConfig{Enabled: true, TimeoutSeconds: 120},
-			TraeCN:    TraeCNConfig{Enabled: false, AuthSource: "auto", UpstreamMode: "remote", AutoRoute: true},
+			TraeCN: TraeCNConfig{
+				Enabled:        true,
+				AuthSource:     "web-login",
+				UpstreamMode:   "auto-route",
+				AutoRoute:      true,
+				BaseURL:        "https://trae-api-cn.mchost.guru",
+				RemoteBaseURL:  "https://trae-api-cn.mchost.guru/api/remote/v1",
+				AuthBaseURL:    "https://api.trae.cn",
+				AuthorizeURL:   "https://www.trae.cn/authorization",
+				ClientID:       "ono9krqynydwx5",
+				TimeoutSeconds: 120,
+				MaxTokens:      64000,
+				DeviceBrand:    "ASUS TUF Gaming A15 FA507RM_FA507RM",
+				DeviceType:     "windows",
+				OSVersion:      "Windows 10 Pro",
+				AppVersion:     "3.3.65",
+				IDEVersion:     "3.3.67",
+				AppID:          "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8",
+			},
 		},
 	}
 }
@@ -311,12 +371,57 @@ func (c *Config) normalize() {
 		c.Upstreams.WorkBuddy.TimeoutSeconds = 120
 	}
 	if c.Upstreams.TraeCN.AuthSource == "" {
-		c.Upstreams.TraeCN.AuthSource = "auto"
+		c.Upstreams.TraeCN.AuthSource = "web-login"
 	}
 	if c.Upstreams.TraeCN.UpstreamMode == "" {
-		c.Upstreams.TraeCN.UpstreamMode = "remote"
+		c.Upstreams.TraeCN.UpstreamMode = "auto-route"
 	}
+	c.normalizeTrae()
 	c.normalizeSchedule()
+}
+
+// normalizeTrae fills the Trae CN section from the built-in defaults, which
+// mirror the desktop client the upstream expects to see.
+func (c *Config) normalizeTrae() {
+	t := &c.Upstreams.TraeCN
+	d := Default().Upstreams.TraeCN
+	for _, f := range []struct {
+		dst *string
+		def string
+	}{
+		{&t.BaseURL, d.BaseURL},
+		{&t.RemoteBaseURL, d.RemoteBaseURL},
+		{&t.AuthBaseURL, d.AuthBaseURL},
+		{&t.AuthorizeURL, d.AuthorizeURL},
+		{&t.ClientID, d.ClientID},
+		{&t.DeviceBrand, d.DeviceBrand},
+		{&t.DeviceType, d.DeviceType},
+		{&t.OSVersion, d.OSVersion},
+		{&t.AppVersion, d.AppVersion},
+		{&t.IDEVersion, d.IDEVersion},
+		{&t.AppID, d.AppID},
+	} {
+		if strings.TrimSpace(*f.dst) == "" {
+			*f.dst = f.def
+		}
+	}
+	if t.TimeoutSeconds <= 0 {
+		t.TimeoutSeconds = d.TimeoutSeconds
+	}
+	if t.MaxTokens <= 0 {
+		t.MaxTokens = d.MaxTokens
+	}
+	if t.WebLoginPort < 0 || t.WebLoginPort > 65535 {
+		t.WebLoginPort = 0
+	}
+	switch t.UpstreamMode {
+	case "remote", "solo", "ide", "work-agent", "auto-route":
+	default:
+		t.UpstreamMode = "auto-route"
+	}
+	if t.UpstreamMode == "auto-route" {
+		t.AutoRoute = true
+	}
 }
 
 // normalizeSchedule fills defaults and validates the scheduler section. Hours

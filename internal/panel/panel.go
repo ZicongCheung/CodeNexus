@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ZicongCheung/CodeNexus/internal/account"
 	"github.com/ZicongCheung/CodeNexus/internal/authstore"
 	"github.com/ZicongCheung/CodeNexus/internal/config"
 	"github.com/ZicongCheung/CodeNexus/internal/httpauth"
@@ -35,6 +36,7 @@ const loginTTL = 15 * time.Minute
 
 type loginSession struct {
 	realm   string
+	source  account.Source
 	created time.Time
 }
 
@@ -124,6 +126,7 @@ func (c *Console) buildMux() *http.ServeMux {
 	mux.HandleFunc("POST /api/accounts/remove", c.handleRemoveAccount)
 	mux.HandleFunc("POST /api/auth/start", c.handleAuthStart)
 	mux.HandleFunc("GET /api/auth/poll", c.handleAuthPoll)
+	mux.HandleFunc("POST /api/auth/token", c.handleAuthToken)
 	mux.HandleFunc("POST /api/auth/import", c.handleImport)
 
 	// Task center: catalogue and per-account operations.
@@ -227,12 +230,15 @@ func (c *Console) handleSession(w http.ResponseWriter, _ *http.Request) {
 	if c.pool != nil {
 		accounts = len(c.pool.Describe())
 	}
+	device, manual := onboardingModes()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"service":  ServiceName,
-		"accounts": accounts,
-		"sources":  sourceNames(),
-		"tasks":    c.sched != nil,
-		"reqlog":   c.reqlog != nil,
+		"service":        ServiceName,
+		"accounts":       accounts,
+		"sources":        sourceNames(),
+		"device_sources": device,
+		"manual_sources": manual,
+		"tasks":          c.sched != nil,
+		"reqlog":         c.reqlog != nil,
 	})
 }
 

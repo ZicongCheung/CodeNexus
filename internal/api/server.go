@@ -42,6 +42,7 @@ type Server struct {
 	panel     http.Handler
 	refresher Refresher
 	recorder  *reqlog.Recorder
+	router    *modelRouter
 	root      http.Handler
 }
 
@@ -53,6 +54,7 @@ func NewServer(cfg *config.Config, p *pool.Pool, panel http.Handler, opts ...Opt
 			o(s)
 		}
 	}
+	s.router = newModelRouter(cfg.Router, p)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
@@ -66,6 +68,10 @@ func NewServer(cfg *config.Config, p *pool.Pool, panel http.Handler, opts ...Opt
 	s.root = mux
 	return s
 }
+
+// WarmModels loads the source catalogues in the background. It is best-effort:
+// routing works without the catalogues and refines itself as they land.
+func (s *Server) WarmModels(ctx context.Context) { s.router.Warm(ctx) }
 
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.root.ServeHTTP(w, r) }
@@ -98,28 +104,19 @@ func writeError(w http.ResponseWriter, code int, msg, typ string) {
 	})
 }
 
-// resolveSource maps a request model to a source and the source-local model name.
-//
-// A model of the form "<source>/<name>" pins the source explicitly. Otherwise
-// the model keeps its flat name and the source is chosen as the first
-// registered upstream that has an available account. When no source has any
-// account the first registered source is still returned, so the caller reports
-// "service unavailable" rather than a client error.
-func (s *Server) resolveSource(model string) (upstream.Source, string, error) {
-	if i := strings.IndexByte(model, '/'); i > 0 {
-		prefix := upstream.Source(model[:i])
-		if _, ok := upstream.Get(prefix); ok {
-			return prefix, model[i+1:], nil
+// primedByModels records a catalogue read by the /v1/models handler so the
+// router does not have to fetch the same catalogue again for routing.
+func (r *modelRouter) prime(src upstream.Source, models []upstream.ModelSpec) {
+	if len(models) == 0 {
+		return
+	}
+	set := make(map[string]bool, len(models))
+	for _, m := range models {
+		if m.ID != "" {
+			set[strings.ToLower(m.ID)] = true
 		}
 	}
-	sources := upstream.Sources()
-	for _, src := range sources {
-		if s.pool.HasSource(src) {
-			return src, model, nil
-		}
-	}
-	if len(sources) > 0 {
-		return sources[0], model, nil
-	}
-	return "", model, errNoUpstream
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.catalog[src] = catalogEntry{models: set, at: r.now()}
 }

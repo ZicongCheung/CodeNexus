@@ -35,6 +35,26 @@ func sourceNames() []string {
 	return out
 }
 
+// onboardingModes reports which sources support which way of adding an account,
+// so the console can offer only the flows that will actually work.
+func onboardingModes() (device, manual []string) {
+	device = []string{}
+	manual = []string{}
+	for _, s := range upstream.Sources() {
+		u, ok := upstream.Get(s)
+		if !ok {
+			continue
+		}
+		if _, ok := u.(upstream.DeviceAuth); ok {
+			device = append(device, string(s))
+		}
+		if _, ok := u.(upstream.CredentialAcceptor); ok {
+			manual = append(manual, string(s))
+		}
+	}
+	return device, manual
+}
+
 // handleAccounts lists the pool with runtime health, without credential data.
 func (c *Console) handleAccounts(w http.ResponseWriter, _ *http.Request) {
 	if c.pool == nil {
@@ -104,13 +124,14 @@ func (c *Console) handleAuthStart(w http.ResponseWriter, r *http.Request) {
 	}
 	c.mu.Lock()
 	c.dropExpiredLoginsLocked()
-	c.logins[code.State] = loginSession{realm: realm, created: time.Now()}
+	c.logins[code.State] = loginSession{realm: realm, source: src, created: time.Now()}
 	c.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":    true,
-		"state": code.State,
-		"url":   code.URL,
-		"realm": realm,
+		"ok":     true,
+		"state":  code.State,
+		"url":    code.URL,
+		"realm":  realm,
+		"source": string(src),
 	})
 }
 
@@ -128,7 +149,11 @@ func (c *Console) handleAuthPoll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "unknown or expired authorization; start again")
 		return
 	}
-	auth, err := c.deviceAuth(account.SourceWorkBuddy)
+	src := sess.source
+	if src == "" {
+		src = account.SourceWorkBuddy
+	}
+	auth, err := c.deviceAuth(src)
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, err.Error())
 		return
@@ -160,6 +185,61 @@ func (c *Console) handleAuthPoll(w http.ResponseWriter, r *http.Request) {
 		"realm":   sess.realm,
 		"expires": acc.ExpiresAtValue(),
 	})
+}
+
+// authTokenRequest is a manually pasted credential. A user can supply a
+// long-lived token, a refresh token, or both; the adapter fills in the gaps.
+type authTokenRequest struct {
+	Source       string `json:"source"`
+	Token        string `json:"token"`
+	RefreshToken string `json:"refresh_token"`
+	UID          string `json:"uid"`
+	Label        string `json:"label"`
+}
+
+// handleAuthToken onboards an account from a pasted credential, for sources
+// whose authorization cannot be run in a browser popup.
+func (c *Console) handleAuthToken(w http.ResponseWriter, r *http.Request) {
+	var req authTokenRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	src := account.Source(strings.TrimSpace(req.Source))
+	if src == "" {
+		src = account.SourceWorkBuddy
+	}
+	acc, err := c.acceptCredential(src, req)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := c.persist(acc); err != nil {
+		writeErr(w, http.StatusInternalServerError, "save credential: "+err.Error())
+		return
+	}
+	c.warn("console: account added uid=%s label=%q source=%s", acc.UID, acc.Label, acc.Source)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"uid":     acc.UID,
+		"label":   acc.Label,
+		"source":  string(acc.Source),
+		"expires": acc.ExpiresAtValue(),
+	})
+}
+
+// acceptCredential routes a pasted credential to the adapter that understands
+// it. Only sources implementing upstream.CredentialAcceptor accept one.
+func (c *Console) acceptCredential(src account.Source, req authTokenRequest) (*account.Account, error) {
+	u, ok := upstream.Get(src)
+	if !ok {
+		return nil, errors.New("source not registered: " + string(src))
+	}
+	acceptor, ok := u.(upstream.CredentialAcceptor)
+	if !ok {
+		return nil, errors.New("source does not accept a pasted credential: " + string(src))
+	}
+	return acceptor.AcceptCredential(req.Token, req.RefreshToken, req.UID, req.Label)
 }
 
 func (c *Console) dropExpiredLoginsLocked() {

@@ -12,6 +12,7 @@
   let tab = $state('accounts')
 
   // ── onboarding (device authorization) ────────────────────────────────────
+  let addMode = $state('device') // device | manual
   let authSource = $state('workbuddy')
   let authRealm = $state('cn')
   let authState = $state('')
@@ -19,6 +20,15 @@
   let authPhase = $state('idle') // idle | starting | waiting | done | error
   let authMsg = $state('')
   let pollTimer = null
+
+  // ── onboarding (pasted token) ────────────────────────────────────────────
+  let tokenSource = $state('')
+  let tokenValue = $state('')
+  let tokenRefresh = $state('')
+  let tokenUid = $state('')
+  let tokenLabel = $state('')
+  let tokenPhase = $state('idle') // idle | running | done | error
+  let tokenMsg = $state('')
 
   // ── import ───────────────────────────────────────────────────────────────
   let importMode = $state('inline') // inline | path | bundle
@@ -50,6 +60,21 @@
   let logTimer = null
 
   const sources = $derived(session?.sources ?? ['workbuddy'])
+  // Only offer a flow the backend can actually serve: a source that cannot run
+  // an interactive login must not appear in the device picker, and vice versa.
+  const deviceSources = $derived(session?.device_sources ?? [])
+  const manualSources = $derived(session?.manual_sources ?? [])
+
+  const manualSource = $derived(
+    manualSources.includes(tokenSource) ? tokenSource : manualSources[0] ?? '',
+  )
+  const deviceSource = $derived(
+    deviceSources.includes(authSource) ? authSource : deviceSources[0] ?? '',
+  )
+  const tokenPlaceholder = $derived(
+    manualSource === 'trae-cn' ? 'Cloud-IDE-JWT…' : '访问令牌',
+  )
+  const modeHint = $derived(manualSource === 'trae-cn' ? 'Cloud-IDE-JWT' : '')
 
   const inlinePlaceholder =
     '[{"source":"workbuddy","uid":"...","access_token":"...","refresh_token":"..."}]'
@@ -145,7 +170,7 @@
     try {
       const body = await api('/auth/start', {
         method: 'POST',
-        body: JSON.stringify({ source: authSource, realm: authRealm }),
+        body: JSON.stringify({ source: deviceSource, realm: authRealm }),
       })
       authState = body.state
       authUrl = body.url
@@ -194,6 +219,38 @@
     authMsg = ''
     authUrl = ''
     authState = ''
+  }
+
+  async function submitToken() {
+    if (!tokenValue.trim() && !tokenRefresh.trim()) {
+      tokenPhase = 'error'
+      tokenMsg = '请粘贴令牌，或填写刷新令牌'
+      return
+    }
+    tokenPhase = 'running'
+    tokenMsg = ''
+    try {
+      const body = await api('/auth/token', {
+        method: 'POST',
+        body: JSON.stringify({
+          source: manualSource,
+          token: tokenValue.trim(),
+          refresh_token: tokenRefresh.trim(),
+          uid: tokenUid.trim(),
+          label: tokenLabel.trim(),
+        }),
+      })
+      tokenPhase = 'done'
+      tokenMsg = `已添加：${body.label || body.uid}`
+      tokenValue = ''
+      tokenRefresh = ''
+      tokenUid = ''
+      tokenLabel = ''
+      await refresh()
+    } catch (err) {
+      tokenPhase = 'error'
+      tokenMsg = err.message
+    }
   }
 
   // ── import ───────────────────────────────────────────────────────────────
@@ -249,7 +306,11 @@
 
   function switchTab(name) {
     tab = name
-    if (name !== 'add') resetAuth()
+    if (name !== 'add') {
+      resetAuth()
+      tokenPhase = 'idle'
+      tokenMsg = ''
+    }
     stopLogPolling()
     if (name === 'tasks') {
       if (!catalog.length) loadCatalog()
@@ -805,6 +866,14 @@
 
   {#if tab === 'add'}
     <section class="card">
+      <div class="segmented">
+        <button class:active={addMode === 'device'} onclick={() => (addMode = 'device')}>设备授权登录</button>
+        {#if manualSources.length}
+          <button class:active={addMode === 'manual'} onclick={() => (addMode = 'manual')}>粘贴令牌</button>
+        {/if}
+      </div>
+
+      {#if addMode === 'device' || !manualSources.length}
       <h2>设备授权登录</h2>
       <p class="muted">
         选择来源与区域后开始授权，浏览器会打开登录页；完成后此页面自动接收账号，无需手工粘贴令牌。
@@ -815,7 +884,7 @@
           <label>
             <span>来源</span>
             <select bind:value={authSource}>
-              {#each sources as s}<option value={s}>{s}</option>{/each}
+              {#each deviceSources as s}<option value={s}>{s}</option>{/each}
             </select>
           </label>
           <label>
@@ -854,6 +923,43 @@
           <p class="msg ok">{authMsg}</p>
           <button class="primary" onclick={resetAuth}>再添加一个</button>
         </div>
+      {/if}
+      {:else}
+      <h2>粘贴令牌</h2>
+      <p class="muted">
+        直接从已登录的客户端复制令牌粘贴到此。令牌是本机凭据，仅保存在账号目录中，不会上传。
+      </p>
+
+      <label class="stack">
+        <span>来源</span>
+        <select bind:value={tokenSource}>
+          {#each manualSources as s}<option value={s}>{s}</option>{/each}
+        </select>
+      </label>
+      <label class="stack">
+        <span>令牌{modeHint ? `（${modeHint}）` : ''}</span>
+        <textarea rows="3" bind:value={tokenValue} placeholder={tokenPlaceholder}></textarea>
+      </label>
+      <div class="form">
+        <label>
+          <span>刷新令牌（可选）</span>
+          <input bind:value={tokenRefresh} />
+        </label>
+        <label>
+          <span>用户 ID（可选）</span>
+          <input bind:value={tokenUid} />
+        </label>
+        <label>
+          <span>备注（可选）</span>
+          <input bind:value={tokenLabel} placeholder="例如 主力号" />
+        </label>
+      </div>
+      <button class="primary" onclick={submitToken} disabled={tokenPhase === 'running'}>
+        {tokenPhase === 'running' ? '添加中…' : '添加账号'}
+      </button>
+      {#if tokenMsg}
+        <p class="msg {tokenPhase === 'error' ? 'error' : 'ok'}">{tokenMsg}</p>
+      {/if}
       {/if}
     </section>
   {/if}

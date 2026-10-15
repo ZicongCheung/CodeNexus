@@ -3,6 +3,7 @@ package panel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -236,5 +237,91 @@ func TestConsoleAccountsListHidesSecrets(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "top-secret-token") {
 		t.Fatal("accounts listing leaks the access token")
+	}
+}
+
+// fakeAcceptor is a Trae-shaped source that accepts a pasted credential, so the
+// console's manual-onboarding path can be exercised without a live upstream.
+type fakeAcceptor struct {
+	fakeUpstream
+	token, refresh, uid, label string
+	err                        error
+}
+
+// errRejected is the sentinel a fake acceptor returns for a bad credential.
+var errRejected = errors.New("credential rejected")
+
+func (f *fakeAcceptor) Source() upstream.Source { return upstream.SourceTraeCN }
+
+func (f *fakeAcceptor) AcceptCredential(token, refresh, uid, label string) (*account.Account, error) {
+	f.token, f.refresh, f.uid, f.label = token, refresh, uid, label
+	if f.err != nil {
+		return nil, f.err
+	}
+	acc := &account.Account{Source: account.SourceTraeCN, UID: uid, Label: label, Enabled: true}
+	acc.SetCredentials(token, refresh, "", 0)
+	return acc, nil
+}
+
+func TestConsoleAuthTokenOnboardsPastedCredential(t *testing.T) {
+	c, store, p := newConsole(t)
+	fake := &fakeAcceptor{}
+	upstream.Register(fake)
+	t.Cleanup(func() { upstream.Unregister(upstream.SourceTraeCN) })
+
+	body := `{"source":"trae-cn","token":"tok","refresh_token":"rt","uid":"t1","label":"Trae One"}`
+	rec := call(c, http.MethodPost, "/panel/api/auth/token", body, true, "")
+	if rec.Code != 200 {
+		t.Fatalf("code = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if fake.uid != "t1" || fake.label != "Trae One" {
+		t.Fatalf("adapter received uid=%q label=%q", fake.uid, fake.label)
+	}
+	st := p.Describe()
+	if len(st) != 1 || st[0].Source != account.SourceTraeCN || st[0].UID != "t1" {
+		t.Fatalf("pool = %+v", st)
+	}
+	loaded, err := store.Load()
+	if err != nil || len(loaded) != 1 || loaded[0].Token() != "tok" {
+		t.Fatalf("store = %+v err = %v", loaded, err)
+	}
+}
+
+func TestConsoleAuthTokenRejectsBadCredential(t *testing.T) {
+	c, _, p := newConsole(t)
+	fake := &fakeAcceptor{err: errRejected}
+	upstream.Register(fake)
+	t.Cleanup(func() { upstream.Unregister(upstream.SourceTraeCN) })
+
+	rec := call(c, http.MethodPost, "/panel/api/auth/token", `{"source":"trae-cn","token":"bad"}`, true, "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code = %d, want 400", rec.Code)
+	}
+	if len(p.Describe()) != 0 {
+		t.Fatal("a rejected credential must not enter the pool")
+	}
+}
+
+func TestConsoleAuthTokenRejectsUnsupportedSource(t *testing.T) {
+	c, _, _ := newConsole(t)
+	// The WorkBuddy fake implements Upstream and DeviceAuth but not
+	// CredentialAcceptor, so manual entry must be reported as unsupported.
+	fake := &fakeUpstream{}
+	upstream.Register(fake)
+	t.Cleanup(func() { upstream.Unregister(upstream.SourceWorkBuddy) })
+
+	rec := call(c, http.MethodPost, "/panel/api/auth/token", `{"source":"workbuddy","token":"tok","uid":"u1"}`, true, "")
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "does not accept") {
+		t.Fatalf("code = %d body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestConsoleAuthStartReportsUnregisteredSource(t *testing.T) {
+	c, _, _ := newConsole(t)
+	// No Trae adapter is registered in this console, so an interactive login
+	// for it must fail loudly instead of silently falling back to WorkBuddy.
+	rec := call(c, http.MethodPost, "/panel/api/auth/start", `{"source":"trae-cn"}`, true, "")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code = %d body = %s", rec.Code, rec.Body.String())
 	}
 }
