@@ -160,6 +160,19 @@ go build -o codenexus ./cmd/codenexus
 
 > ⚠️ `api_key` 留空等于**完全不鉴权**，即使本机自用也务必设置。
 
+### 环境变量
+
+适合无头部署（凭证由平台的 Secret 管理，不落盘）：
+
+| 变量 | 作用 |
+|---|---|
+| `CODENEXUS_LISTEN` | 覆盖监听地址 |
+| `CODENEXUS_API_KEY` | 覆盖 `api_key` |
+| `CODENEXUS_WORKBUDDY_TOKEN` / `_REFRESH_TOKEN` / `_UID` / `_DOMAIN` / `_EXPIRES_AT` / `_EXPIRES_IN` | 注入一个 WorkBuddy 账号 |
+| `CODENEXUS_TRAE_TOKEN` / `_REFRESH_TOKEN` / `_UID` / `_LABEL` / `_EXPIRES_AT` / `_EXPIRES_IN` | 注入一个 Trae CN 账号（`_UID` 可省，网关会从 JWT 中读取） |
+
+> 经环境变量注入的账号是**临时账号**：可用但不写入 `auths/`。
+
 ---
 
 ## 客户端接入

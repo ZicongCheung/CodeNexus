@@ -17,6 +17,7 @@
 | v1.2 | 2026-10-14 | 追加 ADR-24~29（P1b 批次/授权/加密/面板/控制台访问/本机凭证）；P1b1 完成并入档 | 张 |
 | v1.3 | 2026-10-14 | 追加 ADR-30~32（P1b2 交付节奏 / 调度时区 / 重启补跑） | 张 |
 | v1.4 | 2026-10-15 | 追加 ADR-33~36（成长执行器保真度 / 默认开关 / 任务中心写入语义 / 补跑范围收敛）；P1b2 完成并入档 | 张 |
+| v1.5 | 2026-10-15 | 追加 ADR-37~40（Trae 授权形态 / 端点范围 / 池语义统一 / 交付节奏）；P2 完成并入档 | 张 |
 
 **阅读指引**
 
@@ -157,6 +158,10 @@
 | **ADR-34** | 成长任务默认开关 | **全部默认开启**，与参考行为完全一致 | 开箱即得全部收益，用户零配置；面板提供逐项/逐账号手动触发作为可控兜底 |
 | **ADR-35** | 面板任务中心写入语义 | **全写入**：目录 + 任务列表 + 接取 + 领取 + 单任务执行 + 单账号执行全部 + 整池批量（签到/活跃/额度/出行/保活）+ 待办队列执行，与参考对齐 | 面板即"运维台"，与 CLI/调度同权；免去 SSH 与命令行，全部操作在一个页面闭环 |
 | **ADR-36** | 启动补跑范围收敛（细化 ADR-32） | **仅保号/维护类**（签到、活跃、保活、出行）在宽限窗口内补跑一次；**成长类不补跑** | 成长进度由"行为事件"驱动，事后补跑既无意义又可能触发反作弊；保号类漏一天就真的断签/失效，补跑收益确定 |
+| **ADR-37** | 来源 B 授权形态 | **面板内嵌 + 本机回环回调**：面板点「开始授权」→ 网关在回环地址起一次性 `http.Server` 监听回调 → 面板展示授权链接 → 浏览器登录后自动重定向回环地址 → 网关换取令牌入池；另在面板提供「粘贴令牌」通道 | 与来源 A 的设备码体验完全一致（都是"点一下、浏览器登一次、页面自动收号"），零命令行、零手工转贴；回调落在本机回环而非公网，无证书/无端口暴露；粘贴通道覆盖"已从 IDE 取到令牌"的老用户 |
+| **ADR-38** | 来源 B 上游端点范围 | **直接全量四端点 + 自动路由**（Remote 会话事件流 / Agent 单跳流式 / IDE 平台 / Work 代理），**一次性实现**，不做"先 Remote 后补" | 端点差异对用户不可见，但决定了"带工具调用是否可用"；先只做 Remote 会静默吞掉调用方工具（会话自带工作区会自行满足文件/Shell 工具），属于体验陷阱；一次做全才能保证"任何客户端形态都可用" |
+| **ADR-39** | 来源 B 账号池语义统一 | **统一到池现有语义，不新增并行概念**：来源 B 的积分映射为池的 `credits`；上游 `9074`（设备维度节流）按 **软冷却 + 指数退避** 处理，走与 `429` 完全相同的路径；额度耗尽 `4008` 归为账号级失效，切换账号而非同号重放 | 池里只有一份"健康/额度/冷却"真相，择优、熔断、故障转移对两个来源行为一致；面板与遥测不需要为来源 B 造第二套指标；软冷却让"设备抖动"自我恢复，不误伤账号 |
+| **ADR-40** | P2 交付节奏 | **全量一次交付**：四端点 + 自动路由 + 认证（回环/粘贴/环境变量）+ 模型目录 + 跨源模型路由 + 面板接入 | 四端点共享同一套凭证、设备指纹与错误分类，拆开做会二次改造共享层；目录与跨源路由是"能选到模型"的前置，缺一则 P2 无法端到端验收 |
 
 ---
 
@@ -496,7 +501,7 @@ GET /v1/models
 
 | 蓝图视图 | 现状 |
 |---|---|
-| 账号 + 添加账号 + 导入 | ✅ P1b1 已落地（来源分组、健康徽标、设备授权向导、三模式导入） |
+| 账号 + 添加账号 + 导入 | ✅ P1b1 已落地（来源分组、健康徽标、设备授权向导、三模式导入）；**P2 扩展**：添加账号页新增「粘贴令牌」通道，来源下拉按后端实际能力（`device_sources`/`manual_sources`）过滤 |
 | 任务与签到（合并任务中心） | ✅ P1b2 已落地（批量维护 / 待办队列 / 执行器目录 / 逐账号任务表）；Trae 签到待 P3 并入同一视图 |
 | 日志（请求日志） | ✅ P1b2 已落地（统计卡 + 最近请求，3s 轮询；不含提示词与凭据） |
 | 概览 / 用量 / 额度 / 模型与档位 / 配置 | ⏳ P4~P5（用量与额度明细依赖 SQLite 迁库） |
@@ -511,11 +516,13 @@ GET /v1/models
 
 | 来源 | 机制 | Go 实现要点 | 阶段 |
 |---|---|---|---|
-| `web-login` | 浏览器授权 → 回调拿 JWT | 内嵌授权助手（Go 重写原 Python helper）：本地 127.0.0.1 回调监听 + 展示授权链接 + 轮询 | P2 |
-| `manual` | 粘贴 `Cloud-IDE-JWT` | 直接校验/落盘 | P2 |
-| `env` | 环境变量 `TRAE_TOKEN`/`TRAE_REFRESH_TOKEN`/`TRAE_USER_ID` | 读取 + 归一 | P2 |
+| `web-login` | 浏览器授权 → 回调拿 JWT | 内嵌授权助手（Go 重写原 Python helper）：本地 127.0.0.1 回环回调监听 + 面板展示授权链接 + 非阻塞轮询 | ✅ P2 |
+| `manual` | 面板粘贴 `Cloud-IDE-JWT`（可只给刷新令牌，网关当场换取） | `upstream.CredentialAcceptor` 校验/派生用户 ID/落盘 | ✅ P2 |
+| `env` | 环境变量 `CODENEXUS_TRAE_TOKEN` / `_REFRESH_TOKEN` / `_UID` / `_LABEL`（临时态，不落盘） | 读取 + 归一 + 从 JWT 回读用户 ID | ✅ P2 |
 | `auto` | 解密本机 `storage.json` | AES-128-CBC，key=SHA512(salt+machine_id)[:16]，4 组盐，IV=密文前 16B；路径探测 | P3 |
 | `cli` | 本地 Trae CLI 子进程 | `os/exec` 启动 CLI，按协议收发（禁本机工具 `Read,Bash,...` 默认项） | P3 |
+
+> 说明：`web-login` 的"轮询"是**面板轮询网关**（`GET /panel/api/auth/poll`），网关自身由回环回调**推**结果，不存在对上游的轮询——上游授权页只做一次重定向。环境变量刻意不使用 Trae 客户端自身的 `TRAE_*` 命名，避免与同机运行的 IDE 互相串号。
 
 ### 9.2 四端点与自动路由（ADR-07）
 
@@ -526,6 +533,15 @@ ide-agent   带 tools/tool_choice 或工具历史时首选（避免远端工具�
 work-agent  无工具请求的备选执行器
 auto_route  请求带工具 → IDE Agent；纯聊天 → Remote；失败一律回落 Remote
 ```
+
+**P2 落地形态（两个物理面，覆盖四个逻辑端点）**
+
+| 逻辑端点 | 物理面 | 请求 | 备注 |
+|---|---|---|---|
+| `remote` / `solo` / `work-agent` | **Remote 会话面**：`POST {RemoteBase}/chat_sessions` → `GET {RemoteBase}/chat_sessions/{id}/events` | 两步：建会话拿 `chat_session_id`/`message_id`；再读事件流 | `mode` = `code` \| `work`，`agent_type` = `solo_agent_remote` \| `solo_work_remote` |
+| `ide-agent` | **Agent 单跳面**：`POST {Base}/api/agent/v3/llm_utils_chat` | 一次流式请求，原生接受 `tools` | 带工具时唯一不会"吞掉"调用方工具的面 |
+
+`auto_route`（`upstream_mode: auto-route`，默认）判定规则：请求体带工具协议（`tools` / `tool_choice` / `parallel_tool_calls` / `functions` / `function_call`、`tool`/`function` 角色、`tool_use`/`tool_call`/`tool_result` 内容块）→ 走 Agent 单跳面；否则走 Remote 会话面。**Agent 面失败且属可重试、且尚未向客户端吐出任何首字节时，同账号回落 Remote 一次**；已吐字节则不再重放（沿用 ADR-19 的"仅首字节前换号/换面"原则）。
 
 ### 9.3 风控与任务
 
@@ -545,6 +561,52 @@ TraeWork（Trae 桌面 Agent 客户端）相关能力是**两件方向相反的�
 **A 项入站路径（可选实现）**：`POST /api/ide/v2/llm_raw_chat`、`/api/agent/v3/llm_raw_chat_custom_model`、`/api/agent/v3/custom_model_proxy/chat`、`/v1/traework/chat`，以及 `/api/agent/v3/custom_model_connectivity_check`、`/api/ide/v1/custom_model_connectivity_check`、`/v1/custom_model/connectivity`（连通性探测，可公开）。
 
 **结论（用户已确认）**："把 Trae 的 API 给其它 agent/工具使用" 走的是**四端点纯 HTTP**，与 native bridge 无关；故 B 不影响核心目标，**不引入**。
+
+### 9.5 P2 协议事实与池映射（as-built）
+
+以下为 P2 实现过程中核实并固化的上游事实，后续（P3 风控/任务）在此之上扩展，**不得重新猜测**。
+
+**凭证与刷新**
+
+- 凭证是 `Cloud-IDE-JWT`（三段 JWT，长度 ≥128）。发送时三种头同时带：`Authorization: Cloud-IDE-JWT <tok>`、`X-Cloudide-Token: <tok>`（裸值）、`x-ide-token: <tok>`；`GetUserInfo` 只认 `x-cloudide-token`。
+- **过期时间绝不读 JWT 的 `exp`**：一律以上游返回的 `expiredAt`/`TokenExpireAt` 为准（提前 30 分钟刷新，留 5 分钟有效性缓冲）。
+- 刷新：`POST {AuthBase}/cloudide/api/v3/trae/oauth/ExchangeToken`，体 `{"ClientID","RefreshToken","ClientSecret":"-","UserID"}`，取 `Result.{Token,RefreshToken,TokenExpireAt}`；无刷新令牌时归为认证类错误（`KindAuth`），不重试。
+
+**Remote 会话面**
+
+- 建会话体（顶层）：`mode`（`code`\|`work`）、`environment_id:"default"`、`initial_message`、`env:"remote"`、`auto_create_project:false`、`origin:"web"`；`initial_message` 内含 `chat_session_id:""`、`content:[]`、`query`（JSON 编码后的扁平对话文本）、`model_name`、`agent_type`、`agent_id`、`model_selection_strategy:"manual"`、`model_config_source:1`。
+- 事件流：SSE。事件名 `heartbeat`/`keepalive`/`ping`、`error`、`token_usage`、`plan_item`、`message`/`assistant_message`/`response`/`text`/`output`、`done`、`model_config`、`request_wait_in_queue`；别名 `modelconfig→model_config`、`planitem→plan_item`、`responsedone`/`streamdone`/`response_done`/`stream_done→done`、`tokenusage→token_usage`。
+- **快照是累积的**：解析器按"前缀差"只把新增部分吐给客户端；`model_config`/心跳/排队提示属于元数据，**不计入首字节、不产生内容**。终止信号 = 显式 `done` 事件或 `data: [DONE]`。
+
+**Agent 单跳面**
+
+- 体：`{messages, config_name, model, function:"solo_work_lite", stream:true, request_id, session_id, max_tokens?, tools?, tool_choice?, parallel_tool_calls?}`；头含 `x-app-id`、`x-ide-version[-code|-type]`、`x-device-id`、`x-machine-id`、`x-request-id`、`x-device-cpu/brand/type`、`x-os-version`、`x-system-type`、空 `User-Agent`。
+- 工具调用在流内以增量形式下发（`tool_call_info` / `tool_call` / `message.tool_calls` / `choices[0].delta.tool_calls` 四种形状），按 index 累积后**去重**只吐一次。
+
+**设备身份**
+
+- IDE 面：`machine_id` = 32 位十六进制、`device_id` = 18~19 位数字，每 3~5 次请求轮换（P3 风控使用）。
+- Remote/Web 面：由账号派生，`device_id` 先定，`machine_id = sha256(account_id + device_id + "traework-linux-probe")`，`local_device_id = "aha-" + sha256(...)[:32]`。
+
+**错误分类（映射到池行为，ADR-39）**
+
+| 上游码 | 含义 | 池行为 |
+|---|---|---|
+| `1001` | 服务端 token 失效 | 认证类错误 → 触发刷新/换号 |
+| `4008` | 额度耗尽（账号级） | 账号级失效 → **换号**，不对同账号重放 |
+| `4028` | 模型执行器拒绝 | 归为服务端错误 → 可换面/换号 |
+| `9074` | 设备维度节流 | **软冷却 + 指数退避**（与 `429` 同路径，≤3600s） |
+| `429` / `solo_agent_parallel_limit` | 并发受限 | 冷却（短）+ 换号 |
+| `2001` | 应用配置类原始失败 | 服务端错误 |
+| `9095` | 签到设备维度拦截（**绝不等于"已签到"**） | P3 处理，轮换设备 ID 重试 |
+
+**用量结算（三重优先级）**
+
+1. 上游显式字段（`credits_consumed` / `consumed_credits` / `credit_cost` / `credits_float`）→ 标 `upstream`；
+2. 回合级 `credits_float`：`POST {UsageBase}/api/v1/commercial/get_session_usage`，体 `{"session_id"}`，按 `usage_turn_id`（= `reply_to_message_id`）对齐 → 标 `session_usage`；
+3. 同账号快照差值 → 标 `snapshot_delta`；仍无法确定 → `pending`/`unknown`。
+
+**绝不把未知值伪装成 0。**
 
 ---
 
@@ -728,12 +790,44 @@ TraeWork（Trae 桌面 Agent 客户端）相关能力是**两件方向相反的�
 |---|---|
 | 验收 | `go build/vet/test` 全绿；启动冒烟通过（`/panel/api/session` 报告 `tasks`/`reqlog` 均可用、`/panel/api/tasks/catalog` 返回 25 项、`/panel/api/tasks/queue` 与 `/panel/api/observability/metrics` 正常、`/panel/` 静态资源为新构建产物）；任务中心可对单账号与整池触发维护/成长任务，运行日志实时可见 |
 
-### P2 · Trae 基础链路打通
+### P2 · Trae 基础链路打通 ✅（已完成）
 
 | 项 | 内容 |
 |---|---|
 | 任务 | ① 认证：`web-login`（Go 重写授权助手）、`manual`、`env`；② 上游：Remote 端点 + 模型目录；③ 统一池（Source 维度）+ 模型路由（扁平名 + 同名择优）；④ `/v1/chat/completions` 流式/非流式 |
 | 验收 | 从面板添加 Trae 账号 → 通过 CodeNexus 完成一次流式对话；同名模型跨源择优生效 |
+
+**P2 决策（ADR-37~40，用户拍板：全部取推荐档 / 体验优先）**
+
+> - ADR-37 授权形态：**面板内嵌 + 本机回环回调**（另附「粘贴令牌」通道）
+> - ADR-38 端点范围：**直接全量四端点 + 自动路由**，一次实现
+> - ADR-39 池语义：**统一到池现有语义**（积分→`credits`；`9074`→软冷却 + 指数退避，与 `429` 同路径）
+> - ADR-40 交付节奏：**全量一次交付**
+
+**P2 实现记录（Trae 基础链路）** ✅
+
+| 交付物 | 落地位置 | 状态 |
+|---|---|---|
+| 模型目录与别名（34 项内置 + 家族展开；大小写敏感的上游 `config_name` 映射；未知名透传） | `internal/upstream/traecn/model.go` | ✅ |
+| 凭证原语：`LooksLikeToken`、`TokenUserID`（JWT 内多路径读 uid）、时间戳多形态解析、设备标识生成 | `internal/upstream/traecn/auth.go` | ✅ |
+| 令牌刷新：`ExchangeToken` 单飞；无刷新令牌 → 认证类错误；提前 30 分钟刷新 | `internal/upstream/traecn/{auth,client}.go` | ✅ |
+| 回环授权助手：`127.0.0.1` 一次性监听 + `/authorize` 回调 + `/healthz` + TTL 过期 + 自关闭结果页；19 项桌面端 query 参数 | `internal/upstream/traecn/weblogin.go` | ✅ |
+| 粘贴令牌入池：`upstream.CredentialAcceptor` + 仅给刷新令牌时当场换发令牌 | `internal/upstream/traecn/client.go`、`internal/upstream/upstream.go` | ✅ |
+| Remote 会话面：建会话（两步）+ SSE 事件流 + **累积快照前缀差** + 心跳/元数据不计首字节 + `[DONE]`/`done` 终止 | `internal/upstream/traecn/remote.go` | ✅ |
+| Agent 单跳面：`llm_utils_chat` 原生工具数组 + 四种工具增量形状归一 + 去重 | `internal/upstream/traecn/ide.go` | ✅ |
+| 自动路由与回落：带工具协议 → Agent 面；否则 Remote 面；Agent 面可重试且未吐字节时同账号回落 Remote 一次 | `internal/upstream/traecn/traecn.go` | ✅ |
+| 错误分类：`1001`/`4008`/`4028`/`9074`/`429`/`2001`/`9095` 映射到统一 `ErrorKind` | `internal/upstream/traecn/errors.go` | ✅ |
+| 环境变量来源（临时态、不落盘）：`CODENEXUS_TRAE_*`；无 uid 时从 JWT 回读 | `internal/authstore/env.go`、`identifyEnvAccounts` | ✅ |
+| 池：`PickOptions.Sources` 允许名单（替换单一 `Source`），同名模型跨源在同一权重尺度上择优 | `internal/pool/pool.go` | ✅ |
+| 跨源模型路由：前缀通道 + 扁平名按目录声明顺序 + 未知来源跳过不猜测 + 空计划回落首个来源（由池给 503 而非 400） | `internal/api/router.go`、`internal/api/server.go`、`internal/api/handlers.go` | ✅ |
+| 面板：`POST /panel/api/auth/token`（粘贴令牌）、`/auth/start`/`/auth/poll` 尊重所选来源、`/api/session` 暴露 `device_sources`/`manual_sources` | `internal/panel/{panel,api}.go` | ✅ |
+| 控制台 UI：添加账号页新增「设备授权登录 / 粘贴令牌」双通道，来源下拉按后端能力过滤 | `web/src/App.svelte` → `internal/panel/dist` | ✅ |
+| 单测：令牌/uid/时间戳、目录与别名、工具协议识别、Remote 流式前缀差与元数据不计数、Agent 工具去重、Agent→Remote 回落、自动路由分流、刷新与无刷新令牌、回环授权全流程（含无凭据回调/未知 state/过期）、粘贴令牌四条路径 | `internal/upstream/traecn/traecn_test.go` | ✅ |
+| 单测：环境变量来源（含临时态标记）、面板手动入池/拒绝非法凭据/拒绝不支持来源/未注册来源的设备授权 | `internal/authstore/encryption_test.go`、`internal/panel/api_test.go` | ✅ |
+
+| 项 | 内容 |
+|---|---|
+| 验收 | `go build/vet/test` 全绿；启动冒烟通过（`/panel/api/session` 报告 `sources` 含 `trae-cn` 且 `device_sources`/`manual_sources` 正确、`/v1/models` 含 Trae 目录、面板可经「回环授权」或「粘贴令牌」添加 Trae 账号并完成一次流式对话）；同名模型（如 `glm-5.2`）在两来源间按池复合权重择优 |
 
 ### P3 · Trae 认证补齐 + 端点扩展 + 风控
 
@@ -836,7 +930,8 @@ TraeWork（Trae 桌面 Agent 客户端）相关能力是**两件方向相反的�
 ### 15.1 工作区约定
 
 - **`.workbuddy/`**：本地 AI 记忆 / 工具目录，**已加入 `.gitignore`**，永不提交。
-- **第三方源码副本**：早期调研把两个参考项目克隆到仓库外目录；依 ADR-12，可**查阅其源码作为协议事实参考**，但实现须独立重写、不雷同（副本不入库，可保留供查阅）。
+- **第三方源码副本**：早期调研把两个参考项目克隆到仓库外目录（`D:/PycharmProjects/_deps/`）；依 ADR-12，可**查阅其源码作为协议事实参考**，但实现须独立重写、不雷同（副本不入库，可保留供查阅）。
+  - 处置计划：P2 完成后副本即"可移除"；**实际移除时点在 P3 拍板**（P3 的 `auto`/`cli` 认证仍需查证本机 `storage.json` 解密与 CLI 协议细节）。无论何时移除，均不影响仓库完整性——副本始终在仓库外、不入版本控制。
 
 ---
 
@@ -846,11 +941,13 @@ TraeWork（Trae 桌面 Agent 客户端）相关能力是**两件方向相反的�
 
 | 域 | 端点 | 用途 |
 |---|---|---|
-| Remote | `{TRAE_WEB_BASE_URL}/chat_sessions`、`/events` | 聊天补全（SSE，会话协议） |
-| IDE/Solo | `{TRAE_MODEL_API_HOST}` 模型网关 | IDE Agent / Solo 端点 |
-| 模型目录 | `get_detail_param`、Remote Agent/Work/Design 目录 | `/v1/models` 合并来源 |
-| 签到 | TraeWork 签到接口 | 每日签到（含 9074 风控） |
-| 用量 | `{TRAE_USAGE_API_HOST}` | 回合级积分查询 |
+| Remote 会话面 | `POST {RemoteBase}/chat_sessions` → `GET {RemoteBase}/chat_sessions/{id}/events?reply_to_message_id=` | 聊天补全（SSE，两步：建会话 + 读事件流） |
+| Agent 单跳面 | `POST {Base}/api/agent/v3/llm_utils_chat` | 带工具调用的一次性流式补全 |
+| 鉴权换发 | `POST {AuthBase}/cloudide/api/v3/trae/oauth/ExchangeToken` | 刷新令牌换发访问令牌 |
+| 授权页 | `https://www.trae.cn/authorization`（回调 `http://127.0.0.1:<port>/authorize`） | 回环授权登录 |
+| 模型目录 | 适配器内置静态目录（`internal/upstream/traecn/model.go`） | `/v1/models` 合并来源；未知名透传 |
+| 签到 | TraeWork 签到接口 | 每日签到（含 9074 风控）——P3 |
+| 用量 | `POST {UsageBase}/api/v1/commercial/get_session_usage` | 回合级积分查询 |
 
 ### 16.2 术语表
 
