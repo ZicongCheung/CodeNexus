@@ -37,7 +37,7 @@ func (c *Client) agentChat(ctx context.Context, acc *account.Account, req *upstr
 		// config name, so fall back to the default model.
 		modelName = ResolveConfigName("auto")
 	}
-	requestID := newUUID()
+	requestID := newHexID()
 
 	body := map[string]any{
 		"messages":    agentMessages(withRuntimePrompt(req)),
@@ -46,7 +46,9 @@ func (c *Client) agentChat(ctx context.Context, acc *account.Account, req *upstr
 		"function":    agentFunction,
 		"stream":      true,
 		"request_id":  requestID,
-		"session_id":  newUUID(),
+		// The gateway correlates the session with the request id; the native
+		// client sends the same 32-hex value in both fields.
+		"session_id": requestID,
 	}
 	if req.MaxTokens != nil && *req.MaxTokens > 0 {
 		body["max_tokens"] = *req.MaxTokens
@@ -129,13 +131,19 @@ func (c *Client) agentChat(ctx context.Context, acc *account.Account, req *upstr
 			finished = true
 			break
 		}
+		if c.cfg.DebugUpstream {
+			logx.Debugf("trae agent event %s: %s", event, clipJSON([]byte(payload), 4*1024))
+		}
 		var obj map[string]any
 		if err := json.Unmarshal([]byte(payload), &obj); err != nil {
 			continue
 		}
 		name := normalizeEventName(firstNonEmpty(event, eventNameOf(obj)))
 		switch name {
-		case "heartbeat", "keepalive", "ping", "model_config":
+		case "heartbeat", "keepalive", "ping", "model_config", "extra_info":
+			// extra_info carries the upstream's own digest of the turn (its
+			// content field is a machine summary, not the answer); reading it
+			// would pollute the reply.
 			continue
 		case "error":
 			return out, remoteError(0, remoteErrorCodeOf(obj), rawJSON(obj))
@@ -171,6 +179,19 @@ func (c *Client) agentChat(ctx context.Context, acc *account.Account, req *upstr
 	}
 	_ = finished
 	out.ToolCalls = tools.calls()
+	for i := range out.ToolCalls {
+		if strings.TrimSpace(out.ToolCalls[i].Function.Arguments) == "" {
+			// The protocol requires a JSON object here; a call opened without
+			// arguments still has to be renderable by strict clients.
+			out.ToolCalls[i].Function.Arguments = "{}"
+		}
+	}
+	if len(out.ToolCalls) > 0 && (out.FinishReason == "" || out.FinishReason == "stop") {
+		// The native gateway ends a tool-calling turn with finish_reason=stop
+		// even though it emitted calls; in the OpenAI vocabulary a turn that
+		// asks for tools stops for that reason, and clients branch on it.
+		out.FinishReason = "tool_calls"
+	}
 	if out.FinishReason == "" {
 		out.FinishReason = "stop"
 	}
@@ -206,30 +227,69 @@ func agentMessages(msgs []upstream.Message) []any {
 // withRuntimePrompt prepends the system message that describes the caller's
 // own tools. The upstream agent only knows its registry of server-side tools,
 // so without it a caller tool is answered with "no such tool" instead of a
-// structured call.
+// structured call. The client-context block is part of that contract: it is
+// what tells the agent that caller-declared tools exist at all, and a prompt
+// without it is ignored.
 func withRuntimePrompt(req *upstream.ChatRequest) []upstream.Message {
 	if len(req.Tools) == 0 {
 		return req.Messages
 	}
 	var b strings.Builder
-	b.WriteString("You are Trae Code connected to the user's local application. The external client application that started this conversation provides the client tools below.\n")
-	b.WriteString("Caller client tools (JSON):\n")
-	b.WriteString(jsonString(nativeToolDefinitions(req.Tools)))
+	b.WriteString("You are Trae Code connected to the user's local application.\n")
+	b.WriteString("The external Trae-compatible terminal client application that started this conversation provides the client tools below.\n")
+	b.WriteString("Caller client context (JSON):\n")
+	b.WriteString(runtimeClientContext())
 	b.WriteString("\n")
-	b.WriteString("Use native function calling for these client tools: their definitions and input schemas are in the request's tools field.\n")
-	b.WriteString("Return structured tool calls with an exact declared function name and arguments matching its schema; do not emit tool-call markup or JSON tool blocks in the response text.\n")
-	b.WriteString("The external API client executes these calls. Wait for the matching tool result before continuing, and never substitute server-side tools to reach the caller's workspace.\n")
-	if req.Raw != nil {
-		if choice, ok := req.Raw["tool_choice"]; ok && choice != nil {
-			fmt.Fprintf(&b, "tool_choice: %s\n", jsonString(choice))
-		}
-		if parallel, ok := req.Raw["parallel_tool_calls"]; ok && parallel != nil {
-			fmt.Fprintf(&b, "parallel_tool_calls: %s\n", jsonString(parallel))
-		}
+	b.WriteString("Discover the local environment through the available client tools when the request requires it.\n")
+	b.WriteString("If a tool can answer the question, call it proactively and wait for the external client result.\n")
+	b.WriteString("Remote or server-side tools cannot write into the caller workspace. Never claim that a client file was downloaded, created, edited, patched, or saved unless a later matching client tool result with the same call id confirms success.\n")
+	b.WriteString("A tool request, emitted tool-call block, plan, or assistant narration is not execution proof. If the matching client result reports failure, state the failure or request a corrective client tool; never report the operation as completed.\n")
+	b.WriteString("Never repeat a completed tool call; do not describe that server's Linux filesystem as the caller workspace.\n")
+	b.WriteString("Use native function calling for the client tools supplied in the request. Their definitions and input schemas are in the tools field.\n")
+	b.WriteString("Return structured tool calls, not tool-call markup or JSON tool blocks in the response text. Use an exact declared function name and arguments matching its schema.\n")
+	b.WriteString("The external API client executes these calls. Wait for the matching tool result before continuing; never substitute server-side tools to access the caller's workspace.\n")
+	b.WriteString("Keep file paths exactly as the user or tool result gave them.\n")
+	if name := namedToolChoice(req); name != "" {
+		fmt.Fprintf(&b, "Tool choice requires the client tool named %s.\n", name)
 	}
+	b.WriteString("Response format: your visible reply must contain only the final answer. Start with the result itself. Never begin with a restatement of the request or a description of your plan. Do not write sentences about the user, the question, or yourself, such as \"The user wants\", \"The user is asking\", \"Let me\", \"I need to\", \"This doesn't require\", or \"No tools needed\". Keep the reasoning steps that the answer genuinely needs (calculations, key facts, code) and drop everything else. Emit each code block exactly once.")
 	out := make([]upstream.Message, 0, len(req.Messages)+1)
 	out = append(out, upstream.Message{Role: "system", Content: b.String()})
 	return append(out, req.Messages...)
+}
+
+// runtimeClientContext describes the caller environment in the shape the
+// gateway reads. tool_discovery is the part that matters: it is what tells the
+// agent that caller-declared tools exist at all. The key order is fixed to
+// match the native client byte for byte.
+func runtimeClientContext() string {
+	return `{"system_type":"Windows","terminal_context":[{"shell":"PowerShell","cwd":".","source":"request-inferred"}],"client_name":"OpenAI-compatible client","context_source":"request-auto-discovery","tool_discovery":{"mode":"automatic","plugin_namespaces":[],"tool_search_available":false,"tool_search_tools":[],"environment_probe_tools":[]}}`
+}
+
+// namedToolChoice returns the tool a named tool_choice requires, if any.
+func namedToolChoice(req *upstream.ChatRequest) string {
+	if req.Raw == nil {
+		return ""
+	}
+	choice, ok := req.Raw["tool_choice"]
+	if !ok || choice == nil {
+		return ""
+	}
+	m, ok := choice.(map[string]any)
+	if !ok {
+		return ""
+	}
+	kind := strings.ToLower(strings.TrimSpace(stringField(m, "type")))
+	if kind != "function" && kind != "custom" {
+		return ""
+	}
+	if name := strings.TrimSpace(stringField(m, "name")); name != "" {
+		return name
+	}
+	if fn, ok := m["function"].(map[string]any); ok {
+		return strings.TrimSpace(stringField(fn, "name"))
+	}
+	return ""
 }
 
 // ideNativeContent renders one message body in the native block shape: text
@@ -431,11 +491,20 @@ func toolCallFrom(item any) (tc upstream.ToolCall, hasIndex, ok bool) {
 	tc.ID = firstString(obj, "id", "tool_call_id", "call_id")
 	fn, _ := obj["function"].(map[string]any)
 	if fn == nil {
+		// The native SOLO stream names the field function_call and splits a
+		// call across fragments: the first carries id and name, the following
+		// ones only arguments.
+		if fc, ok := obj["function_call"].(map[string]any); ok {
+			fn = fc
+		}
+	}
+	if fn == nil {
 		fn = obj
 	}
 	tc.Function.Name = firstString(fn, "name", "tool_name", "function_name")
 	tc.Function.Arguments = argumentsText(fn)
-	if tc.Function.Name == "" {
+	if tc.Function.Name == "" && tc.Function.Arguments == "" {
+		// Neither identity nor payload: nothing to fold into the slot.
 		return upstream.ToolCall{}, false, false
 	}
 	return tc, hasIndex, true
@@ -457,7 +526,7 @@ func intField(m map[string]any, key string) (int, bool) {
 // argumentsText renders tool arguments as the JSON string the OpenAI protocol
 // requires, whether the upstream sent an object or a string.
 func argumentsText(fn map[string]any) string {
-	for _, key := range []string{"arguments", "args", "parameters", "input"} {
+	for _, key := range []string{"arguments", "partial_arguments", "args", "parameters", "input"} {
 		switch v := fn[key].(type) {
 		case string:
 			if strings.TrimSpace(v) != "" {
@@ -470,7 +539,11 @@ func argumentsText(fn map[string]any) string {
 			}
 		}
 	}
-	return "{}"
+	// Empty means "this fragment carries no arguments", which is not the same
+	// as "the arguments are an empty object": the native stream opens a call
+	// with id and name and ships the arguments in a later fragment. Returning
+	// "{}" here would be folded into the slot as a literal prefix.
+	return ""
 }
 
 // nativeToolDefinitions converts the caller's OpenAI tool definitions into the

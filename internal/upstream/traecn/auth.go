@@ -284,6 +284,10 @@ func randomDigits(n int) string {
 
 // newUUID returns a random RFC 4122 version 4 identifier, used for the trace
 // id the authorization page round-trips back to us.
+// newHexID returns a 32-character hex id, the form the native client sends in
+// both request_id and session_id.
+func newHexID() string { return strings.ReplaceAll(newUUID(), "-", "") }
+
 func newUUID() string {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {

@@ -391,6 +391,25 @@ func (c *Client) setRemoteHeaders(req *http.Request, acc *account.Account, sse b
 // setAgentHeaders applies the headers the agent surface expects. It carries
 // three equivalent token headers because different upstream hosts read
 // different ones.
+// The SOLO model gateway expects its own client generation, not the desktop
+// IDE one: the desktop headers are accepted by some endpoints but the gateway
+// serves them a different backend that ignores caller tools. The constants
+// mirror the current Trae CN stable client.
+const (
+	soloGatewayVersion     = "0.1.52"
+	soloGatewayVersionCode = "20260811"
+	soloDeviceBrand        = "83DG"
+	soloDeviceType         = "windows"
+	soloPlatform           = "windows"
+	soloPackageType        = "stable_cn"
+	soloLscbdAid           = "787976"
+	soloPluginChannel      = "icube-ai"
+	soloAppID              = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8"
+)
+
+// setAgentHeaders marks a request as coming from the SOLO model-gateway
+// client. Every field here is part of the routing identity the gateway uses to
+// pick a backend, which is why the tool-calling path depends on it.
 func (c *Client) setAgentHeaders(req *http.Request, acc *account.Account) {
 	tok := ""
 	uid := ""
@@ -405,23 +424,39 @@ func (c *Client) setAgentHeaders(req *http.Request, acc *account.Account) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Connection", "keep-alive")
-	req.Header.Set("x-app-id", c.cfg.AppID)
-	req.Header.Set("x-ide-version", c.cfg.IDEVersion)
-	req.Header.Set("x-ide-version-code", ideVersionCode)
+	req.Header.Set("x-app-id", soloAppID)
+	req.Header.Set("x-app-version", "default")
+	req.Header.Set("x-app-version-code", soloGatewayVersionCode)
+	req.Header.Set("x-ide-version", soloGatewayVersion)
+	req.Header.Set("x-ide-version-code", soloGatewayVersionCode)
 	req.Header.Set("x-ide-version-type", "stable")
+	req.Header.Set("x-version-code", soloGatewayVersionCode)
+	req.Header.Set("app-version", soloGatewayVersion)
 	req.Header.Set("x-device-id", id.DeviceID)
 	req.Header.Set("x-machine-id", id.MachineID)
 	req.Header.Set("x-request-id", newUUID())
 	req.Header.Set("x-device-cpu", "AMD")
-	req.Header.Set("x-device-brand", c.cfg.DeviceBrand)
-	req.Header.Set("x-device-type", c.cfg.DeviceType)
-	req.Header.Set("x-os-version", c.cfg.OSVersion)
+	req.Header.Set("x-device-brand", soloDeviceBrand)
+	req.Header.Set("x-device-type", soloDeviceType)
+	req.Header.Set("x-device-platform", soloPlatform)
+	req.Header.Set("x-lscbd-platform", soloPlatform)
+	req.Header.Set("x-os-version", "Windows 11 Pro")
 	req.Header.Set("x-system-type", "Windows")
+	req.Header.Set("package-type", soloPackageType)
+	req.Header.Set("x-lscbd-aid", soloLscbdAid)
+	req.Header.Set("x-ss-dp", soloLscbdAid)
+	req.Header.Set("x-plugin-channel", soloPluginChannel)
+	req.Header.Set("x-bridge-transport", "aha")
+	req.Header.Set("x-ahanet-timeout", "86400")
+	req.Header.Set("x-lgw-req-sdk-type", "3")
+	req.Header.Set("x-net-sdk-domain-dispatch", "1")
+	req.Header.Set("x-ttnet-bypass-decompression", "1")
+	req.Header.Set("x-ttnet-bypass-cookie", "0")
+	req.Header.Set("request-traffic-type", "prod")
+	req.Header.Set("User-Agent", "Trae/"+soloGatewayVersion)
 	if uid != "" {
 		req.Header.Set("x-uid", uid)
 	}
-	// The desktop client sends an empty agent here; matching it is the point.
-	req.Header.Set("User-Agent", "")
 }
 
 // mode resolves which executor serves a request. A pinned mode always wins; the

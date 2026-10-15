@@ -596,11 +596,17 @@ func TestAgentChatEmitsToolCallsOnce(t *testing.T) {
 	if got := call.Headers.Get("X-Cloudide-Token"); got != fakeToken("user-1") {
 		t.Fatalf("X-Cloudide-Token = %q", got)
 	}
-	if got := call.Headers.Get("x-app-id"); got != DefaultAppID {
+	if got := call.Headers.Get("x-app-id"); got != soloAppID {
 		t.Fatalf("x-app-id = %q", got)
 	}
-	if got := call.Headers.Get("x-ide-version-code"); got != ideVersionCode {
+	if got := call.Headers.Get("x-ide-version-code"); got != soloGatewayVersionCode {
 		t.Fatalf("x-ide-version-code = %q", got)
+	}
+	if got := call.Headers.Get("x-bridge-transport"); got != "aha" {
+		t.Fatalf("x-bridge-transport = %q, want the SOLO gateway routing header", got)
+	}
+	if got := call.Headers.Get("User-Agent"); got != "Trae/"+soloGatewayVersion {
+		t.Fatalf("User-Agent = %q, want the SOLO gateway client", got)
 	}
 	if got, _ := call.Body["config_name"].(string); got != "glm-5.2" {
 		t.Fatalf("config_name = %q", got)
