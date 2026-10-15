@@ -25,6 +25,7 @@
 | v1.10 | 2026-10-15 | #42 完成并入档；记录第三轮 P4 决策（`count_tokens` 估算 / 图片透传 / 校验从宽 / `signature` 空串 / 看门狗保活）；**按参考实现修订 ADR-48 为「形状严格、校验从宽」** | 张 |
 | v1.11 | 2026-10-15 | #41 完成并入档；记录第四轮 P4 决策（推理默认隐藏 / 孤儿工具输出保留为惰性块 / 工具类型全量 / LRU 参数与哨兵）；**P4 三客户端直连的协议面至此补齐** | 张 |
 | v1.12 | 2026-10-15 | #44 完成并入档；记录第五轮 P4 决策（纯 SQL 聚合 / 明细 10 万条 / 面板最小可用含趋势 / 与 reqlog 各司其职）；**P4 全部编码工作至此完成，仅剩真机探测项** | 张 |
+| v1.14 | 2026-10-16 | **P5 完成**：面板「设置」页（表单 + JSON 双轨）· 配置热生效（分级：55 项即时 / 6 项需重启）· 保存前快照与一键回滚 · 危险字段二次确认 · 一键重启（含监听预检）· 主题切换与视觉/无障碍增强 | 张 |
 | v1.13 | 2026-10-15 | **P4 真机探测完成**（本机已登录 Trae CN，`auto` 一键导入 uid 2561221162711115）；发现并修复 **4 个真实协议缺陷**；三线协议入口真机验收通过；新增 `debug_upstream` 调试开关；遗留 2 个带证据的开放项（§9.9） | 张 |
 
 **阅读指引**
@@ -1156,6 +1157,30 @@ TraeWork（Trae 桌面 Agent 客户端）相关能力是**两件方向相反的�
 |---|---|
 | 任务 | ① 面板**视觉与交互增强**（IA 骨架已于 P1b1 落地，见 ADR-27，**不重构**）；② ~~定时任务合并入统一任务中心~~（**已于 P1b2 完成**，见 ADR-35）；③ 在线配置编辑热生效；④ ~~信封加密 + OS 密钥库 + 导出/导入~~（**已于 P1b1 完成**，见 ADR-26） |
 | 验收 | 面板全功能可用；热生效字段保存即生效；重启后加密凭证可正常解密（P1b1 已验） |
+
+> **P5 决策（用户拍板：全部取推荐档；取向 = 用户体验/流畅性优先，不计实现复杂度）**
+> - **配置编辑形态**：**表单为主 + 高级 JSON 双轨**。常用字段有说明/枚举/校验，冷门字段由 JSON 兜底 —— 表单不可能覆盖全部字段，「改不了」的死角比界面不整齐更伤体验。
+> - **热生效语义**：**分级 + 重启引导**。安全字段即时生效并**只报告真正变化的路径**；结构性字段（`listen` / `data_dir` / `auth_dir` / `security.*` / `api_key`）标「需重启」徽章并提供**一键重启**。**绝不**把没生效的说成已生效。
+> - **改错保护**：**保存前自动快照（最多 20 份）+ 面板内一键回滚 + 危险字段二次确认**（后端 409 要求确认，不信任前端）。改错 `listen`/`api_key` 会把操作者锁在门外，这是流畅性的一部分。
+> - **视觉程度**：**温和增强 + 主题切换**，不引依赖、不重构 IA（守 ADR-27）。含亮/暗/跟随系统（记住显式选择）、加载骨架、空状态、移动端适配、`focus-visible` 与 `prefers-reduced-motion`。
+
+**P5 实现纪实（as-built）**
+
+| 项 | 落点 | 状态 |
+|---|---|---|
+| 配置元数据：`configschema`（61 个字段的 path/分组/类型/说明/枚举/是否热生效/是否危险；`ValueAt` / `Changed` / `NeedsRestart`） | `internal/configschema/schema.go` | ✅ |
+| 面板配置 API：`GET/POST /api/config`、`GET /api/config/snapshots`、`POST /api/config/rollback`、`POST /api/restart` | `internal/panel/config.go` | ✅ |
+| 保存管线：**未知字段拒绝**（`DisallowUnknownFields`，拼错不会被静默丢弃）→ 枚举与必填校验 → 危险字段 409 二次确认 → 快照 → 原子落盘 → 热应用 → 返回 `{applied, restart_required}` | `internal/panel/config.go` | ✅ |
+| 热生效接线：`applyHot`（日志级别 / 调度 / 池 / 路由 / 上游重建 / 请求日志 / 用量开关与上限），**只报告变化的路径** | `cmd/codenexus/main.go`、`hotreload.go` | ✅ |
+| 组件级热生效入口：`pool.Reconfigure`、`scheduler.Reconfigure`（已有）、`recorder.Reconfigure`、`Store.SetMaxRecords`、`Server.SetRouterConfig`、`Server/Console.SetUsage`（原子指针）、`upstream` 注册表改 **copy-on-write** | 各包 | ✅ |
+| 上游可重建：`registerUpstreams(cfg)` 抽为函数，配置变更时重新注册（替换同名来源） | `cmd/codenexus/main.go` | ✅ |
+| 一键重启：先释放端口 → **试绑新地址**（失败则重新监听并报错，绝不留下无服务的窗口）→ 脱离进程组 spawn 自身 | `cmd/codenexus/hotreload.go`、`restart_{windows,other}.go` | ✅ |
+| 快照：`DataDir/config-snapshots/*.json`，保留最近 20 份，面板可选任一回滚 | `internal/panel/config.go` | ✅ |
+| 面板「设置」页：`Settings.svelte`（按分组渲染、bool/enum/int/float/hours/secret 控件、改动高亮、「需重启」徽章、JSON 编辑器、保存结果卡、快照回滚） | `web/src/Settings.svelte` | ✅ |
+| 视觉与无障碍：主题切换（亮/暗/跟随系统，localStorage 记住显式选择）、骨架屏、表格横向滚动与 hover、移动端布局、`focus-visible`、`prefers-reduced-motion` | `web/src/App.svelte` | ✅ |
+| 单测：schema 与取值比较、未知字段 400、枚举越界 400、保存即生效并落盘、危险字段 409→确认→报告需重启、快照回滚、无变化不应用、无重启能力时 501 | `internal/panel/config_test.go` | ✅ |
+
+> **验证边界（如实记录）**：一键重启在本机沙箱中**新进程确实启动并完成初始化**（日志可见 `loaded accounts` / `usage history`），但沙箱会在命令会话结束时回收脱离进程，故未能验证长存活；真机（终端启动 / 双击 exe）不受此限制。已通过「Shutdown 后试绑新地址」消除「新地址不可用导致无服务」的风险。
 
 ### P6 · 打包与发布
 
