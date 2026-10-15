@@ -1114,13 +1114,39 @@ TraeWork（Trae 桌面 Agent 客户端）相关能力是**两件方向相反的�
 
 **新增调试设施**：`upstreams.trae-cn.debug_upstream=true`（转储原始上游事件、出站请求体，16KB 截断）——协议漂移的排查入口。
 
-**遗留开放项（带证据，非阻塞 P4 归档）**：
+**对照实验攻坚（两个开放项均以此收口）**：
+
+> 方法：clone `Trae2api-cn` 并起真服务（`TRAE_AUTH_SOURCE=auto` 导入**同一账号**、`UPSTREAM_MODE=ide`），发同样的工具请求 —— **参考拿到了工具调用**（`finish=tool_calls` → `get_weather({"city":"北京"})`）。**决定性结论：不是上游限制，是请求差异。**
+> 逐项对齐过程（每步都真机复测）：①`tools.function.parameters` 转 JSON 字符串；②`tool_choice` 转原生字符串/工具名；③运行时系统提示补齐参考原文（含 **`Caller client context (JSON)`** 的 `tool_discovery` 块 —— 这是网关据以认定"调用方工具存在"的部分）；④**SOLO 网关请求头全套对齐**（`x-bridge-transport`/`x-lscbd-aid`/`package-type`/`User-Agent: Trae/0.1.52`… 共 17 项；参考注释明说桌面 IDE 头会被现行网关区别对待）；⑤`request_id`/`session_id` 统一为 32 位无连字符 hex。
+> 对齐后**两边上游请求逐字节一致**（自建捕获服务器抓包 diff），结果仍不同 → 最后变量是**流的形状**，加 Agent 面原始行转储后一举破案。
+
+**因此新增修复的 2 个流形状缺陷**（同一根因：SOLO 后端与 OpenAI 的流形状不同）：
+
+| # | 缺陷 | 根因 | 修复 |
+|---|---|---|---|
+| 5 | **工具调用被整个丢弃**：SOLO 流用 `function_call`（扁平、非 `function`），且**首片只有 id+name、后续片只有 arguments** → 我们的解析器要求 name 非空 → 整通调用作废（表现为"模型不调工具"） | Agent 面原始 SSE 转储：两片 `tool_calls[0].function_call` 分别 `{"name":"get_weather","arguments":""}` 与 `{"name":"","arguments":"{\"city\": \"北京\"}"}` | `toolCallFrom` 认 `function_call`；name 与 arguments **皆空**才丢弃；`argumentsText` 认 `partial_arguments`，且**空参数返回空串**（原兜底 `{}` 会被折叠成参数前缀，产出 `{}{"city":"北京"}`） |
+| 6 | **`extra_info` 事件污染正文**：其 `content` 是上游自拼的回合摘要 JSON，被当正文读出 → 用户看到一坨 JSON | 同上转储 | 与心跳一道跳过 `extra_info` |
+
+**收口后真机验收（工具闭环）**：
+
+| 场景 | 实测 |
+|---|---|
+| 非流式工具调用 | `finish_reason=tool_calls`、`get_weather`、`arguments={"city": "北京"}`（无前缀） |
+| 流式工具调用 | 增量正确拼出 `{"city": "上海"}`，`finish_reason=tool_calls` |
+| **完整闭环**（调用 → 工具结果 → 回答） | 模型回答 = `北京今天天气不错：晴，气温 26°C…`，`finish=stop` 且**不再重复调用** —— 工具结果被真正消费 |
+
+> 另修正一处语义：SOLO 后端以 `finish_reason=stop` 结束带工具调用的回合（`done` 事件），OpenAI 语义下应为 `tool_calls`（客户端据此分支去执行工具），故产出工具调用时强制改写。
+
+**图片输入复测（原判"上游未消费"是样本问题）**：改用 8×8 纯色 PNG 后 —— 红图答 `红色`、蓝图答 `蓝色`（**反例验证通过，排除幻觉**）。此前 1×1 像素过小导致模型无法识别。**图片链路可用**（`glm-5v-turbo`）。
+
+**遗留待办（非阻塞）**：
 
 | 项 | 证据 | 状态 |
 |---|---|---|
-| **调用方工具在 SOLO Agent 面不被调用**：`tools`（parameters 已为字符串）、`tool_choice=工具名`、运行时系统提示三者均已正确发出（出站转储核对），模型仍答"当前环境没有该工具"并改用自己的联网搜索 | 出站请求体转储 + 模型回复原文 | **开放**。参考的 `tools` 请求形状已逐字段对齐；其测试也只断言请求形状、无真机调用证据。后续方向：①用参考实现直接对同一账号实测对照（排除上游按账号/模型灰度）；②确认是否需要额外的会话级工具注册端点 |
-| **图片输入上游未消费**：`initial_message.query` 已含参考同形的 renderer media block（`{"type":"image_url","value":{mimeType,data}}`），但 `glm-5v-turbo` 的回答与图片内容无关（幻觉描述无关场景） | query 转储（media part 在场）+ 1×1 红色像素与回答不符 | **开放**。同上，需对照实验定位是形状细节还是上游能力 |
+| ~~调用方工具在 SOLO Agent 面不被调用~~ | — | ✅ **已解决**（流形状缺陷 5，见上） |
+| ~~图片输入上游未消费~~ | — | ✅ **已解决**（此前是 1×1 像素样本过小；8×8 纯色图红/蓝反例均正确） |
 | 1M Max / `reasoning_effort` 映射 | 未测（需特定档位与模型） | 待后续真机窗口 |
+| 极短/极简图片（如 1×1 像素）上游识别不稳 | 1×1 红像素曾得无关描述 | 已知上游能力边界，**不做补偿**（不伪造图片描述） |
 
 > 刻意不做：参考 `strip_reasoning_narration` 的"前导叙述剥离"启发式（约 90 行正则）——它服务于"推理与答案同字段"的旧布局；现行分离布局下答案干净（实测 `thought="你好"` 无叙述），引入会带来误删风险。若后续观察到叙述泄漏再移植。
 

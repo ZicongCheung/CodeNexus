@@ -105,9 +105,12 @@
 - [x] 核心看门狗保活（`turn.IdleAfter` + `streamOpener`：静默超时即开流并 `ping`，仍保留首字节前换号）
 - [x] `/v1/responses`（Codex：带 `sequence_number` 的事件流、`previous_response_id` 内存 LRU + 超限哨兵、工具名双向绑定、推理默认隐藏、孤儿输出惰性化）
 - [x] 工具调用三向映射与配对落地（`delta.tool_calls` / `tool_use` / `function_call`）
+- [x] **P4 真机探测与验收**（§9.9）：三线协议入口真机通过（含 `previous_response_id` 跨轮续链）；真机抓到并修复 6 个协议缺陷；新增 `debug_upstream` 调试开关
+- [x] **工具调用闭环真机通过**（§9.9）：对照实验（起 `Trae2api-cn` 用**同一账号**实测）证明"上游不调用调用方工具"是**我方缺陷**而非上游限制 → 定位并修复 2 个 SOLO 流形状缺陷（`function_call` 扁平+分片被整通丢弃、`extra_info` 摘要污染正文）；非流式 / 流式 / 完整闭环（调用→结果→回答）均通过
+- [x] 图片输入真机链路**可用**：8×8 纯色图红/蓝反例均答对（此前 1×1 像素样本过小导致误判"上游未消费"）
 - [ ] `reasoning_effort` 映射真机探测（§4.2 待验证项）
 - [x] 用量与积分 + 请求日志摘要迁入 SQLite（`modernc.org/sqlite`，纯 Go 无 CGO）：`internal/usagestore` + 面板「用量」页（总览卡 / 每日趋势 / 模型分布 / 可筛选明细）
-- [ ] 待探测后再定：图片输入真机链路、1M Max、自动续写（见 EXECUTION_PLAN §4.2）
+- [ ] 待探测后再定：1M Max、自动续写（见 EXECUTION_PLAN §4.2）
 - [ ] 来源 B 桌面端「自定义模型」入站兼容（纯协议翻译，无原生依赖；可选、可裁剪）
 
 ## P5 · 统一面板重设计 + 任务合并 + 配置热生效
