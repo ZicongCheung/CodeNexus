@@ -456,9 +456,9 @@ func (u *stallingUpstream) Probe(context.Context, *account.Account) (*upstream.P
 // while the upstream is still silent, which is what keeps Claude Code's
 // message_start timeout from firing.
 func TestAnthropicOpensBeforeTheFirstToken(t *testing.T) {
-	old := anthropicIdleKeepalive
-	anthropicIdleKeepalive = 50 * time.Millisecond
-	t.Cleanup(func() { anthropicIdleKeepalive = old })
+	old := wireIdleKeepalive
+	wireIdleKeepalive = 50 * time.Millisecond
+	t.Cleanup(func() { wireIdleKeepalive = old })
 
 	stall := &stallingUpstream{release: make(chan struct{})}
 	s := failoverServer(t, stall, twoAccounts())

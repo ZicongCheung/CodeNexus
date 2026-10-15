@@ -37,13 +37,13 @@ const anthropicWireName = "anthropic"
 // anthropicDefaultMaxTokens caps a completion when the client omits max_tokens.
 const anthropicDefaultMaxTokens = 32000
 
-// anthropicIdleKeepalive is how long the upstream may stay silent before the
+// wireIdleKeepalive is how long the upstream may stay silent before the
 // answer is opened anyway with message_start + ping. Claude Code aborts a
 // request whose message_start never arrives, so the opening must not wait on a
 // slow first token forever; the window is short enough that a fast failure
 // still fails over on another account. It is a variable so a test can shrink
 // it.
-var anthropicIdleKeepalive = 15 * time.Second
+var wireIdleKeepalive = 15 * time.Second
 
 // anthropicRequestError marks a malformed Anthropic request, carrying the field
 // at fault so the response reads like the official one.
@@ -80,7 +80,7 @@ func parseAnthropicTurn(r *http.Request, body map[string]any) (*turn, error) {
 		Model:     model,
 		Stream:    stream,
 		Session:   sessionKey(r, "", msgs, openAIToolNames(oai["tools"])),
-		IdleAfter: anthropicIdleKeepalive,
+		IdleAfter: wireIdleKeepalive,
 		Request: &upstream.ChatRequest{
 			Model:       model,
 			Messages:    msgs,

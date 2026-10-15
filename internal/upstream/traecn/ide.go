@@ -189,6 +189,9 @@ func agentMessages(req *upstream.ChatRequest) []any {
 		if m.ToolCallID != "" {
 			msg["tool_call_id"] = m.ToolCallID
 		}
+		if m.ReasoningContent != "" {
+			msg["reasoning_content"] = m.ReasoningContent
+		}
 		out = append(out, msg)
 	}
 	return out

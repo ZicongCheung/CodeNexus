@@ -47,6 +47,10 @@ type Message struct {
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 	// ToolCallID is set on the tool turn that answers one call.
 	ToolCallID string `json:"tool_call_id,omitempty"`
+	// ReasoningContent is a bounded reasoning summary kept for continuation.
+	// It is presentation history the upstream may regenerate, never a full
+	// private chain.
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 // ToolCall is a normalized tool invocation.

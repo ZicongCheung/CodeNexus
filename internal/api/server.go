@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/ZicongCheung/CodeNexus/internal/account"
 	"github.com/ZicongCheung/CodeNexus/internal/config"
@@ -44,12 +45,28 @@ type Server struct {
 	recorder  *reqlog.Recorder
 	router    *modelRouter
 	gate      *snapshotGate
+	respCache *responsesCache
 	root      http.Handler
 }
 
+// Responses session cache defaults, mirroring the reference relay: bound both
+// the entry count and the bytes so a long chain cannot grow without limit.
+const (
+	responsesCacheTTL      = time.Hour
+	responsesCacheMaxN     = 1024
+	responsesCacheMaxBytes = 2 << 20
+	responsesCacheMaxMsgs  = 256
+)
+
 // NewServer builds the HTTP handler. panel may be nil to disable the console.
 func NewServer(cfg *config.Config, p *pool.Pool, panel http.Handler, opts ...Option) *Server {
-	s := &Server{cfg: cfg, pool: p, panel: panel, gate: newSnapshotGate()}
+	s := &Server{
+		cfg:       cfg,
+		pool:      p,
+		panel:     panel,
+		gate:      newSnapshotGate(),
+		respCache: newResponsesCache(responsesCacheTTL, responsesCacheMaxN, responsesCacheMaxBytes, responsesCacheMaxMsgs),
+	}
 	for _, o := range opts {
 		if o != nil {
 			o(s)
@@ -64,6 +81,7 @@ func NewServer(cfg *config.Config, p *pool.Pool, panel http.Handler, opts ...Opt
 	mux.HandleFunc("/v1/chat/completions", s.record("chat", s.withAuth(s.handleChat)))
 	mux.HandleFunc("/v1/messages", s.record("anthropic", s.withAuth(s.handleAnthropicMessages)))
 	mux.HandleFunc("/v1/messages/count_tokens", s.withAuth(s.handleAnthropicCountTokens))
+	mux.HandleFunc("/v1/responses", s.record("responses", s.withAuth(s.handleResponses)))
 	if panel != nil {
 		mux.Handle("/panel/", panel)
 		mux.Handle("/panel", panel)

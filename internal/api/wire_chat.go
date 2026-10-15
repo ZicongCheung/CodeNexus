@@ -178,6 +178,9 @@ func parseMessages(v any) []upstream.Message {
 		if id, _ := m["tool_call_id"].(string); id != "" {
 			msg.ToolCallID = id
 		}
+		if rc, _ := m["reasoning_content"].(string); rc != "" {
+			msg.ReasoningContent = rc
+		}
 		msg.ToolCalls = parseToolCalls(m["tool_calls"])
 		out = append(out, msg)
 	}
