@@ -43,7 +43,7 @@
 
 ## 特性
 
-> 状态：🚧 早期骨架。以下为目标特性，实现进度见 [`docs/ROADMAP.md`](docs/ROADMAP.md)，完整执行计划见 [`docs/EXECUTION_PLAN.md`](docs/EXECUTION_PLAN.md)。
+> 状态：🚧 开发中（P0–P3 已完成）。以下为目标特性，实现进度见 [`docs/ROADMAP.md`](docs/ROADMAP.md)，完整执行计划见 [`docs/EXECUTION_PLAN.md`](docs/EXECUTION_PLAN.md)。
 
 - **全协议超集（一个 `base_url`）**：OpenAI Chat（`/v1/chat/completions`）、OpenAI **Responses**（`/v1/responses`，Codex）、**Anthropic Messages**（`/v1/messages`，Claude Code）三类入口，均支持流式（SSE）与非流式。
 - **多源账号池**：同一池内混合两类账号，按来源、额度、可用性调度。
@@ -123,7 +123,7 @@ flowchart LR
 
 ## 项目状态
 
-🚧 **设计 / 骨架阶段**：本仓库正在按 [`docs/EXECUTION_PLAN.md`](docs/EXECUTION_PLAN.md) 分阶段落地，进度勾选见 [`docs/ROADMAP.md`](docs/ROADMAP.md)。
+🚧 **开发中**：P0–P3 已完成（两个来源的账号体系、统一池与模型路由、签到/风控/额度结算、本机导入与 `cli` 上游模式）。本仓库按 [`docs/EXECUTION_PLAN.md`](docs/EXECUTION_PLAN.md) 分阶段落地，进度勾选见 [`docs/ROADMAP.md`](docs/ROADMAP.md)。
 
 规划中的使用方式：
 
@@ -138,9 +138,9 @@ go build -o codenexus ./cmd/codenexus
 
 ---
 
-## 配置（规划）
+## 配置
 
-`config.json` 预期字段（实现中会逐步补齐）：
+`config.json` 字段：
 
 ```jsonc
 {
@@ -152,13 +152,50 @@ go build -o codenexus ./cmd/codenexus
   "router": { "naming": "flat", "same_name_policy": "auto_healthy" },
   "upstreams": {
     "workbuddy": { "enabled": true },
-    "trae-cn":   { "enabled": true, "auth_source": "auto", "upstream_mode": "remote", "auto_route": true }
+    "trae-cn": {
+      "enabled": true,
+      // auto（本机客户端存储）/ manual / env / web-login；仅作展示，四种入口恒可用
+      "auth_source": "auto",
+      // remote | solo | ide | work-agent | auto-route | cli
+      "upstream_mode": "remote",
+      "auto_route": true,
+      // 可执行文件与参数（也支持 CODENEXUS_TRAE_CLI_COMMAND / _CLI_ARGS 覆盖）
+      "cli": {
+        "model_mode": "default",     // default | config | flag | none
+        "output_mode": "json",       // json（结构化，默认）| text
+        "max_concurrency": 2,        // 同时最多几个子进程
+        "timeout_seconds": 300,      // 两次读到数据之间的静默上限，超时 kill
+        "disable_tools": true,       // 默认拒绝内置工具集，避免代理在本机执行命令
+        "max_messages": 60,
+        "max_prompt_chars": 20000
+      },
+      "checkin": {
+        "enabled": true,
+        "at": "08:30",               // 本地时间 HH:MM
+        "interval_seconds": 60,      // 同一次巡检内多账号领奖间隔
+        "retry_after_seconds": 60,   // 9074 退避基数
+        "max_backoff_seconds": 3600,
+        "backoff_exponent_cap": 3
+      }
+    }
   },
   "schedule": { "checkin_enabled": true, "keepalive_enabled": true }
 }
 ```
 
 > ⚠️ `api_key` 留空等于**完全不鉴权**，即使本机自用也务必设置。
+
+### `upstream_mode: cli`（本机 Trae CLI）
+
+把来源 B 的请求交给本机已安装并登录的 Trae CLI 子进程执行，**不需要任何令牌**：
+
+- 可执行文件按 `cli.command` → `CODENEXUS_TRAE_CLI_COMMAND(S)` → 内置候选名 `traecli` / `trae-cli` / `traex` / `trae`（先按路径判断，再查 `PATH`）依次定位。
+- **与账号池互斥**：CLI 自持登录态，面板会出现一个标记为「本机」的占位条目，它没有额度、不可展开任务、**也绝不写入 `auths/`**；该形态下面板会明确显示"无账号额度"，而不是拿 0 充数。
+- CLI 返回的 `usage` / `credits_*` 会照常进入用量与结算记录。
+
+### 从本机 Trae 导入账号
+
+面板「添加账号 → 从本机导入」会读取本机 Trae 客户端存储（`%APPDATA%` 下 `Trae CN` / `TRAE SOLO CN` / `Trae` / `TRAE SOLO` 四个候选中首个令牌仍有效者），就地解密后**信封加密**入池。这是一次**显式点击**，网关不会在后台扫描本机磁盘；导入过程不产生任何明文中间文件。
 
 ### 环境变量
 
@@ -170,6 +207,8 @@ go build -o codenexus ./cmd/codenexus
 | `CODENEXUS_API_KEY` | 覆盖 `api_key` |
 | `CODENEXUS_WORKBUDDY_TOKEN` / `_REFRESH_TOKEN` / `_UID` / `_DOMAIN` / `_EXPIRES_AT` / `_EXPIRES_IN` | 注入一个 WorkBuddy 账号 |
 | `CODENEXUS_TRAE_TOKEN` / `_REFRESH_TOKEN` / `_UID` / `_LABEL` / `_EXPIRES_AT` / `_EXPIRES_IN` | 注入一个 Trae CN 账号（`_UID` 可省，网关会从 JWT 中读取） |
+| `CODENEXUS_TRAE_CLI_COMMAND` | 覆盖 `upstreams.trae-cn.cli.command`（`cli` 模式使用） |
+| `CODENEXUS_TRAE_CLI_ARGS` | 覆盖基础参数（逗号分隔或 JSON 数组；`cli` 模式使用） |
 
 > 经环境变量注入的账号是**临时账号**：可用但不写入 `auths/`。
 
@@ -230,10 +269,10 @@ CodeNexus/
 
 见 [`docs/ROADMAP.md`](docs/ROADMAP.md)（渐进勾选）与 [`docs/EXECUTION_PLAN.md`](docs/EXECUTION_PLAN.md)（完整验收）。概览：
 
-1. **P0 骨架** — 入口、配置、HTTP 服务、`/healthz`、上游接口与一条可运行闭环。
-2. **P1 来源 A 适配** — WorkBuddy / CodeBuddy 上游实现（登录、签到、池调度、Chat）。
-3. **P2 来源 B 基础链路** — 浏览器授权 / 手工 / 环境变量认证 + Remote 端点 + 统一池/路由 + 流式对话。
-4. **P3 来源 B 认证补齐与端点扩展** — 本地凭证/CLI 认证、四端点 + 自动路由、风控退避。
+1. **P0 骨架** ✅ — 入口、配置、HTTP 服务、`/healthz`、上游接口与一条可运行闭环。
+2. **P1 来源 A 适配** ✅ — WorkBuddy / CodeBuddy 上游实现（登录、签到、池调度、Chat）。
+3. **P2 来源 B 基础链路** ✅ — 浏览器授权 / 手工 / 环境变量认证 + Remote 端点 + 统一池/路由 + 流式对话。
+4. **P3 来源 B 认证补齐与风控** ✅ — 本机 `storage.json` 一键导入、`cli` 上游模式、签到与 `9074` 风控退避、回合级积分结算（三级取值 + 并发归属闸门）。
 5. **P4 协议超集与高级能力** — Responses / Anthropic / 工具调用 / thinking 分离 / 自动续写 / 1M。
 6. **P5 统一面板 + 任务合并 + 配置热生效 + 凭证加密**。
 7. **P6 打包与发布** — Windows 单 exe 优先，跨平台构建。

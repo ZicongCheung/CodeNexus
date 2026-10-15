@@ -82,10 +82,15 @@
 - [x] 面板：`POST /panel/api/auth/token`（粘贴令牌）+ 设备授权向导尊重所选来源 + `/api/session` 暴露 `device_sources`/`manual_sources`；添加账号页新增「粘贴令牌」通道
 - [x] 验收：`go build/vet/test` 全绿；启动冒烟通过（session 报告 `trae-cn` 且两种开号通道正确、`/v1/models` 含 Trae 目录、同名模型跨源择优）
 
-## P3 · 来源 B 认证补齐 + 端点扩展 + 风控
-- [ ] 认证补齐：本地凭证自动发现（解密本机 `storage.json`）、本地 CLI 子进程
+## P3 · 来源 B 认证补齐 + 风控 ✅（已完成）
+> 决策 ADR-41~45：`auto` = 自动发现 + 解密 + 面板一键导入（一律信封加密，不落明文）· `cli` = 作为 `upstream_mode` 的取值（全局模式，非池内伪账号）· `cli` 保真度 = 原生 JSON + 文本模式开关 + 复用既有护管线 · 全量一次交付 · 结算三级取值全量对齐参考**并带上并发归属闸门**。
+- [x] `auto` 认证：本机 `storage.json` 自动发现（四个 `%APPDATA%` 候选，取首个 token 仍有效者）+ `tc` 格式解密（`SALT_A⊕SALT_B`，自校验 `SHA512`）+ 面板「从本机 Trae 导入」一键入池
+- [x] `cli` 上游模式：`upstream_mode: cli`（可执行定位 / 参数拼装 / 括号配对 JSON 流 / 快照前缀差 / EOF 终止 / 单块超时 kill / 全局并发上限 / 工具禁用 / prompt 序列化与截断 / 文本模式开关）
 - [x] ~~四端点 Remote / Solo / IDE Agent / Work Agent + 自动路由 + 失败回落~~ → 提前至 P2（ADR-38，两个物理面覆盖四个逻辑端点）
-- [ ] 签到 + 风控码设备标识轮换 + 指数退避 + 后台错峰重试（池侧软冷却路径已于 P2 打通，见 ADR-39）
+- [x] 签到 + 风控码设备标识轮换（`9074` 轮换一次并指数退避 / `9095` 显式非成功且不退避）+ 后台错峰重试（池侧软冷却路径已于 P2 打通，见 ADR-39）
+- [x] 回合级积分结算接入（显式字段 → `get_session_usage` → 账号已用额度差值，接上三级优先级与**并发归属闸门**，ADR-45）
+- [x] 不做：`src/auth_cli.py` 的 OAuth 设备码流程（上游 404、源码自述不可用）；CLI 多方言文本内工具块解析（ADR-43）；上游模式运行时热切换（留 P5）
+- [x] 调研副本 `_deps/` 已删除（P3 收尾）
 
 ## P4 · 协议超集与高级能力
 - [ ] `/v1/responses`（Codex，含 `previous_response_id`）

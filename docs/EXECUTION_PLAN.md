@@ -18,6 +18,8 @@
 | v1.3 | 2026-10-14 | 追加 ADR-30~32（P1b2 交付节奏 / 调度时区 / 重启补跑） | 张 |
 | v1.4 | 2026-10-15 | 追加 ADR-33~36（成长执行器保真度 / 默认开关 / 任务中心写入语义 / 补跑范围收敛）；P1b2 完成并入档 | 张 |
 | v1.5 | 2026-10-15 | 追加 ADR-37~40（Trae 授权形态 / 端点范围 / 池语义统一 / 交付节奏）；P2 完成并入档 | 张 |
+| v1.6 | 2026-10-15 | 追加 ADR-41~44（`auto` 一键导入 / `cli` 作为上游模式 / `cli` 输出来自原生 JSON / P3 全量一次交付）；新增 §9.6 P3 调研事实（**修正旧文档中 `storage.json` 解密的错误描述**） | 张 |
+| v1.7 | 2026-10-15 | 追加 ADR-45（结算三级取值全量对齐参考，含**并发归属闸门**）；补全 §9.7 结算小节（快照差值的闸门、before 快照不阻塞首字节、`used` 取值口径）；新增 §9.8 P3 实现纪实 | 张 |
 
 **阅读指引**
 
@@ -162,6 +164,20 @@
 | **ADR-38** | 来源 B 上游端点范围 | **直接全量四端点 + 自动路由**（Remote 会话事件流 / Agent 单跳流式 / IDE 平台 / Work 代理），**一次性实现**，不做"先 Remote 后补" | 端点差异对用户不可见，但决定了"带工具调用是否可用"；先只做 Remote 会静默吞掉调用方工具（会话自带工作区会自行满足文件/Shell 工具），属于体验陷阱；一次做全才能保证"任何客户端形态都可用" |
 | **ADR-39** | 来源 B 账号池语义统一 | **统一到池现有语义，不新增并行概念**：来源 B 的积分映射为池的 `credits`；上游 `9074`（设备维度节流）按 **软冷却 + 指数退避** 处理，走与 `429` 完全相同的路径；额度耗尽 `4008` 归为账号级失效，切换账号而非同号重放 | 池里只有一份"健康/额度/冷却"真相，择优、熔断、故障转移对两个来源行为一致；面板与遥测不需要为来源 B 造第二套指标；软冷却让"设备抖动"自我恢复，不误伤账号 |
 | **ADR-40** | P2 交付节奏 | **全量一次交付**：四端点 + 自动路由 + 认证（回环/粘贴/环境变量）+ 模型目录 + 跨源模型路由 + 面板接入 | 四端点共享同一套凭证、设备指纹与错误分类，拆开做会二次改造共享层；目录与跨源路由是"能选到模型"的前置，缺一则 P2 无法端到端验收 |
+| **ADR-41** | 来源 B `auto` 认证形态 | **自动发现 + 就地解密 + 面板「从本机 Trae 导入」一键导入**：面板点一下 → 网关按 `cn→solo→sg→solo-sg` 探测本机 `storage.json` → 按 `tc` 格式解密 → 校验（`SHA512` 哈希自校验）→ 信封加密入池；**不引入"指定路径导入"作为第二入口**。凭据**一律信封加密落盘**，不落任何明文中间态（参考实现会把明文 token 写进 `.env`，本项目刻意不照搬） | 这是五种来源里**唯一零操作**的入口：点一下就得到账密，体验天花板最高；解密算法**不依赖 machine_id/注册表**，是一份自包含密文，实现风险远低于早先估计；做成"一次显式点击"而非静默扫描，把"读取本机客户端凭据"的同意动作显式化（参考实现没有这道门禁）。不做第二入口是因为一键导入完全覆盖其场景，双入口只会带来两套错误提示 |
+| **ADR-42** | 来源 B `cli` 认证形态 | **作为 `upstream_mode` 的一个取值**（`cli`，与 `remote`/`solo`/`ide`/`work-agent`/`auto-route` 并列），**不建池内伪账号** | 已核实参考实现中 `cli` 是与 `remote`/`ide`/`solo` 并列的**全局上游模式**（`UPSTREAM_MODE=cli`），且 CLI 路径会主动摘掉账号与令牌——CLI 与账号池本就是互斥关系。我们的 `upstream_mode` 字段已存在，`cli` 只是**同一条机制的又一个取值**（不违反 ADR-39 的"不新增并行概念"）；反之若在池里塞一个"无凭证伪账号"，会让池出现一个不对应任何凭据的成员，且与跨源择优、额度结算语义都错位 |
+| **ADR-43** | 来源 B `cli` 输出保真度 | **只解析原生 JSON 字段**（内容 / thinking / usage / 工具 / credits）+ **保留文本模式开关** + **复用既有 `internal/rewrite` 标记还原管线**；**不重写**参考里约 1600 行的"文本内 XML/OpenCode/Kimi/ZedeX 工具块"多方言解析 | CLI 默认就是 JSON 模式（结构化字段，工具不会丢），多方言解析只对很旧的 CLI 版本有价值，却是一整块高维护成本的方言解析器（上游一改就碎）。我们已有的标记还原管线本就覆盖"工具被写成文本标记"的通用情形，复用它即可拿到大部分收益。`src/auth_cli.py`（OAuth 设备码流程）因上游 `Authorize` 端点 404、源码自述不可用，**不纳入** |
+| **ADR-44** | P3 交付节奏 | **全量一次交付**：`auto` 解密导入 + `cli` 上游模式 + 签到 + 风控设备轮换退避 + 回合级积分结算 | `auto`/`cli` 都是"新增一条上游/入池通路"，与签到/风控共享设备身份与错误分类层；拆开做会二次改造该共享层（与 ADR-40 同一理由）。积分结算是"面板能看额度"的最后一环，P2 已把三重优先级与字段名固化（§9.5），此时接入成本最低 |
+| **ADR-45** | 结算三级取值的完整度 | **全量对齐参考，含第三级快照差值**，并且**必须连同并发归属闸门一起照抄**：以每账号"在飞请求数"为闸门，只有该账号**独享**一个回合时才允许用「本账号已用额度前后差」结算；`begin` 时若已有在飞请求则该账号标记为不可归属（**连 before 快照都不读**），结算前复查一次，不通过即退回 `pending`；before 快照走**后台任务**、不阻塞首字节；`after < before` 直接放弃；**额度读取走适配器直连，绝不写回池** | 初判认为第三级"多一跳 + 污染路由状态 + 并发记错账"，逐行读参考后三条**全部被推翻**：①before 读是后台任务，`begin()` 只让出一次事件循环，**不延迟首字节**；②参考的额度读直连 `trae_client`，**完全不碰账号池状态**，观测不会影响择优/冷却；③并发错配正是参考显式防住的——闸门保证只有独享回合才做差值，落在并发里就退回 `session_usage`，再不行退回 `pending`，**从不写错的数字**。因此第三级是"诚实度提升"而非"拿观测去凑数"。两条铁律仍守住：ADR-39「池里只有一份额度真相」（差值只进日志、不回写池）与「绝不把未知值伪装成 0」（读不到就 `pending`） |
+
+### 4.1 P3 待验证项（实测结论）
+
+| 项 | 说明 | P3 实测 |
+|---|---|---|
+| `cli` 模式与账号池互斥 | `upstream_mode: cli` 时来源 B 的账号不再参与请求（对齐参考：CLI 路径摘除账号/令牌）。面板会在会话接口回显当前上游模式，避免"加了账号却不生效"的困惑 | ✅ 已实现：注入 `LocalCLIAccount()` 占位（`Ephemeral`+`Local`，不落盘），面板以「本机」徽标呈现并隐藏额度/任务操作 |
+| `cli` 无账号级额度 | CLI 形态没有账号级额度/积分查询，只有 CLI 自身 JSON 可能带的 `usage`/`credits_*`。面板对该形态明确标注"无账号额度"，**不以 0 充数**（沿用"绝不把未知值伪装成 0"） | ✅ 已实现：`Scope()` 对 cli 返回空，结算走 CLI JSON 的显式字段（`upstream`），无值即 `pending` |
+| 上游模式运行时切换 | 参考实现可在控制台运行时切换上游端点；本项目按 ADR（P5 = 在线配置编辑热生效）在 P3 只做**配置项**，运行时切换留到 P5，避免提前引入配置热加载 | ⏸ 保持：P3 仍为配置项（ADR-42），运行时切换留 P5 |
+| 结算第三级的并发归属 | 快照差值在并发回合下会串账——初判据此否决第三级，后经逐行核对参考发现有闸门而**改为纳入**（ADR-45） | ✅ 已实现：`snapshotGate` 按账号在飞计数判定，非独享即退回 `pending` |
 
 ---
 
@@ -519,8 +535,8 @@ GET /v1/models
 | `web-login` | 浏览器授权 → 回调拿 JWT | 内嵌授权助手（Go 重写原 Python helper）：本地 127.0.0.1 回环回调监听 + 面板展示授权链接 + 非阻塞轮询 | ✅ P2 |
 | `manual` | 面板粘贴 `Cloud-IDE-JWT`（可只给刷新令牌，网关当场换取） | `upstream.CredentialAcceptor` 校验/派生用户 ID/落盘 | ✅ P2 |
 | `env` | 环境变量 `CODENEXUS_TRAE_TOKEN` / `_REFRESH_TOKEN` / `_UID` / `_LABEL`（临时态，不落盘） | 读取 + 归一 + 从 JWT 回读用户 ID | ✅ P2 |
-| `auto` | 解密本机 `storage.json` | AES-128-CBC，key=SHA512(salt+machine_id)[:16]，4 组盐，IV=密文前 16B；路径探测 | P3 |
-| `cli` | 本地 Trae CLI 子进程 | `os/exec` 启动 CLI，按协议收发（禁本机工具 `Read,Bash,...` 默认项） | P3 |
+| `auto` | 解密本机 `storage.json`（**已核实：不依赖 machine_id，随文件可移植**） | AES-128-CBC；`base64 → [6B 头][32B random][N 密文]`；`salt = SALT_A⊕SALT_B`（私有格式用 `C⊕D`）；`h=SHA512(SHA512(random)‖salt)`，`key=h[:16]`、`iv=h[16:32]`；明文 `[64B SHA512 校验][PKCS7 JSON]`；4 个 `%APPDATA%` 候选目录按 `cn→solo→sg→solo-sg` 取"首个仍有效"（详情见 §9.6） | P3 |
+| `cli` | 本机 Trae CLI 子进程（**已核实：不是"吐一个 token"，而是 CLI 自持登录态的上游形态**，参考实现中 `edition="cli"` 且无 JWT） | `os/exec` 启动 `traecli`/`trae-cli`/`traex`/`trae`；默认禁用 `Read,Bash,Edit,Replace,Write,Glob,Grep,Task`；隔离工作目录（详情见 §9.6） | P3 |
 
 > 说明：`web-login` 的"轮询"是**面板轮询网关**（`GET /panel/api/auth/poll`），网关自身由回环回调**推**结果，不存在对上游的轮询——上游授权页只做一次重定向。环境变量刻意不使用 Trae 客户端自身的 `TRAE_*` 命名，避免与同机运行的 IDE 互相串号。
 
@@ -607,6 +623,124 @@ TraeWork（Trae 桌面 Agent 客户端）相关能力是**两件方向相反的�
 3. 同账号快照差值 → 标 `snapshot_delta`；仍无法确定 → `pending`/`unknown`。
 
 **绝不把未知值伪装成 0。**
+
+### 9.6 P3 调研事实（`auto` 解密与 `cli` 子进程，已逐行核对）
+
+> 来源：参考实现源码逐行核对（ADR-12 允许查阅源码作为协议事实）。**本节替换早期文档中错误的口述**（旧文写"`key=SHA512(salt+machine_id)[:16]`、`IV=密文前 16B`"，与源码不符）。
+
+#### `auto`：本机 `storage.json` 解密（事实）
+
+- **不依赖 `machine_id`、不依赖注册表、不依赖设备绑定**：密钥派生只用密文内嵌的 32 字节 `random` 与两组硬编码盐。**换机后只要拿到同一份 `storage.json` 就能解密**。因此"读取本机客户端凭证"读的是一个**可移植的自包含密文**，不做设备指纹校验。
+- 存储位置：`<data_dir>/globalStorage/storage.json`；承载密文的键是 `iCubeAuthInfo://icube.cloudide`。
+- `<data_dir>` 候选（Windows，`APPDATA` 为空时回落 `~/AppData/Roaming`）：`Trae CN/User` → `TRAE SOLO CN/User` → `Trae/User` → `TRAE SOLO/User`。参考实现**没有** macOS/Linux 路径（如需支持须自行新增，非照搬）。
+- **密文结构**：`base64 → [6B 头][32B random][N 密文]`。
+  - 头 `74 63 05 10 00 00`（`"tc" + 05 10 00 00`）→ 盐 = `SALT_A ⊕ SALT_B`；
+  - 头 `12 39 20 20 02 03` → 盐 = `SALT_C ⊕ SALT_D`；其他头 → 不可解密。
+- **密钥派生**：`h1 = SHA512(random)`；`h2 = SHA512(h1 ‖ salt)`；`key = h2[:16]`；`iv = h2[16:32]`；AES-128-CBC。
+- **明文结构**：`[64B SHA512][PKCS7 补齐的 JSON]`；校验 `body[:64] == SHA512(unpad(body[64:]))`，不通过即判定解密失败（**这是区分"盐用错"与"解出乱码"的唯一可靠判据**）。
+- **择优语义**：四个目录按固定顺序遍历，返回**第一个 token 仍有效**者（`expire > now + 300s`；无过期字段视为可用）；若都不新鲜，返回**第一个解密成功**者；全失败返回空。
+- **国际版可能是明文**：若该键的值以 `{` 开头，直接当 JSON 解析，跳过解密。
+- **凭据字段与备用键**：`token` / `refreshToken` / `userId|UserID` / `expiredAt|TokenExpireAt` / `refreshExpiredAt|RefreshExpireAt` / `host` / `clientID|ClientID|clientId`。
+- **host 推导**：`storage.host` → 环境变量 → 默认表；默认表中 `cn`/`solo` → `https://trae-api-cn.mchost.guru`，`sg`/`solo-sg` → `https://a0ai-api-sg.byteintlapi.com`。
+- ⚠️ **我们刻意不照搬的副作用**：参考实现在发现成功后会把 **明文 token 写进仓库根 `.env`** 与 `data/accounts.json`。CodeNexus 一律走**信封加密落盘**（ADR-10），不引入任何明文中间态。
+- ⚠️ **我们刻意增强的一点**：参考实现**没有任何用户同意门禁**（无提示、无二次确认）。我们在面板把它做成**一次显式点击**（「从本机 Trae 导入」），把"读本机客户端凭据"这件事的同意动作显式化。
+
+#### `cli`：本机 Trae CLI 子进程（事实）
+
+- **形态**：`cli` 不是"CLI 吐一个 token 给网关"，而是 **CLI 自持登录态的完整上游**：参考实现里 `edition="cli"`、`state.token` 为空、`auth.is_valid` 恒真——网关**无法感知 CLI 是否已登录**，只能验"可执行文件是否存在"。这带来 P3 一个必须拍板的建模问题（见 §11 P3）。
+- **可执行文件定位**：环境变量 `TRAE_CLI_COMMAND`/`TRAE_CLI_COMMANDS`（逗号分隔）优先，否则默认候选 `traecli,trae-cli,traex,trae`；每个候选先判"含路径分隔符或以 `.exe/.cmd/.bat` 结尾且 `is_file()`"，否则走 PATH 搜索。**没有**内置常见安装路径列表。
+- **调用形态**：基础参数默认 `-p`（可被 `TRAE_CLI_ARGS` 整体覆盖）；非文本模式追加 `--json`，文本模式追加 `--output-format text`；模型参数四种形态（`-c default_model=` / `--config model.name=` / `--model` / 不加）；prompt 作为**最后一个位置参数**（或 `stdin` 模式走管道）。**没有** session/resume 参数——续聊靠每次重发完整 prompt。
+- **工作目录与进程**：`cwd` = `TRAE_CLI_WORKDIR` 或 `~/.trae-cn-relay/work`（自动创建）；环境变量**完整继承**；Windows 加 `CREATE_NO_WINDOW`。
+- **工具禁用**：禁用清单逐项转成**重复的 `--disallowed-tool <name>`**；默认清单 `Read,Bash,Edit,Replace,Write,Glob,Grep,Task`；请求若携带工具协议则**强制**并入默认清单；**没有** `--allowed-tool` 反向开关。
+- **输出解析（关键）**：JSON 模式**不是每行一个 JSON**，而是**可拼接的 JSON 对象流**，其间可能夹杂日志行 → 必须用**括号配对扫描**切分（字符串转义要处理），不能按行切。文本模式则**按 OS 读边界分片**，不做切分。
+- **累积快照**：CLI 的 JSON 也是**累积快照**，需前缀差（与 Remote 面同一处理）。
+- **终止判据**：**只有进程/流 EOF**；JSON 里的 `finish_reason` **不是**终止信号。
+- **错误与超时**：按**单块读取**计时（默认 300s）→ 超时 `kill` 并报错；取消时 `kill` 后重新抛出；非零退出码**仅在"尚未产出任何内容"时**才报错，已有产出时只记 stderr 警告。
+- **并发**：每请求新起进程、**无进程池**；全局信号量上限 `TRAE_CLI_MAX_CONCURRENCY`（默认 **2**），超出即排队。
+- **prompt 上限**：默认截断到 60 条消息 / 20000 字符。
+- **额度**：CLI 形态**没有账号级额度/积分查询**，只有 CLI 自身 JSON 里可能带的 `usage`（及可选的 `credits_*`）。缺 usage 时非流式走 token 估算、流式不带 usage。
+- **已知缺陷（源码注释自述）**：`src/auth_cli.py` 是 **OAuth 设备码流程**（不是 CLI 子进程），且其依赖的 `Authorize` 端点**返回 404、当前不可用**，文件头明确标注"仅作参考、优先用 `cli`/`manual`/`env`"。此项**不纳入**我们的实现范围。
+
+### 9.7 P3 调研事实（签到 / 9074 风控 / 回合级积分结算，已逐行核对）
+
+> 来源同上：参考实现源码逐行核对。本节是 P3 后三个任务（签到、风控、结算）的实现依据。
+
+#### 签到接口（事实）
+
+- 端点：`POST {TRAE_UG_API_HOST}/trae/api/v2/ug/checkin_credits/status` 与 `.../claim`；host 默认 `https://api.trae.cn`；方法 POST、请求体恒为 `{}`、`Content-Type: application/json`、超时 30s。
+- **成功判据只有 `code == 0`**；HTTP 200 不足以判定成功。
+- status 返回 `enable`(bool) / `checked_in`(bool) / `credits`(number，非有限或 ≤0 时丢弃)。**"已签到"= status 的 `checked_in == true`**。
+- **不存在"连续天数/streak"字段**——参考实现里没有，我们也不臆造。
+- 请求头：`Authorization: Cloud-IDE-JWT`、`x-device-id`、`x-device-brand`（默认 `ASUS TUF Gaming A15 FA507RM_FA507RM`）、`x-device-type`（默认 `windows`）；`x-os-version`/`x-app-version` 仅在 `TRAE_CHECKIN_EXTRA_VERSION_HEADERS=1` 时附带。
+- **设备号派生**：`x-device-id = zfill16(str(sha256(identity) % 10^16))`；identity 取自 JWT `data.id` → `user_id`/`userId`/`sub` → account_id；材料为 `identity` 或 `{identity}#gen{n}`（`n` 为轮换代数）。
+- **签到设备与聊天设备彼此独立**：聊天请求用的是随机设备（`device_id = randint(10^17, 10^18-1)`、`machine_id` 为 32 位十六进制，每 3+0~2 次请求轮换一次），与签到用的派生设备号不同源。
+- 定时语义：默认 **08:30 Asia/Shanghai（UTC+8）**，轮询 30s，多账号领取间隔 **60s**（全局闸门）；起步晚了**当天仍会领取**；**手工触发不消耗当天定时额度**。
+
+#### 9074 风控（事实）
+
+- 9074 出现在 **HTTP 200 的响应体 JSON** 里：`{"code":9074,...}`。
+- 处理：**轮换一次设备号 + 重试一次**，仍失败则进入本地冷却并持久化。
+- 退避：`base * 2**min(count, CAP)`，`base=60`、`CAP=3`、上限 `3600`（观测序列 60/120/240/480）；**没有硬性重试次数上限**。
+- 持久化字段：`retry_backoff` / `retry_9074_count` / `retry_updated_at` / `device_generation`；**且绝不可覆盖签到的完成时间戳**。
+- `TRAE_CHECKIN_NO_DEVICE_ROTATION=1` 可关闭设备轮换。
+- **9095 绝不能被读成"已签到"**（设备维度）：源码 `trae_client.py:637-640` 有明确注释，且有一条测试断言 `_checkin_claim_ok({code:9095}) == False`；**没有**专门的 9095 分支。
+- 后台重试循环间隔 `max(15, 60)`，**逐账号串行**，**无抖动**。
+- 已知坑（文档化）：① 9074 不能立刻重试（会**延长**风控窗口）；② claim 侧与 status 侧的冷却彼此独立；③ status 侧的 9074 冷却**只在内存**；④ 重试状态不得覆盖 `checked_in` 时间戳；⑤ 签到与额度探测**刻意分开**。
+
+#### 回合级积分结算（事实）
+
+- 端点：`POST {TRAE_USAGE_API_HOST}/api/v1/commercial/get_session_usage`，host 默认 `https://api5-normal.mchost.guru`；请求体 `{"session_id": <turn id>}`；头同上；超时 15s（钳制 1–60）。
+- 成功判据：`code in (None, 0, "0")`；取数优先 `data`，否则顶层。
+- 单回合积分键（按序取第一个）：`credits_float, creditsFloat, credits_consumed, consumed_credits, credit_cost, credits_cost, amount_float, amountFloat`；容器按序尝试：`user_usage_group_by_session/userUsageGroupBySession/usage/billing/cost/result/data`；返回 `{"credits_consumed": n, "credits_source": "session_usage"}`。
+- `usage_turn_id` 来自回复消息 id：`reply_to_message_id/replyToMessageId` → `user_message_id/userMessageId`。
+- 轮询：先 1s 稳定（`TRAE_USAGE_CREDIT_SETTLE_SECONDS`），延迟序列 `[0, 0.5, 1, 2, 4]`，最多 5 次重试（`TRAE_USAGE_QUERY_RETRIES`，钳制 1–8），单次超时 15s；**0 是有效结算值，只有 `None` 表示"尚未结算"**。
+- 三级取值顺序：显式 `credits_consumed` → `session_usage` → 快照差值（`POST /trae/api/v2/pay/ide_user_ent_usage` 的 `used` 前后差）；标记 `upstream`/`session_usage`/`snapshot_delta`/`pending`/`unknown`。
+- **结算不回写账号额度**。
+- Trae 侧**没有**定时保活/刷新任务（刷新只在 401 或 `code 1001` 时按需触发）。
+
+**第三级（快照差值）的三个关键事实——照抄时最容易漏**
+
+1. **并发归属闸门（不照抄就会记错账）**：差值只在"该账号此刻恰好只有一个请求在飞"时可信，因为并发请求共享同一个上游计数器。参考实现用一把锁维护 `_USAGE_ACTIVE_ACCOUNTS`（在飞计数）与 `_USAGE_UNSAFE_ACCOUNTS`（不可归属集合）：`_begin_credit_snapshot` 若发现该账号已有在飞请求，就把它加进 unsafe 并返回 False，**此时连 before 快照都不读**；结算前再查一次 `_credit_snapshot_is_safe`，不通过就直接退回 `pending`，**绝不写一个错的差值**。`_end_credit_snapshot` 在账号完全空闲时才清除 unsafe 标记。账号轮换（failover）时 `rebind` 会取消旧账号的 before 快照并为新 JWT 重开一个。
+2. **before 快照不阻塞首字节**：before 读是 Tracker 构造时起的后台任务（`_spawn_usage_task`），`begin()` 只 `await asyncio.sleep(0)` 让出一次事件循环、**不等结果**；注释原文即 "without delaying the first model frame on the result of a separate billing endpoint"。因此这一级**不会**给首字节增加一跳延迟。
+3. **取值口径与放弃条件**：`_fetch_used_credits` 取 `ide_user_ent_usage(req_source=0)` 的 `used`（**已用**，不是剩余），失败返回 `None`；`after < before` 或任一为 `None` 时**直接放弃差值**。差值只在 `credit_safe` 且 `_credit_snapshot_is_safe` 时计算。
+
+补充：`credits_source` 的三分类是 `upstream`（响应显式字段）/ `pending`（有 turn id 或有 credit_safe 窗口）/ `unknown`（两者皆无）；`pending` 是"还没结算"的诚实表达，不是 0。
+
+### 9.8 P3 实现纪实（as-built）
+
+> 记录 P3 落地后的真实代码形态与相对参考的取舍，供后续维护与 P4 复用。
+
+**新增/改动文件**
+
+| 文件 | 作用 |
+|---|---|
+| `internal/upstream/traecn/storage.go` | `storage.json` 自动发现 + 解密（`tc` 与私有两套头、`SALT_x⊕SALT_y` 派生、`SHA512` 自校验），`DiscoverLocal` |
+| `internal/upstream/traecn/cli.go`（+`cli_windows.go`/`cli_other.go`） | `cli` 上游模式：进程解析、参数拼装、并发信号量、JSON 括号匹配流式扫描、文本模式、工具禁用表、看门狗 |
+| `internal/upstream/traecn/checkin.go` | 签到 `status`/`claim`、`9074` 轮换+退避+持久化、`9095` 显式非成功、`ide_user_ent_usage` 额度解析 |
+| `internal/upstream/traecn/usage.go` | 回合级结算 `get_session_usage`（1s 稳定 + `[0,.5,1,2,4]s` 轮询）、`UsedCredits` |
+| `internal/api/settlement_window.go` | **并发归属闸门** `snapshotGate` + 每回合观测窗口 `creditSnapshot` |
+| `internal/api/recording.go` | `settleCredits` 三级取值、`beginSettlement`、`releaseSnapshot`、`snapshot_delta` 标记 |
+| `internal/upstream/upstream.go` | 抽出 `Maintenance` 窄接口（让 Trae 只实现"签到+额度"）；`TurnUsage` 增加 `UsedCredits` |
+| `internal/scheduler/sweeps.go` | 维护族按 `Maintenance` 解析；`RunCheckinRetryNow`/`StartCheckinRetry`（只补当天仍未签到的账号） |
+| `internal/panel/api.go`、`tasks.go`、`web/src/App.svelte` | 「从本机导入」入口、账号卡签到状态与「本机」徽标、日志面板积分列 |
+
+**关键落地取舍**
+
+1. **`cli` 与账号池互斥**：`cli` 模式下注入一个 `LocalCLIAccount()` 占位条目（`Ephemeral` + `Local`），`chat()` 跳过凭证检查、`Refresh` 空实现、`Scope()` 返回空、`Flush` 跳过 ephemeral 条目，**绝不落盘**。
+2. **`Maintenance` 窄接口**：Trae 有签到但无成长体系，若直接实现 `Tasks` 要桩掉约 30 个方法。抽出 `Maintenance` = `Scope + Checkin + Credits` 后，Trae 只需 3 个方法；调度器同时接受 `Tasks` 与 `Maintenance` 两种解析。面板的「签到可见性」也由 `Scope().Checkin` 判定，而不是硬编码来源。
+3. **结算第三级的 Go 形态**：参考的 asyncio 后台任务 → Go 的 goroutine + buffered channel；`_USAGE_ACTIVE_ACCOUNTS` → `snapshotGate`（`sync.Mutex` + 两张表）；窗口在 `handleChat` 每次尝试**上游调用前**打开（`beginSettlement`），在 `settleCredits` 里被"接管"并在结算完成后释放，`handleChat` 的 `defer hint.releaseSnapshot()` 兜住所有放弃路径。
+4. **不做 failover 重绑**：参考的 `rebind` 是因为它的 Tracker 在请求开始就固定了账号、之后才轮换。我们的 `settleCredits` 拿的是 **failover 之后的最终 `lease.Account`**，窗口也是每次尝试前重开，等价语义、无额外代码。
+5. **`Used` 单向**：`upstream.Credits` 新增 `Used` 字段只是把解析结果带给结算层；`pool.Credits` / `AccountStatus` **不含** `Used`，因此"观测"在类型层面就无法流回路由决策。
+6. **`9074` 与 `9095` 的分野**：`9074` → `KindRateLimited` + `RetryAfter`（调度器据此退避）；`9095` → 明确报错且**不启动退避**（设备维度，绝不当成"已签到"）。
+7. **`_deps` 处理**：P3 验收后删除 `D:/PycharmProjects/_deps`（ADR-41 决策时已记录；ADR-44 一次交付，故随 P3 收尾一并清除）。
+
+**测试面**
+
+- `storage_test.go`：用真实算法自造密文再交给解密器（避免"用错误算法验证错误实现"）；两套盐、错盐、未知头、乱码、明文 JSON、多目录去重、优先"仍有效"、host 不匹配。
+- `cli_test.go`：子进程 re-exec 助手（`GO_WANT_CLI_HELPER`）覆盖 JSON/文本/usage/工具/失败/静默六种模式；另覆盖归一化、四类模型参数、无重复基础参数、工具禁用去重、提示词尾部截断、`splitJSONObjects` 的日志/转义/半截尾、逐字节 UTF-8 边界、并发上限。
+- `checkin_test.go`：httptest 桩记录 `x-device-id`；覆盖已签到跳过、9074 轮换与退避序列 `{60,120,240,480,480,480}`、持久化退避零请求、`9095` 非成功且不退避、设备号稳定/16 位/绑定账号、额度合并与无限额。
+- `usage_test.go`：结算轮询/容器优先级/负值丢弃/业务码；`UsedCredits` 的跨包求和、无限额不可读、失败不可读、无凭证不发请求；稳定窗口计时断言。
+- `settlement_test.go`：三级取值全分支 + 闸门四种归属场景（独享、开局即有同伴、结算时失去独享、反向前进）+ 端到端 `snapshot_delta` 与窗口不外泄。
 
 ---
 
@@ -829,12 +963,39 @@ TraeWork（Trae 桌面 Agent 客户端）相关能力是**两件方向相反的�
 |---|---|
 | 验收 | `go build/vet/test` 全绿；启动冒烟通过（`/panel/api/session` 报告 `sources` 含 `trae-cn` 且 `device_sources`/`manual_sources` 正确、`/v1/models` 含 Trae 目录、面板可经「回环授权」或「粘贴令牌」添加 Trae 账号并完成一次流式对话）；同名模型（如 `glm-5.2`）在两来源间按池复合权重择优 |
 
-### P3 · Trae 认证补齐 + 端点扩展 + 风控
+### P3 · Trae 认证补齐 + 风控 ✅（已完成；端点扩展已于 P2 完成）
+
+> **P3 决策（ADR-41~45，用户拍板）**
+> - ADR-41 `auto` 形态：**自动发现 + 解密 + 面板一键导入**（不做第二入口；一律信封加密，不落明文）
+> - ADR-42 `cli` 形态：**作为 `upstream_mode` 的取值**（全局模式，非池内伪账号）
+> - ADR-43 `cli` 保真度：**原生 JSON + 文本模式开关 + 复用既有护管线**
+> - ADR-44 交付节奏：**全量一次交付**
+> - ADR-45 结算完整度：**三级取值全量对齐参考（含快照差值）**，且**必须带上并发归属闸门**
 
 | 项 | 内容 |
 |---|---|
-| 任务 | ① 认证补齐：`auto`(storage.json 解密)、`cli`(子进程)；② 四端点 Remote/Solo/IDE/Work + 自动路由 + 回落；③ 签到 + 9074 设备轮换退避 + 定时补签 |
-| 验收 | 五种认证来源均可添加账号；四端点可切换且自动路由正确；制造 9074 后可自动恢复 |
+| 任务 | ① `auto`：本机 `storage.json` 自动发现 + `tc` 格式解密（自校验）+ 面板「从本机 Trae 导入」一键入池；② `cli`：`upstream_mode: cli` 全局上游模式（子进程面：可执行定位 / 参数拼装 / 括号配对 JSON 流 / 快照前缀差 / EOF 终止 / 单块超时 kill / 全局并发上限 / 工具禁用 / prompt 序列化与截断）；③ 签到并入统一调度器与任务中心 + `9074`/`9095` 设备标识轮换 + 指数退避 + 后台错峰重试；④ 回合级积分结算（`get_session_usage` 按 `usage_turn_id` 对齐，接上三级优先级 + 并发归属闸门） |
+| 不做 | `src/auth_cli.py` 的 OAuth 设备码流程（上游端点 404，源码自述不可用）；CLI 的多方言文本内工具块解析（ADR-43）；上游模式运行时热切换（留 P5，§4.1） |
+| 验收 | 面板点「从本机 Trae 导入」即可入池（本机装有已登录的 Trae 时）；`upstream_mode: cli` 下可完成一次流式对话且子进程被正确回收；制造 `9074` 后签到能自动恢复；额度不再长期显示"结算中" |
+
+**P3 实现记录（认证补齐 + 风控 + 结算）** ✅
+
+| 交付物 | 落地位置 | 状态 |
+|---|---|---|
+| `auto` 解密：`tc` 与私有两套 6B 头、`SALT_x⊕SALT_y` 派生 `key/iv`、明文 `[64B SHA512][PKCS7 JSON]` 自校验；`%APPDATA%` 四候选目录按"首个仍有效"选取；明文 JSON 分支（国际版） | `internal/upstream/traecn/storage.go` | ✅ |
+| `auto` 导入通道：`POST /panel/api/auth/local` + `upstream.LocalDiscoverer` 能力探测 + `/api/session` 的 `local_sources` | `internal/upstream/{upstream.go}`、`internal/panel/{api,panel}.go` | ✅ |
+| 控制台「从本机导入」：第三段式按钮 + 一次性显式动作说明 + «本机»徽标 + 本机条目不可展开任务 | `web/src/App.svelte` → `internal/panel/dist` | ✅ |
+| `cli` 上游模式：可执行定位（`TRAE_CLI_COMMAND(S)` → 内置候选 → PATH）、四类模型参数、`--json`/`--output-format text`、`--disallowed-tool` 重复禁用、`CREATE_NO_WINDOW` | `internal/upstream/traecn/cli.go`、`cli_windows.go`、`cli_other.go` | ✅ |
+| `cli` 流式：括号配对 JSON 扫描器（非按行切）、累积快照前缀差、逐字节 UTF-8 边界保留、看门狗单块超时 kill、非零退出仅在**零输出**时判错、全局并发信号量（默认 2） | `internal/upstream/traecn/cli.go` | ✅ |
+| `cli` 入池：`LocalCLIAccount()`（`Ephemeral`+`Local`，`Flush` 跳过、`Refresh` 空实现、`Scope` 为空、跳过凭证检查） | `internal/upstream/traecn/cli.go`、`internal/pool/persist.go`、`cmd/codenexus/main.go` | ✅ |
+| 签到：`checkin_credits/status`+`/claim`、`code==0` 唯一成功判据、`9074` 轮换一次重试 → 指数退避 `{60,120,240,480,480,480}` 并持久化、`9095` **显式非成功且不退避**、派生设备号（`sha256%10^16`，可 pinned）、claim 全局间隔闸门 | `internal/upstream/traecn/checkin.go` | ✅ |
+| 额度：`ide_user_ent_usage(req_source=0)` 多 pack 合并、`limit==-1` → `Unlimited`、`Used` 独立累计 | `internal/upstream/traecn/checkin.go`、`internal/upstream/tasks.go` | ✅ |
+| 调度并入：抽出 `Maintenance` 窄接口（`Scope/Checkin/Credits`），调度器与面板同时接受 `Tasks`/`Maintenance`；`StartCheckinRetry` 只补当天未签到的账号并按 `accountDelay` 错峰 | `internal/scheduler/{scheduler,sweeps}.go`、`internal/upstream/upstream.go` | ✅ |
+| 结算三级取值：响应显式字段（`upstream`）→ `get_session_usage`（`session_usage`，1s 稳定 + `[0,.5,1,2,4]s`）→ 账号已用额度前后差（`snapshot_delta`）；读不到即 `pending` | `internal/upstream/traecn/usage.go`、`internal/api/recording.go` | ✅ |
+| **并发归属闸门**：按账号在飞计数，非独享则不读 before、结算前复查、不通过退回 `pending`；窗口在每次上游尝试前打开、结算完成或放弃路径释放 | `internal/api/settlement_window.go`、`internal/api/{recording,handlers,server}.go` | ✅ |
+| 面板可见性：账号卡签到状态与「本机」徽标、日志面板新增"积分"列（`context.Context.CreditsConsumed/CreditsSource` → `reqlog.Event` → 前端） | `internal/panel/{api,tasks}.go`、`internal/reqlog/reqlog.go`、`web/src/App.svelte` | ✅ |
+| 单测：storage 自造密文回环/两套盐/错盐/未知头/多目录去重/优先仍有效；cli 子进程 re-exec 六模式/参数去重/逐字节 UTF-8/并发上限/静默 kill；checkin 已签到跳过/退避序列/持久化退避零请求/`9095` 非成功/设备号稳定；usage 轮询/容器优先级/`UsedCredits` 四类不可读；settlement 三级全分支 + 闸门四场景 + 端到端 | `internal/upstream/traecn/{storage,cli,checkin,usage,traecn}_test.go`、`internal/api/settlement_test.go`、`internal/scheduler/scheduler_test.go`、`internal/panel/tasks_test.go` | ✅ |
+| 调研副本 `_deps/` 清理（P3 结束后移除） | `D:/PycharmProjects/_deps` | ✅ |
 
 ### P4 · 协议超集与高级能力
 
