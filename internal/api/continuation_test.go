@@ -218,10 +218,13 @@ func (u *alwaysTruncated) calls() int {
 func (u *alwaysTruncated) Chat(_ context.Context, _ *account.Account, req *upstream.ChatRequest) (*upstream.ChatResponse, error) {
 	u.mu.Lock()
 	u.n++
+	round := u.n
 	u.mu.Unlock()
 	// Long, and it never ends on a completed sentence, so every round looks
-	// truncated and the loop is only bounded by its cap.
-	return &upstream.ChatResponse{Model: req.Model, Content: strings.Repeat("still working ", 30) + "and then,", FinishReason: "stop"}, nil
+	// truncated and the loop is only bounded by its cap. Each round differs,
+	// so the repeat guard does not end it early.
+	content := strings.Repeat("still working ", 30) + string(rune('a'+round)) + ","
+	return &upstream.ChatResponse{Model: req.Model, Content: content, FinishReason: "stop"}, nil
 }
 func (u *alwaysTruncated) ChatStream(_ context.Context, _ *account.Account, req *upstream.ChatRequest, emit upstream.EmitFunc) error {
 	resp, err := u.Chat(context.Background(), nil, req)
@@ -271,6 +274,123 @@ func TestStreamContinuesIntoTheSameAnswer(t *testing.T) {
 
 // A turn that asked for a tool is never continued: the caller owns execution
 // and has to receive the call as-is.
+// A continuation that replays the opening it was cut on must not repeat it.
+func TestContinuationDropsAReEmittedOpening(t *testing.T) {
+	if got, ok := joinContinuation("```go", "```go\npackage main\n```"); !ok || got != "```go\npackage main\n```" {
+		t.Fatalf("join = %q, ok = %v", got, ok)
+	}
+	if got, ok := joinContinuation("one two", " three four"); !ok || got != "one two three four" {
+		t.Fatalf("disjoint rounds concatenate: %q, ok = %v", got, ok)
+	}
+	// A round that is nothing but the previous answer has no progress to show.
+	if got, ok := joinContinuation("Roses are red,", "Roses are red,"); ok || got != "Roses are red," {
+		t.Fatalf("a pure repeat must not advance: %q, ok = %v", got, ok)
+	}
+}
+
+func TestOverlapHoldReleasesOnlyTheNewPart(t *testing.T) {
+	h := &overlapHold{}
+	h.start("```go")
+	var out strings.Builder
+	out.WriteString(h.feed("```go"))
+	out.WriteString(h.feed("\npackage main\n```"))
+	out.WriteString(h.finish())
+	if got := out.String(); got != "\npackage main\n```" {
+		t.Fatalf("streamed output = %q", got)
+	}
+	if h.repeated() {
+		t.Fatal("a round that published content is not a repeat")
+	}
+
+	// The re-emitted opening alone, and nothing else, is a repeat.
+	pure := &overlapHold{}
+	pure.start("```go")
+	if got := pure.feed("```go"); got != "" {
+		t.Fatalf("the re-emitted opening must be withheld, got %q", got)
+	}
+	if got := pure.finish(); got != "" {
+		t.Fatalf("a pure repeat publishes nothing, got %q", got)
+	}
+	if !pure.repeated() {
+		t.Fatal("a round that only repeated the previous answer must be reported")
+	}
+}
+
+// repeating replays the opening it was cut on, which used to reach the caller
+// twice as "```go```go".
+type repeating struct {
+	mu     sync.Mutex
+	rounds int
+}
+
+func (u *repeating) Source() upstream.Source { return upstream.SourceWorkBuddy }
+func (u *repeating) ListModels(context.Context, *account.Account) ([]upstream.ModelSpec, error) {
+	return []upstream.ModelSpec{{ID: "fake-model", Source: upstream.SourceWorkBuddy}}, nil
+}
+func (u *repeating) Refresh(context.Context, *account.Account) error { return nil }
+func (u *repeating) Probe(context.Context, *account.Account) (*upstream.Probe, error) {
+	return &upstream.Probe{Healthy: true}, nil
+}
+
+func (u *repeating) next() (string, string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.rounds++
+	if u.rounds == 1 {
+		return "```go", "length"
+	}
+	return "```go\npackage main\n```", "stop"
+}
+
+func (u *repeating) Chat(_ context.Context, _ *account.Account, req *upstream.ChatRequest) (*upstream.ChatResponse, error) {
+	content, finish := u.next()
+	return &upstream.ChatResponse{Model: req.Model, Content: content, FinishReason: finish}, nil
+}
+
+func (u *repeating) ChatStream(_ context.Context, _ *account.Account, req *upstream.ChatRequest, emit upstream.EmitFunc) error {
+	content, finish := u.next()
+	for _, piece := range []string{content[:5], content[5:]} {
+		if piece == "" {
+			continue
+		}
+		if err := emit(upstream.StreamDelta{Content: piece}); err != nil {
+			return err
+		}
+	}
+	return emit(upstream.StreamDelta{FinishReason: finish})
+}
+
+func TestNonStreamDropsAReEmittedOpening(t *testing.T) {
+	f := &repeating{}
+	s := failoverServer(t, f, twoAccounts())
+
+	rec := postChat(s, `{"model":"fake-model","messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if got := strings.Count(rec.Body.String(), "```go"); got != 1 {
+		t.Fatalf("the fence must appear once, got %d: %s", got, rec.Body.String())
+	}
+}
+
+func TestStreamDropsAReEmittedOpening(t *testing.T) {
+	f := &repeating{}
+	s := failoverServer(t, f, twoAccounts())
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, makeBelieveWire,
+		strings.NewReader(`{"model":"fake-model","stream":true}`))
+	serveMakeBelieve(s, rec, req)
+
+	body := rec.Body.String()
+	if got := strings.Count(body, "```go"); got != 1 {
+		t.Fatalf("the fence must appear once, got %d: %q", got, body)
+	}
+	if !strings.Contains(body, `package main`) {
+		t.Fatalf("the completed answer must reach the client: %q", body)
+	}
+}
+
 func TestToolCallsAreNeverContinued(t *testing.T) {
 	f := &toolCalling{}
 	s := failoverServer(t, f, twoAccounts())

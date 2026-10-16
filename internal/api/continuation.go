@@ -213,6 +213,128 @@ func continuedMessages(messages []upstream.Message, partial string, reasoningOnl
 	return append(out, upstream.Message{Role: "user", Content: instruction})
 }
 
+// A continuation round is asked not to repeat, and models mostly comply — but
+// a re-issued turn routinely replays the fence, sentence or list item the
+// previous round stopped on. Joining the rounds verbatim then shows that
+// fragment twice ("```go" immediately followed by "```go\npackage main…"), so
+// the overlap is dropped before the rounds are joined.
+//
+// continuationOverlapLimit is how far back the search goes. It has to cover a
+// re-emitted line or code fence, and it also bounds how many bytes a streaming
+// round is held back before its opening is released.
+const continuationOverlapLimit = 1024
+
+// repeatedPrefix returns how many leading bytes of extra repeat the tail of
+// total, capped at continuationOverlapLimit. Matching on bytes is safe here:
+// the returned length always lands on a rune boundary, because the same bytes
+// are a suffix of the valid-UTF-8 total.
+func repeatedPrefix(total, extra string) int {
+	limit := len(total)
+	if len(extra) < limit {
+		limit = len(extra)
+	}
+	if limit > continuationOverlapLimit {
+		limit = continuationOverlapLimit
+	}
+	for n := limit; n > 0; n-- {
+		if strings.HasSuffix(total, extra[:n]) {
+			return n
+		}
+	}
+	return 0
+}
+
+// joinContinuation appends one continuation round to the answer already
+// produced, dropping the re-emitted opening. The boolean reports whether
+// anything was actually added: a round that only repeats the previous answer
+// has no progress to show and ends the loop.
+func joinContinuation(total, extra string) (string, bool) {
+	if extra == "" {
+		return total, false
+	}
+	drop := repeatedPrefix(total, extra)
+	if drop >= len(extra) {
+		return total, false
+	}
+	return total + extra[drop:], true
+}
+
+// overlapHold withholds the opening bytes of a continuation round just long
+// enough to decide how much of them repeat the previous round, so a streaming
+// caller never receives the duplicated prefix. Content is released as soon as
+// the answer is decided, which for the common short repeat is immediately.
+type overlapHold struct {
+	prev     string
+	held     strings.Builder
+	open     bool
+	sawText  bool
+	released bool
+}
+
+// start begins withholding for a round that follows prev.
+func (h *overlapHold) start(prev string) {
+	h.prev = prev
+	h.held.Reset()
+	h.open = true
+	h.sawText = false
+	h.released = false
+}
+
+// feed adds one chunk of the round. It returns the bytes that are ready to be
+// published, which is empty while the opening is still being withheld.
+func (h *overlapHold) feed(chunk string) string {
+	if chunk == "" {
+		return chunk
+	}
+	h.sawText = true
+	if !h.open {
+		h.released = true
+		return chunk
+	}
+	h.held.WriteString(chunk)
+	if h.held.Len() < h.decideAt() {
+		return ""
+	}
+	return h.release()
+}
+
+// finish releases whatever is still withheld when the round ends.
+func (h *overlapHold) finish() string {
+	if !h.open {
+		return ""
+	}
+	return h.release()
+}
+
+// repeated reports a round that produced text but never published any: the
+// whole round was the previous answer over again. There is nothing to show
+// and nothing to ask for, so the loop stops.
+func (h *overlapHold) repeated() bool { return h.sawText && !h.released }
+
+// decideAt is the held size past which the overlap cannot grow any further.
+func (h *overlapHold) decideAt() int {
+	n := len(h.prev)
+	if n > continuationOverlapLimit {
+		n = continuationOverlapLimit
+	}
+	return n
+}
+
+func (h *overlapHold) release() string {
+	h.open = false
+	held := h.held.String()
+	h.held.Reset()
+	if held == "" {
+		return ""
+	}
+	drop := repeatedPrefix(h.prev, held)
+	if drop >= len(held) {
+		return ""
+	}
+	h.released = true
+	return held[drop:]
+}
+
 // tailOf returns at most n trailing bytes of s, adjusted to a rune boundary.
 func tailOf(s string, n int) string {
 	if len(s) <= n {

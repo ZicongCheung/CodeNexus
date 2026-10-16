@@ -239,9 +239,14 @@ func (s *Server) continueNonStream(ctx context.Context, u upstream.Upstream, acc
 			logx.Warnf("auto-continue round %d failed: %v", round, err)
 			break
 		}
+		joined, advanced := joinContinuation(total, extra.Content)
+		if !advanced {
+			logx.Warnf("auto-continue stopped on a round that repeated the previous answer")
+			break
+		}
 		logx.Infof("auto-continue round=%d reason=%s finish=%s chars=%d",
 			round, continueReason(reasoningOnly), extra.FinishReason, len(extra.Content))
-		total += extra.Content
+		total = joined
 		resp.Content = total
 		resp.FinishReason = extra.FinishReason
 		resp.ReasoningContent = extra.ReasoningContent
@@ -296,6 +301,7 @@ func (s *Server) runStream(w http.ResponseWriter, r *http.Request, t *turn, u up
 		usage       upstream.Usage
 		sawUsage    bool
 		pending     upstream.StreamDelta // a bookkeeping-only tail, held back
+		hold        overlapHold          // drops a continuation's re-emitted opening
 	)
 
 	emit := func(d upstream.StreamDelta) error {
@@ -315,7 +321,6 @@ func (s *Server) runStream(w http.ResponseWriter, r *http.Request, t *turn, u up
 			sawToolCall = true
 		}
 		if d.Content != "" {
-			answer.WriteString(d.Content)
 			roundText.WriteString(d.Content)
 		}
 		if d.ReasoningContent != "" {
@@ -329,6 +334,19 @@ func (s *Server) runStream(w http.ResponseWriter, r *http.Request, t *turn, u up
 			pending = d
 			return nil
 		}
+		if d.Content != "" {
+			// A continuation's opening is published only once it is known not
+			// to repeat what the previous round already sent, so the answer the
+			// caller has seen is also the answer the next round is asked to
+			// continue from.
+			d.Content = hold.feed(d.Content)
+			if d.Content != "" {
+				answer.WriteString(d.Content)
+			}
+			if !renderable(d) {
+				return nil
+			}
+		}
 		return op.Emit(d)
 	}
 
@@ -336,6 +354,13 @@ func (s *Server) runStream(w http.ResponseWriter, r *http.Request, t *turn, u up
 	req := t.Request
 	lastShort := ""
 	for round := 1; ; round++ {
+		// Round one answers from scratch; every later round holds its opening
+		// back so a re-emitted prefix is dropped rather than streamed twice.
+		if round == 1 {
+			hold.open = false
+		} else {
+			hold.start(answer.String())
+		}
 		err := u.ChatStream(r.Context(), acc, req, emit)
 		if err != nil {
 			if stop != nil {
@@ -347,6 +372,24 @@ func (s *Server) runStream(w http.ResponseWriter, r *http.Request, t *turn, u up
 			}
 			out.Fail(err)
 			return true, turnID, err
+		}
+		if released := hold.finish(); released != "" {
+			answer.WriteString(released)
+			if err := op.Emit(upstream.StreamDelta{Content: released}); err != nil {
+				if stop != nil {
+					close(stop)
+				}
+				out, started := op.Abort()
+				if !started {
+					return false, turnID, err
+				}
+				out.Fail(err)
+				return true, turnID, err
+			}
+		}
+		if hold.repeated() {
+			logx.Warnf("auto-continue stopped on a round that repeated the previous answer")
+			break
 		}
 		if !cfg.Enabled || round > cfg.MaxRounds {
 			break
