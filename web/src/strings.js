@@ -14,10 +14,13 @@ export const t = {
 
   nav: {
     aria: '主导航',
+    overview: '概览',
     accounts: '账号',
     tasks: '任务中心',
     logs: '运行日志',
     usage: '用量',
+    models: '模型与档位',
+    credits: '额度',
     access: '接入',
     add: '添加账号',
     import: '导入',
@@ -31,10 +34,13 @@ export const t = {
   // Short page descriptions. The long "why is this empty" copy lives with the
   // empty state it belongs to, not under every title.
   lede: {
+    overview: '一屏看清账号健康、积分余量与服务状态；细节数据在各自页面。',
     accounts: '每个账号归属一个上游来源。这里只读状态与凭据，不会改动上游数据。',
     tasks: '批量维护与逐账号任务共用同一套幂等执行器，随时可手动触发。',
     logs: '最近的网关请求：接口、账号、模型、执行面、状态、耗时与用量。',
     usage: '按日汇总请求数、令牌与积分，并保留可筛选的明细。',
+    models: '每个账号自己的模型目录：上下文长度、1M 档位、思考档位与能力位，均来自账号实时目录。',
+    credits: '积分构成与到期分布。余量是逐包之和，逐包各有自己的过期时间。',
     add: '用浏览器完成设备授权，或直接粘贴已登录客户端的令牌；令牌只留在本机。',
     settings: '改动按字段决定立即生效或重启生效，保存前会自动留一份快照。',
   },
@@ -255,6 +261,78 @@ export const t = {
       outcomeSuccess: '成功',
       outcomeHTTPError: 'HTTP 错误',
     },
+  },
+
+  overview: {
+    stat: {
+      accounts: '账号',
+      available: '可用',
+      cooling: '冷却',
+      broken: '熔断',
+      inFlight: '处理中',
+      credits: '积分余量',
+      requestsToday: '今日请求',
+      queuePending: '待办任务',
+    },
+    healthBox: {
+      title: '账号健康',
+      empty: '还没有账号。从「添加账号」开始。',
+      detail: (ok, total) => `${ok} 可用 / 共 ${total} 个`,
+    },
+    expiryBox: {
+      title: '积分到期',
+      window: (h) => `未来 ${h} 小时内`,
+      empty: '暂无即将过期的积分（以最近一次额度刷新为准）。',
+      stale: '账号尚未刷新过额度；到「任务中心」执行一次「刷新额度」后这里会显示到期分布。',
+      expiring: (n, uid) => `${uid}：${n} 即将过期`,
+      earliest: (text, remain) => `${text} 到期 ${remain} 积分`,
+    },
+    serviceBox: {
+      title: '服务状态',
+      sources: '上游来源',
+      sticky: '粘性会话',
+      version: '版本',
+      remote: '监听地址',
+      reqlog: '请求日志',
+      usage: '用量历史',
+      on: '开启',
+      off: '关闭',
+    },
+    refresh: '刷新概览',
+  },
+
+  models: {
+    refresh: '刷新目录',
+    search: '搜索模型…',
+    filterAll: '全部能力',
+    filters: {
+      max: '1M 档',
+      reasoning: '思考',
+      vision: '视觉',
+    },
+    col: { model: '模型', context: '上下文', tier: '档位', efforts: '思考档位', caps: '能力' },
+    cap: { chat: '对话', reasoning: '思考', vision: '视觉', max: '1M' },
+    effortsOff: '不可调',
+    empty: '该账号的目录暂未加载；目录在后台异步刷新，稍后重试。',
+    failed: (uid, err) => `${uid}：${err}`,
+    contextTitle: '该账号目录声明的上下文窗口；1M 档位只在「远程」执行面生效',
+    count: (n) => `${n} 个模型`,
+  },
+
+  credits: {
+    refresh: '刷新额度',
+    refreshing: '读取中…（逐账号查询上游）',
+    summary: { remain: '剩余', total: '总额', used: '已用' },
+    expiry: { title: '到期分布', empty: '上游未给出逐包到期时间，无法画分布。' },
+    packs: {
+      title: '逐包明细',
+      col: { name: '来源', size: '面额', used: '已用', remain: '剩余', expires: '到期' },
+      empty: '上游未提供逐包明细，只有汇总余额。',
+    },
+    failed: '读取失败',
+    unlimited: '不限量',
+    local: '本机 CLI，无独立额度',
+    stale: '数字来自上游实时查询，不会自动轮询；点「刷新额度」更新。',
   },
 
   add: {

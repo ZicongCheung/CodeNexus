@@ -455,5 +455,13 @@ func (s *Scheduler) Adapter(acc *account.Account) (upstream.Tasks, bool) {
 	return s.tasksFor(acc)
 }
 
+// Maintenance exposes the narrower check-in and balance surface for one
+// account. Callers that only need a balance or a check-in must use this rather
+// than Adapter: a source can serve those two without serving the growth
+// features, and asking for the wider interface is what silently excludes it.
+func (s *Scheduler) Maintenance(acc *account.Account) (upstream.Maintenance, bool) {
+	return s.maintenanceFor(acc)
+}
+
 // Pool returns the account pool the scheduler operates on.
 func (s *Scheduler) Pool() *pool.Pool { return s.pool }

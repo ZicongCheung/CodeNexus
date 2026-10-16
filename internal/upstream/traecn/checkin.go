@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/ZicongCheung/CodeNexus/internal/account"
+	"github.com/ZicongCheung/CodeNexus/internal/logx"
 	"github.com/ZicongCheung/CodeNexus/internal/upstream"
 )
 
@@ -415,6 +416,9 @@ func (c *Client) Credits(ctx context.Context, acc *account.Account, _ time.Durat
 		return nil, upstream.NewError(upstream.KindServer, 0,
 			fmt.Sprintf("trae: credit lookup failed (code %d): %s", code, messageOf(raw)))
 	}
+	if c.cfg.DebugUpstream {
+		logx.Debugf("trae: entitlements %s: %s", shortUID(acc.UID), describeEntitlements(raw))
+	}
 	return parseEntitlements(raw), nil
 }
 
@@ -606,8 +610,7 @@ func parseEntitlements(raw map[string]any) *upstream.Credits {
 			continue
 		}
 		info, _ := pack["entitlement_base_info"].(map[string]any)
-		quota, _ := info["quota"].(map[string]any)
-		limit, ok := creditNumber(quota["credits_limit"])
+		limit, ok := creditLimitOf(info)
 		if !ok {
 			continue
 		}
@@ -628,6 +631,7 @@ func parseEntitlements(raw map[string]any) *upstream.Credits {
 			out.Remain -= amount
 		}
 	}
+	out.Packs = packsOf(raw)
 	if out.Unlimited {
 		out.Total = 0
 		out.Remain = 0
@@ -638,6 +642,234 @@ func parseEntitlements(raw map[string]any) *upstream.Credits {
 		out.Remain = 0
 	}
 	return out
+}
+
+// creditLimitOf reads one pack's credit grant. It is stated in one of two
+// places — beside the other quota flags, or nested inside the product extra —
+// and the two spellings are the same grant, so the nested copy is only
+// consulted when the flat one is absent. Reading the first spelling keeps the
+// totals and the per-pack detail in agreement.
+func creditLimitOf(info map[string]any) (int64, bool) {
+	if quota, ok := info["quota"].(map[string]any); ok {
+		if n, ok := creditNumber(quota["credits_limit"]); ok {
+			return n, true
+		}
+	}
+	extra, _ := info["product_extra"].(map[string]any)
+	pkg, _ := extra["package_extra"].(map[string]any)
+	quota, _ := pkg["quota"].(map[string]any)
+	if n, ok := creditNumber(quota["credits_limit"]); ok {
+		return n, true
+	}
+	return 0, false
+}
+
+// packsOf reads the per-batch breakdown the entitlement response carries.
+//
+// The batches are what make "when do these credits go away?" answerable — the
+// balance is a sum over packs that lapse on different dates, and the sum cannot
+// be taken apart again. The list is reported as the upstream stated it: a pack
+// with no lapse time keeps a zero, because inventing a date is worse than
+// leaving the console to say it does not know.
+//
+// The response also carries feature entitlements (Solo capability flags) that
+// grant no credits; they are skipped rather than shown as empty packs.
+//
+// Note that these detail fields are for display only. Routing reads expiring
+// credits from pool.SetCreditsDetail, which an explicit balance probe writes,
+// and this parser must not quietly become a second writer of routing state.
+func packsOf(raw map[string]any) []upstream.CreditPack {
+	entries, _ := raw["user_entitlement_pack_list"].([]any)
+	out := make([]upstream.CreditPack, 0, len(entries))
+	for _, entry := range entries {
+		pack, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		info, _ := pack["entitlement_base_info"].(map[string]any)
+		limit, ok := creditLimitOf(info)
+		if !ok {
+			continue
+		}
+		usage, _ := pack["usage"].(map[string]any)
+		used, _ := creditNumber(usage["credits_amount"])
+		if limit == 0 && used == 0 {
+			// A pack that neither grants nor has consumed anything is a
+			// container, not a batch worth listing.
+			continue
+		}
+		item := upstream.CreditPack{
+			// The pack's human name is the upstream's own description of the
+			// grant ("每月登录赠送"), which is what makes two 150-credit packs
+			// distinguishable in the list.
+			Name: firstString(pack, "display_desc", "displayDesc", "name", "title"),
+			Used: used,
+		}
+		if item.Name == "" {
+			item.Name = firstString(info, "name", "title", "package_name", "entitlement_name")
+		}
+		// An unmetered grant states a negative limit; reporting it as a size
+		// would put a nonsense negative on the console, so it is left at zero
+		// and only its consumption shows.
+		if limit > 0 {
+			item.Size = limit
+			item.Remain = limit - used
+			if item.Remain < 0 {
+				item.Remain = 0
+			}
+		}
+		if at, text, ok := packExpiry(info, pack); ok {
+			item.ExpiresAt = at
+			item.ExpiresText = text
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+// packExpiryKeys are the lapse-time spellings the pack list carries, most
+// specific first. The deduction window is the one that matters — it is when
+// unspent credits actually become unusable — so the looser package and cycle
+// end times are only reached when it is absent, and a cycle boundary is a
+// weaker claim than a deduction end.
+var packExpiryKeys = []string{
+	"deduction_end_time", "deductionEndTime",
+	"expired_time", "expiredTime",
+	"expire_time", "expireTime",
+	"package_end_time", "packageEndTime",
+	"cycle_end_time", "cycleEndTime",
+	"end_time", "endTime",
+}
+
+// packExpiry finds a pack's lapse time, searching the containers it has been
+// seen under. It reports the Unix seconds and the upstream's own text so the
+// console can show both a sortable value and the string a human can check.
+func packExpiry(containers ...map[string]any) (int64, string, bool) {
+	for _, key := range packExpiryKeys {
+		for _, c := range containers {
+			if c == nil {
+				continue
+			}
+			raw, present := c[key]
+			if !present || raw == nil {
+				continue
+			}
+			if at, ok := packTime(raw); ok {
+				return at, packTimeText(at), true
+			}
+		}
+	}
+	return 0, "", false
+}
+
+// packTime reads a lapse time in any of the shapes the endpoint uses: a Unix
+// count in seconds or milliseconds, or a wall-clock string. A stray small
+// number is rejected rather than read as 1970, so a misidentified key degrades
+// to "no expiry" instead of a wrong one.
+func packTime(v any) (int64, bool) {
+	switch t := v.(type) {
+	case string:
+		text := strings.TrimSpace(t)
+		if text == "" {
+			return 0, false
+		}
+		for _, layout := range packTimeLayouts {
+			if parsed, err := time.ParseInLocation(layout, text, time.UTC); err == nil {
+				return parsed.Unix(), true
+			}
+		}
+		if n, ok := creditNumber(text); ok && n > 0 {
+			return normalizeEpoch(n), true
+		}
+		return 0, false
+	default:
+		n, ok := creditNumber(v)
+		if !ok || n <= 0 {
+			return 0, false
+		}
+		return normalizeEpoch(n), true
+	}
+}
+
+// packTimeLayouts are the wall-clock shapes the upstream has used. UTC is the
+// assumed zone: these times are displayed rather than compared, and guessing a
+// local zone would shift them for no benefit.
+var packTimeLayouts = []string{
+	time.RFC3339,
+	"2006-01-02T15:04:05",
+	"2006-01-02 15:04:05",
+	"2006-01-02 15:04:05.000",
+	"2006/01/02 15:04:05",
+	"2006-01-02",
+}
+
+// normalizeEpoch folds a millisecond count onto seconds: the same endpoint has
+// shipped both, and a millisecond value read as seconds lands in the year
+// 56000, which is unmistakable but still wrong.
+func normalizeEpoch(n int64) int64 {
+	if n > 1e12 {
+		return n / 1000
+	}
+	return n
+}
+
+func packTimeText(at int64) string {
+	return time.Unix(at, 0).UTC().Format(time.RFC3339)
+}
+
+// describeEntitlements summarizes the raw entitlement response for the debug
+// log. Without it, "does this account's grant actually itemise its packs, and
+// under which keys?" is unanswerable from the outside, and the credit view
+// would have to guess at field names that may not exist.
+func describeEntitlements(raw map[string]any) string {
+	entries, _ := raw["user_entitlement_pack_list"].([]any)
+	var b strings.Builder
+	fmt.Fprintf(&b, "packs=%d", len(entries))
+	if len(entries) == 0 {
+		return b.String()
+	}
+	pack, ok := entries[0].(map[string]any)
+	if !ok {
+		return b.String()
+	}
+	fmt.Fprintf(&b, " packKeys=%v", sortedKeys(pack))
+	if info, ok := pack["entitlement_base_info"].(map[string]any); ok {
+		fmt.Fprintf(&b, " baseKeys=%v", sortedKeys(info))
+		if quota, ok := info["quota"].(map[string]any); ok {
+			fmt.Fprintf(&b, " quotaKeys=%v", sortedKeys(quota))
+		}
+	}
+	if usage, ok := pack["usage"].(map[string]any); ok {
+		fmt.Fprintf(&b, " usageKeys=%v", sortedKeys(usage))
+	}
+	// The first credit-bearing pack is the interesting one: the list also holds
+	// feature entitlements whose quota carries only capability flags.
+	for _, entry := range entries {
+		p, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		info, _ := p["entitlement_base_info"].(map[string]any)
+		quota, _ := info["quota"].(map[string]any)
+		if _, ok := quota["credits_limit"]; !ok {
+			continue
+		}
+		fmt.Fprintf(&b, " creditPack: display_desc=%q source_id=%v product_type=%v product_id=%v expire_time=%v yearly_expire_time=%v end_time=%v usage=%v product_extra=%s",
+			truncate(firstString(p, "display_desc"), 40),
+			p["source_id"], info["product_type"], info["product_id"],
+			p["expire_time"], p["yearly_expire_time"], info["end_time"],
+			p["usage"], truncate(fmt.Sprint(info["product_extra"]), 160))
+		break
+	}
+	return b.String()
+}
+
+// truncate shortens a diagnostic value so one log line stays readable.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // creditNumber reads a non-negative credit amount. A boolean is rejected

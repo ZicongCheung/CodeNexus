@@ -62,6 +62,19 @@ func (c *Console) tasksFor(acc *account.Account) (upstream.Tasks, bool) {
 	return c.sched.Adapter(acc)
 }
 
+// maintenanceFor resolves the check-in and balance adapter for one account.
+//
+// The distinction matters: the growth surface is a superset, and a source can
+// serve check-in and credits without it. Trae CN is exactly that case, so
+// resolving a balance through tasksFor answered "task subsystem not available"
+// for every such account.
+func (c *Console) maintenanceFor(acc *account.Account) (upstream.Maintenance, bool) {
+	if c.sched == nil {
+		return nil, false
+	}
+	return c.sched.Maintenance(acc)
+}
+
 // handleAccountTasks merges the default and mini-program task listings.
 func (c *Console) handleAccountTasks(w http.ResponseWriter, r *http.Request) {
 	acc, key, ok := c.accountRef(r.PathValue("uid"))
@@ -353,7 +366,7 @@ func (c *Console) handleAccountPackages(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusNotFound, "no such account")
 		return
 	}
-	tasks, ok := c.tasksFor(acc)
+	maint, ok := c.maintenanceFor(acc)
 	if !ok {
 		writeErr(w, http.StatusServiceUnavailable, "task subsystem not available")
 		return
@@ -361,7 +374,7 @@ func (c *Console) handleAccountPackages(w http.ResponseWriter, r *http.Request) 
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 	window := time.Duration(c.cfg.Schedule.ExpiringSoonHours) * time.Hour
-	credits, err := tasks.Credits(ctx, acc, window)
+	credits, err := maint.Credits(ctx, acc, window)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return

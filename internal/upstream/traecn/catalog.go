@@ -360,10 +360,11 @@ func (c *Client) catalogueList(ctx context.Context, acc *account.Account, tiers 
 		seen[id] = true
 		rememberLiveName(name)
 		out = append(out, upstream.ModelSpec{
-			ID:            id,
-			Source:        upstream.SourceTraeCN,
-			ContextLength: contextLength(entry),
-			Capabilities:  capabilitiesOf(entry),
+			ID:              id,
+			Source:          upstream.SourceTraeCN,
+			ContextLength:   contextLength(entry),
+			Capabilities:    capabilitiesOf(entry),
+			ThinkingEfforts: supportedEfforts(entry),
 		})
 	}
 

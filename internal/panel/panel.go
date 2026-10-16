@@ -170,6 +170,8 @@ func (c *Console) buildMux() *http.ServeMux {
 	mux.HandleFunc("POST /api/accounts/{uid}/tasks/auto", c.handleTaskAuto)
 	mux.HandleFunc("POST /api/accounts/{uid}/tasks/auto_all", c.handleTaskAutoAll)
 	mux.HandleFunc("GET /api/accounts/{uid}/packages", c.handleAccountPackages)
+	mux.HandleFunc("GET /api/credits", c.handleCredits)
+	mux.HandleFunc("GET /api/models", c.handleModels)
 	mux.HandleFunc("POST /api/accounts/{uid}/{op}", c.handleAccountOp)
 
 	// Task center: whole-pool operations.

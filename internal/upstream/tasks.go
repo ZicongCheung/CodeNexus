@@ -13,17 +13,47 @@ import (
 // part of Remain that lapses inside the requested window, and EarliestAt is
 // when the next batch lapses (zero when nothing lapses).
 type Credits struct {
-	Remain int64
-	Total  int64
+	Remain int64 `json:"remain"`
+	Total  int64 `json:"total"`
 	// Used is what the account has consumed in total. It is recorded for
 	// observation only: it is what a single turn's charge is measured against
 	// when the upstream has no per-turn bill, and it never feeds routing.
-	Used              int64
-	Expiring          int64
-	EarliestAt        time.Time
-	EarliestRemaining int64
+	Used              int64     `json:"used"`
+	Expiring          int64     `json:"expiring,omitempty"`
+	EarliestAt        time.Time `json:"earliest_at,omitempty"`
+	EarliestRemaining int64     `json:"earliest_remaining,omitempty"`
 	// Unlimited marks an enterprise account whose grant is not metered.
-	Unlimited bool
+	Unlimited bool `json:"unlimited,omitempty"`
+	// Packs is the per-batch breakdown behind Remain. A single balance hides
+	// when the credits actually lapse, which is the whole question a credit
+	// view has to answer, so the batches are carried rather than summed away.
+	//
+	// Empty means the upstream did not itemise the grant — the console has to
+	// say "not itemised" rather than show a zero, because the two are not the
+	// same claim.
+	Packs []CreditPack `json:"packs,omitempty"`
+}
+
+// CreditPack is one batch of credits.
+//
+// Grants arrive as packs that lapse on their own schedules, so the remaining
+// balance is not one number but a distribution over time. Every field is
+// whatever the upstream stated: nothing is inferred, because a guessed expiry
+// would be worse than a blank one.
+type CreditPack struct {
+	Name string `json:"name,omitempty"`
+	// Size is the pack's original grant, Used what has been drawn from it and
+	// Remain what is left. A pack can report Used without a Size when the
+	// upstream tracks consumption apart from the grant.
+	Size   int64 `json:"size"`
+	Used   int64 `json:"used"`
+	Remain int64 `json:"remain"`
+	// ExpiresAt is when the pack lapses, in Unix seconds; zero when the
+	// upstream states no time for it.
+	ExpiresAt int64 `json:"expires_at,omitempty"`
+	// ExpiresText keeps the upstream's own spelling of the lapse time, since a
+	// wall-clock string is what a human can check against the client.
+	ExpiresText string `json:"expires_text,omitempty"`
 }
 
 // CheckinResult reports the outcome of a daily check-in. A repeated check-in

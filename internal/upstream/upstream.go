@@ -26,6 +26,13 @@ type ModelSpec struct {
 	Source        Source   `json:"source"`
 	ContextLength int      `json:"context_length,omitempty"`
 	Capabilities  []string `json:"capabilities,omitempty"`
+	// ThinkingEfforts lists the thinking strengths the account's own catalogue
+	// advertises for this model, weakest first, in the upstream's vocabulary.
+	//
+	// Empty means the model takes no strength at all — the console shows that
+	// as "not adjustable" rather than as "default", because the two are
+	// different offers and only the catalogue can tell them apart.
+	ThinkingEfforts []string `json:"thinking_efforts,omitempty"`
 }
 
 // Usage is token accounting for a single request.

@@ -16,7 +16,7 @@
   let loading = $state(true)
   let banner = $state('')
 
-  let tab = $state('accounts')
+  let tab = $state('overview')
   let scrolled = $state(false)
 
   // ── theme ───────────────────────────────────────────────────────────────
@@ -128,10 +128,15 @@
     '[{"source":"workbuddy","uid":"...","access_token":"...","refresh_token":"..."}]'
 
   const tabs = [
+    { id: 'overview', label: t.nav.overview, icon: 'overview' },
     { id: 'accounts', label: t.nav.accounts, icon: 'accounts' },
     { id: 'tasks', label: t.nav.tasks, icon: 'tasks' },
-    { id: 'usage', label: t.nav.usage, icon: 'usage' },
     { id: 'logs', label: t.nav.logs, icon: 'logs' },
+  ]
+  const dataTabs = [
+    { id: 'models', label: t.nav.models, icon: 'models' },
+    { id: 'credits', label: t.nav.credits, icon: 'credits' },
+    { id: 'usage', label: t.nav.usage, icon: 'usage' },
   ]
   const accessTabs = [
     { id: 'add', label: t.nav.add, icon: 'add' },
@@ -417,7 +422,160 @@
       startLogPolling()
     } else if (name === 'usage') {
       loadUsage()
+    } else if (name === 'overview') {
+      loadOverview()
+    } else if (name === 'models') {
+      if (!modelRows.length) loadModels()
+    } else if (name === 'credits') {
+      if (!creditRows.length) loadCredits()
     }
+  }
+
+  // ── overview ─────────────────────────────────────────────────────────────
+  // The overview reads only what the gateway already knows: pool state, the
+  // metrics window and the task queue. It never probes upstreams, so landing
+  // on it costs nothing and cannot rate-limit an account.
+  let overviewLoading = $state(false)
+  let overviewMetrics = $state(null)
+  let overviewQueue = $state([])
+  let overviewUsage = $state(null)
+
+  async function loadOverview() {
+    overviewLoading = true
+    const jobs = [
+      loadAccounts(),
+      api('/observability/metrics').then((m) => (overviewMetrics = m)).catch(() => (overviewMetrics = null)),
+      api('/tasks/queue').then((q) => (overviewQueue = q.queue ?? [])).catch(() => (overviewQueue = [])),
+      api('/usage/summary?days=1')
+        .then((u) => (overviewUsage = u.available === false ? null : (u.summary ?? null)))
+        .catch(() => (overviewUsage = null)),
+    ]
+    await Promise.all(jobs)
+    overviewLoading = false
+  }
+
+  const healthCounts = $derived.by(() => {
+    const c = { ok: 0, cooling: 0, broken: 0, off: 0, idle: 0, inFlight: 0 }
+    for (const acc of accounts) {
+      if (!acc.enabled) c.off++
+      else if (acc.broken) c.broken++
+      else if (acc.cooling) c.cooling++
+      else if (acc.healthy) c.ok++
+      else c.idle++
+      c.inFlight += acc.in_flight || 0
+    }
+    return c
+  })
+  const creditsTotal = $derived(
+    accounts.reduce((sum, a) => sum + (a.unlimited ? 0 : a.credits || 0), 0),
+  )
+  const hasUnlimited = $derived(accounts.some((a) => a.unlimited))
+
+  // Accounts whose balance has been probed and that carry credits lapsing
+  // inside the sweep window. An account never probed has no earliest date, and
+  // the box says so instead of implying "nothing expires".
+  const expiringSoon = $derived.by(() => {
+    const windowMs = (session?.expiring_window_hours ?? 72) * 3600 * 1000
+    const now = Date.now()
+    return accounts
+      .filter((a) => a.credits_known && (a.expiring > 0 || (a.earliest_expiry && a.earliest_expiry * 1000 - now < windowMs)))
+      .sort((a, b) => (a.earliest_expiry || Infinity) - (b.earliest_expiry || Infinity))
+  })
+  const creditsProbed = $derived(accounts.some((a) => a.credits_known))
+
+  const queuePending = $derived(
+    overviewQueue.reduce((sum, row) => sum + (row.pending || 0), 0),
+  )
+
+  // ── models page ──────────────────────────────────────────────────────────
+  let modelRows = $state([])
+  let modelFailed = $state({})
+  let modelsLoading = $state(false)
+  let modelsQuery = $state('')
+  let modelsCap = $state('')
+
+  async function loadModels() {
+    modelsLoading = true
+    try {
+      const body = await api('/models')
+      modelRows = body.models ?? []
+      modelFailed = body.failed ?? {}
+    } catch (err) {
+      banner = err.message
+    } finally {
+      modelsLoading = false
+    }
+  }
+
+  const modelAccounts = $derived.by(() => {
+    const map = new Map()
+    for (const row of modelRows) {
+      if (!map.has(row.uid)) map.set(row.uid, { uid: row.uid, label: row.label || row.uid, source: row.source, items: [] })
+      map.get(row.uid).items.push(row)
+    }
+    return [...map.values()]
+  })
+
+  const filteredModels = $derived.by(() => {
+    const q = modelsQuery.trim().toLowerCase()
+    const groups = modelAccounts.map((g) => {
+      let items = g.items
+      if (q) items = items.filter((m) => m.id.toLowerCase().includes(q))
+      if (modelsCap) items = items.filter((m) => (m.capabilities ?? []).includes(modelsCap) || (modelsCap === 'reasoning' && (m.thinking_efforts ?? []).length > 0))
+      return { ...g, items }
+    })
+    return groups.filter((g) => g.items.length > 0)
+  })
+
+  // ── credits page ─────────────────────────────────────────────────────────
+  let creditRows = $state([])
+  let creditsLoading = $state(false)
+  let creditsErr = $state('')
+
+  async function loadCredits() {
+    creditsLoading = true
+    creditsErr = ''
+    try {
+      const body = await api('/credits')
+      creditRows = body.accounts ?? []
+    } catch (err) {
+      creditsErr = err.message
+    } finally {
+      creditsLoading = false
+    }
+  }
+
+  // Group one account's packs by lapse day. Packs without a date cannot sit on
+  // an axis, so they fall into a separate "undated" bucket that the view
+  // renders after the dated ones instead of inventing a day for them.
+  function packsByDay(row) {
+    const days = new Map()
+    const undated = []
+    for (const p of row.packs ?? []) {
+      if (!p.expires_at) {
+        undated.push(p)
+        continue
+      }
+      const d = new Date(p.expires_at * 1000)
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+      if (!days.has(key)) days.set(key, 0)
+      days.set(key, days.get(key) + (p.remain || 0))
+    }
+    return { days: [...days.entries()], undated }
+  }
+
+  function fmtDay(key) {
+    const [y, m, d] = key.split('-')
+    return `${m}-${d}`
+  }
+
+  // Bar width relative to the largest single day of that account, so one
+  // account's chart never implies a global scale.
+  function expiryBarWidth(row, remain) {
+    let peak = 0
+    for (const [, v] of packsByDay(row).days) peak = Math.max(peak, v)
+    if (peak <= 0) return 0
+    return Math.max(2, Math.round((remain / peak) * 100))
   }
 
   // ── task center ──────────────────────────────────────────────────────────
@@ -761,6 +919,19 @@
           </button>
         {/each}
         <span class="tab-sep" aria-hidden="true"></span>
+        {#each dataTabs as item (item.id)}
+          <button
+            class="tab"
+            data-tab={item.id}
+            class:active={tab === item.id}
+            aria-current={tab === item.id ? 'page' : undefined}
+            onclick={() => switchTab(item.id)}
+          >
+            <Icon name={item.icon} size={16} />
+            <span>{item.label}</span>
+          </button>
+        {/each}
+        <span class="tab-sep" aria-hidden="true"></span>
         {#each accessTabs as item (item.id)}
           <button
             class="tab"
@@ -819,6 +990,100 @@
         <button class="btn icon" onclick={() => (banner = '')} aria-label={t.common.close}>
           <Icon name="close" size={14} />
         </button>
+      </div>
+    {/if}
+
+    {#if tab === 'overview'}
+      <div class="page-head">
+        <div class="titles">
+          <h1>{t.nav.overview}</h1>
+          <p class="lede">{t.lede.overview}</p>
+        </div>
+        <div class="btn-row">
+          <button class="btn ghost" onclick={loadOverview} disabled={overviewLoading}>
+            <Icon name="refresh" size={15} />
+            {t.overview.refresh}
+          </button>
+        </div>
+      </div>
+
+      <div class="stats">
+        <div class="stat-card"><span class="k">{t.overview.stat.accounts}</span><span class="v">{accounts.length}</span></div>
+        <div class="stat-card"><span class="k">{t.overview.stat.available}</span><span class="v">{healthCounts.ok}</span></div>
+        <div class="stat-card"><span class="k">{t.overview.stat.cooling}</span><span class="v" class:warn-text={healthCounts.cooling > 0}>{healthCounts.cooling}</span></div>
+        <div class="stat-card"><span class="k">{t.overview.stat.broken}</span><span class="v" class:bad-text={healthCounts.broken > 0}>{healthCounts.broken}</span></div>
+        <div class="stat-card"><span class="k">{t.overview.stat.inFlight}</span><span class="v">{healthCounts.inFlight}</span></div>
+        <div class="stat-card"><span class="k">{t.overview.stat.credits}</span><span class="v">{creditsTotal > 0 || hasUnlimited ? (hasUnlimited ? '∞' : fmtCredits(creditsTotal)) : t.common.dash}</span></div>
+        <div class="stat-card"><span class="k">{t.overview.stat.requestsToday}</span><span class="v">{overviewUsage ? overviewUsage.requests : t.common.dash}</span></div>
+        <div class="stat-card"><span class="k">{t.overview.stat.queuePending}</span><span class="v">{queuePending}</span></div>
+      </div>
+
+      <div class="ov-grid">
+        <section class="card">
+          <div class="card-head">
+            <div class="titles">
+              <h2>{t.overview.healthBox.title}</h2>
+              {#if accounts.length}<span class="hint">{t.overview.healthBox.detail(healthCounts.ok + healthCounts.idle, accounts.length)}</span>{/if}
+            </div>
+          </div>
+          {#if accounts.length === 0}
+            <div class="empty slim"><p>{t.overview.healthBox.empty}</p></div>
+          {:else}
+            <div class="ov-chips">
+              {#each accounts as acc (acc.key)}
+                {@const h = health(acc)}
+                <button class="ov-chip" onclick={() => switchTab('accounts')} title="{acc.uid} · {h.text}">
+                  <span class="badge {h.cls}">{h.text}</span>
+                  <span class="ov-chip-name">{acc.label || acc.uid}</span>
+                  {#if acc.in_flight > 0}<span class="badge info">{acc.in_flight}</span>{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <div class="titles">
+              <h2>{t.overview.expiryBox.title}</h2>
+              {#if session}<span class="hint">{t.overview.expiryBox.window(session.expiring_window_hours ?? 72)}</span>{/if}
+            </div>
+          </div>
+          {#if !creditsProbed}
+            <div class="empty slim"><p>{t.overview.expiryBox.stale}</p></div>
+          {:else if expiringSoon.length === 0}
+            <div class="empty slim"><p>{t.overview.expiryBox.empty}</p></div>
+          {:else}
+            <div class="ov-rows">
+              {#each expiringSoon as acc (acc.key)}
+                <div class="ov-row">
+                  <span class="label">{acc.label || acc.uid}<em>{acc.uid}</em></span>
+                  {#if acc.expiring > 0}
+                    <span class="badge warn">{t.overview.expiryBox.earliest(fmtTime(acc.earliest_expiry), acc.expiring)}</span>
+                  {:else}
+                    <span class="badge ok">{fmtTime(acc.earliest_expiry)}</span>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <div class="titles"><h2>{t.overview.serviceBox.title}</h2></div>
+          </div>
+          <div class="kv">
+            <span class="k">{t.overview.serviceBox.sources}</span>
+            <span class="v">{(session?.sources ?? []).join(' · ') || t.common.dash}</span>
+            <span class="k">{t.overview.serviceBox.sticky}</span>
+            <span class="v">{session?.sticky_sessions ?? t.common.dash}</span>
+            <span class="k">{t.overview.serviceBox.reqlog}</span>
+            <span class="v"><span class="badge {overviewMetrics?.enabled ? 'ok' : 'off'}">{overviewMetrics?.enabled ? t.overview.serviceBox.on : t.overview.serviceBox.off}</span></span>
+            <span class="k">{t.overview.serviceBox.usage}</span>
+            <span class="v"><span class="badge {overviewUsage ? 'ok' : 'off'}">{overviewUsage ? t.overview.serviceBox.on : t.overview.serviceBox.off}</span></span>
+          </div>
+        </section>
       </div>
     {/if}
 
@@ -1367,6 +1632,176 @@
       {/if}
     {/if}
 
+    {#if tab === 'models'}
+      <div class="page-head">
+        <div class="titles">
+          <h1>{t.nav.models}</h1>
+          <p class="lede">{t.lede.models}</p>
+        </div>
+        <div class="btn-row">
+          <button class="btn ghost" onclick={loadModels} disabled={modelsLoading}>
+            <Icon name="refresh" size={15} />
+            {t.models.refresh}
+          </button>
+        </div>
+      </div>
+
+      <div class="toolbar">
+        <label class="search-box">
+          <Icon name="search" size={15} />
+          <input type="search" placeholder={t.models.search} bind:value={modelsQuery} />
+        </label>
+        <div class="segmented">
+          <button class:active={modelsCap === ''} onclick={() => (modelsCap = '')}>{t.models.filterAll}</button>
+          <button class:active={modelsCap === 'max'} onclick={() => (modelsCap = 'max')}>{t.models.filters.max}</button>
+          <button class:active={modelsCap === 'reasoning'} onclick={() => (modelsCap = 'reasoning')}>{t.models.filters.reasoning}</button>
+          <button class:active={modelsCap === 'vision'} onclick={() => (modelsCap = 'vision')}>{t.models.filters.vision}</button>
+        </div>
+      </div>
+
+      {#if modelsLoading && !modelRows.length}
+        <div class="table">
+          {#each Array(4) as _}
+            <div class="row skeleton-row"><span class="skeleton"></span><span class="skeleton"></span><span class="skeleton"></span></div>
+          {/each}
+        </div>
+      {:else if !filteredModels.length}
+        <div class="empty"><p>{t.models.empty}</p></div>
+      {:else}
+        {#each filteredModels as group (group.uid)}
+          <section class="group">
+            <div class="group-head">
+              <h2><span class="src">{group.source}</span> {group.label}</h2>
+              <span class="badge outline">{t.models.count(group.items.length)}</span>
+            </div>
+            <div class="table scroll models-table">
+              <div class="row head" style="--cols: var(--cols-models-page)">
+                <span>{t.models.col.model}</span>
+                <span>{t.models.col.context}</span>
+                <span>{t.models.col.efforts}</span>
+                <span>{t.models.col.caps}</span>
+              </div>
+              {#each group.items as m (m.id)}
+                <div class="row" style="--cols: var(--cols-models-page)">
+                  <span class="label mono">{m.id}</span>
+                  <span class="muted small mono" title={m.capabilities?.includes('max') ? t.models.contextTitle : ''}>
+                    {#if m.capabilities?.includes('max')}
+                      <span class="badge max" title={t.models.contextTitle}>{t.logs.maxBadge(m.context_length)}</span>
+                    {:else if m.context_length}
+                      {fmtTokens(m.context_length)}
+                    {:else}
+                      {t.common.dash}
+                    {/if}
+                  </span>
+                  <span class="muted small">
+                    {(m.thinking_efforts ?? []).length ? m.thinking_efforts.join(' / ') : t.models.effortsOff}
+                  </span>
+                  <span class="cell-route">
+                    {#each m.capabilities ?? [] as cap}
+                      {#if cap !== 'max'}
+                        <span class="badge info">{t.models.cap[cap] || cap}</span>
+                      {/if}
+                    {/each}
+                    {#if !(m.capabilities ?? []).some((c) => c !== 'max')}<span class="muted small">{t.common.dash}</span>{/if}
+                  </span>
+                </div>
+              {/each}
+            </div>
+          </section>
+        {/each}
+      {/if}
+      {#each Object.entries(modelFailed) as [uid, err]}
+        <p class="msg error">{t.models.failed(uid, err)}</p>
+      {/each}
+    {/if}
+
+    {#if tab === 'credits'}
+      <div class="page-head">
+        <div class="titles">
+          <h1>{t.nav.credits}</h1>
+          <p class="lede">{t.lede.credits}</p>
+        </div>
+        <div class="btn-row">
+          <button class="btn ghost" onclick={loadCredits} disabled={creditsLoading}>
+            <Icon name="refresh" size={15} />
+            {t.credits.refresh}
+          </button>
+        </div>
+      </div>
+      {#if creditsLoading}<p class="muted small">{t.credits.refreshing}</p>{/if}
+      {#if creditsErr}<p class="msg error">{creditsErr}</p>{/if}
+
+      {#each creditRows as row (row.key)}
+        <section class="card">
+          <div class="card-head">
+            <div class="titles">
+              <h2><span class="src">{row.source}</span> {row.label || row.uid}</h2>
+              {#if row.local}<span class="hint">{t.credits.local}</span>{/if}
+            </div>
+            <div class="credit-sum">
+              {#if row.failed}
+                <span class="badge bad">{t.credits.failed}</span>
+              {:else if row.unlimited}
+                <span class="badge info">{t.credits.unlimited}</span>
+              {:else}
+                <span class="credit-num">{fmtCredits(row.remain)}</span>
+                <span class="muted small">/ {fmtCredits(row.total)} · {t.credits.summary.used} {fmtCredits(row.used)}</span>
+              {/if}
+            </div>
+          </div>
+          {#if row.error}<p class="msg error">{row.error}</p>{/if}
+
+          {#if !row.failed && !row.local && (row.packs ?? []).length}
+            <div class="credit-layout">
+              <div>
+                <h3 class="sub">{t.credits.expiry.title}</h3>
+                {#if (row.packs ?? []).some((p) => p.expires_at)}
+                  <div class="expiry-bars">
+                    {#each packsByDay(row).days as [day, remain] (day)}
+                      <div class="expiry-row" title="{day} · {fmtCredits(remain)}">
+                        <span class="mono small">{fmtDay(day)}</span>
+                        <div class="expiry-track"><div class="expiry-fill" style="width:{expiryBarWidth(row, remain)}%"></div></div>
+                        <span class="muted small mono">{fmtCredits(remain)}</span>
+                      </div>
+                    {/each}
+                  </div>
+                {:else}
+                  <p class="muted small">{t.credits.expiry.empty}</p>
+                {/if}
+                {#if (row.packs ?? []).some((p) => !p.expires_at)}
+                  <p class="muted small">{t.credits.summary.remain}（{t.common.dash}）：{fmtCredits((row.packs ?? []).filter((p) => !p.expires_at).reduce((s, p) => s + (p.remain || 0), 0))}</p>
+                {/if}
+              </div>
+              <div>
+                <h3 class="sub">{t.credits.packs.title}</h3>
+                <div class="table packs-table">
+                  <div class="row head" style="--cols: var(--cols-packs)">
+                    <span>{t.credits.packs.col.name}</span>
+                    <span>{t.credits.packs.col.size}</span>
+                    <span>{t.credits.packs.col.used}</span>
+                    <span>{t.credits.packs.col.remain}</span>
+                    <span>{t.credits.packs.col.expires}</span>
+                  </div>
+                  {#each row.packs as p, i (i)}
+                    <div class="row" style="--cols: var(--cols-packs)">
+                      <span class="small">{p.name || t.common.dash}</span>
+                      <span class="muted small mono">{p.size || t.common.dash}</span>
+                      <span class="muted small mono">{p.used || t.common.dash}</span>
+                      <span class="small mono">{p.remain}</span>
+                      <span class="muted small">{p.expires_text || t.common.dash}</span>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            </div>
+          {:else if !row.failed && !row.local}
+            <p class="muted small">{t.credits.packs.empty}</p>
+          {/if}
+        </section>
+      {/each}
+      {#if creditRows.length}<p class="muted small">{t.credits.stale}</p>{/if}
+    {/if}
+
     {#if tab === 'settings'}
       <div class="page-head">
         <div class="titles">
@@ -1835,6 +2270,8 @@
     --cols-models: minmax(9rem, 1.6fr) 4.5rem repeat(3, minmax(4.5rem, 1fr)) 5.5rem;
     --cols-records: minmax(9rem, 1.1fr) 5rem minmax(6rem, 1fr) minmax(7rem, 1.1fr) 4.5rem
       minmax(7rem, 1fr) 5rem 5.5rem;
+    --cols-models-page: minmax(11rem, 2fr) minmax(7rem, 1fr) minmax(9rem, 1.2fr) minmax(8rem, 1fr);
+    --cols-packs: minmax(9rem, 1.6fr) 4.5rem 4.5rem 5rem minmax(7rem, 1fr);
   }
 
   .table.scroll {
@@ -2076,6 +2513,193 @@
     text-align: center;
   }
 
+  /* ── overview ──────────────────────────────────────────────────────────── */
+
+  .ov-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--section-gap);
+  }
+
+  .ov-grid .card:last-child {
+    grid-column: 1 / -1;
+  }
+
+  .ov-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .ov-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1-5) var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--button-radius);
+    background: var(--surface-2);
+    cursor: pointer;
+    max-width: 100%;
+    transition: border-color var(--transition-fast), background var(--transition-fast);
+  }
+
+  .ov-chip:hover {
+    border-color: var(--primary);
+    background: var(--primary-light);
+  }
+
+  .ov-chip-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--text-sm);
+  }
+
+  .ov-rows {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .ov-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-2-5) 0;
+    border-bottom: 1px solid var(--border-light);
+  }
+
+  .ov-row:last-child {
+    border-bottom: 0;
+  }
+
+  .ov-row .label {
+    min-width: 0;
+  }
+
+  .kv {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: var(--space-2) var(--space-5);
+    align-items: center;
+  }
+
+  .kv .k {
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+  }
+
+  .kv .v {
+    font-size: var(--text-sm);
+  }
+
+  .warn-text {
+    color: var(--warning);
+  }
+
+  .bad-text {
+    color: var(--danger);
+  }
+
+  .empty.slim {
+    padding: var(--space-4) 0;
+  }
+
+  /* ── models & credits ──────────────────────────────────────────────────── */
+
+  .search-box {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 0 var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--button-radius);
+    background: var(--surface-2);
+    color: var(--text-muted);
+  }
+
+  .search-box input {
+    border: 0;
+    background: transparent;
+    padding: var(--space-2) 0;
+    font-size: var(--text-sm);
+    color: var(--text);
+    min-width: 12rem;
+  }
+
+  .search-box input:focus {
+    outline: none;
+  }
+
+  .search-box:focus-within {
+    border-color: var(--primary);
+  }
+
+  .badge.max {
+    color: var(--primary);
+    background: var(--primary-light);
+    font-weight: var(--font-semibold);
+  }
+
+  .credit-sum {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+  }
+
+  .credit-num {
+    font-size: var(--text-xl);
+    font-weight: var(--font-semibold);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .credit-layout {
+    display: grid;
+    grid-template-columns: minmax(14rem, 1fr) minmax(0, 1.6fr);
+    gap: var(--section-gap);
+    margin-top: var(--space-4);
+  }
+
+  .sub {
+    font-size: var(--text-sm);
+    font-weight: var(--font-semibold);
+    color: var(--text-muted);
+    margin: 0 0 var(--space-2);
+  }
+
+  .expiry-bars {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1-5);
+  }
+
+  .expiry-row {
+    display: grid;
+    grid-template-columns: 3.2rem 1fr auto;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .expiry-track {
+    height: 8px;
+    border-radius: 980px;
+    background: var(--surface-3, var(--surface-2));
+    overflow: hidden;
+  }
+
+  .expiry-fill {
+    height: 100%;
+    border-radius: 980px;
+    background: var(--primary);
+    opacity: 0.85;
+    transition: width var(--transition-ios);
+  }
+
+  .packs-table .row {
+    min-width: 0;
+  }
+
   /* ── responsive ────────────────────────────────────────────────────────── */
 
   @media (max-width: 1080px) {
@@ -2137,6 +2761,30 @@
     .accounts-table .row > :nth-child(3),
     .accounts-table .row > :nth-child(4),
     .accounts-table .row > :nth-child(5) {
+      display: none;
+    }
+
+    .ov-grid,
+    .credit-layout {
+      grid-template-columns: 1fr;
+    }
+    .ov-grid .card:last-child {
+      grid-column: auto;
+    }
+    .search-box input {
+      min-width: 8rem;
+    }
+    .table {
+      --cols-models-page: minmax(0, 1.4fr) minmax(0, 1fr) auto;
+      --cols-packs: minmax(0, 1.4fr) auto auto minmax(0, 0.8fr);
+    }
+    .models-table > .row,
+    .table.scroll.models-table > .row,
+    .packs-table > .row {
+      min-width: 0;
+    }
+    .models-table .row > :nth-child(3),
+    .packs-table .row > :nth-child(2) {
       display: none;
     }
   }
