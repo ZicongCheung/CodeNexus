@@ -272,22 +272,17 @@ func shortLabel(uid string) string {
 	return uid
 }
 
-// ListModels implements upstream.Upstream. The catalog is static on purpose: it
-// has to answer while every account is cooling, and a stable list keeps
-// cross-source model routing deterministic. A name that is not listed still
-// passes through to the upstream unchanged.
-func (c *Client) ListModels(_ context.Context, _ *account.Account) ([]upstream.ModelSpec, error) {
-	models := Catalog()
-	out := make([]upstream.ModelSpec, 0, len(models))
-	for _, m := range models {
-		out = append(out, upstream.ModelSpec{
-			ID:            m.ID,
-			Source:        upstream.SourceTraeCN,
-			ContextLength: m.ContextLen,
-			Capabilities:  m.Capabilities,
-		})
-	}
-	return out, nil
+// ListModels implements upstream.Upstream.
+//
+// The account's live catalogue is the answer, because it is the only list that
+// tracks what the upstream currently offers: a hand-written table drifts out of
+// date the moment a model is added or retired, and the user is then offered a
+// model that no longer resolves. Reading it never blocks — a stale cache
+// refreshes in the background while the caller gets what is already known,
+// falling back to the built-in snapshot until the first fetch lands. A name
+// that is not listed still passes through to the upstream unchanged.
+func (c *Client) ListModels(_ context.Context, acc *account.Account) ([]upstream.ModelSpec, error) {
+	return c.advertisedModels(acc), nil
 }
 
 // Probe implements upstream.Upstream. The credential is validated locally

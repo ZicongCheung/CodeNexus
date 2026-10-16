@@ -145,7 +145,7 @@ func Fields() []Field {
 
 		// Trae高级能力（截断续写 / 1M 档位）
 		hot("upstreams.trae-cn.auto_continue.enabled", "上游·高级", "截断自动续写",
-			"上游把回答截断时，自动追加一轮把答案补完，用户仍只看到一条回答。每一轮都真实消耗积分。", "bool"),
+			"上游把回答截断时，自动追加一轮把答案补完，用户仍只看到一条回答。只在回答看起来被截断时才追加（长度截断、未闭合代码块、括号不平衡、结尾字符可疑、思考很长但正文只剩碎片）；答案看起来完整时不会多跑。每一轮都真实消耗积分，每轮都会在日志里输出 auto-continue round=。", "bool"),
 		hot("upstreams.trae-cn.auto_continue.max_rounds", "上游·高级", "续写最大轮数",
 			"单次请求最多追加几轮，用于封顶额外消耗。", "int"),
 		hot("upstreams.trae-cn.auto_continue.text_threshold", "上游·高级", "碎片判定阈值",
@@ -153,7 +153,7 @@ func Fields() []Field {
 		hot("upstreams.trae-cn.auto_continue.similarity_threshold", "上游·高级", "重复停止阈值",
 			"续写结果与上一轮的重合度超过此值时停止，避免无限循环（0~1）。", "float"),
 		hot("upstreams.trae-cn.max_mode.enabled", "上游·高级", "1M 档位",
-			"对账号目录标记为 max 的模型使用最大上下文档位（可用高级 JSON 里的 max_mode.models 限定模型白名单）。只会对账号确实拥有的档位生效，绝不虚构。", "bool"),
+			"对账号目录里标记为 max 的模型改用该账号最大的上下文档位。只有 Agent 档有这一档（普通对话走的就是它），Work 档没有；账号没标记的模型绝不生效。窗口大小取自账号自己的目录，所以同一档位下各模型并不相同（实测 glm-5.3 为 100 万、mimo-v2.6-flash 为 98.1 万）。生效时日志会输出 max profile model=… context=… 。", "bool"),
 
 		// Features
 		hot("features.sanitize_fingerprints", "出站改写", "清洗客户端指纹", "擦除上游内容过滤器会字面匹配的客户端提示词指纹。", "bool"),

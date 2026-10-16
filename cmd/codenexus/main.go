@@ -378,6 +378,16 @@ func run(configPath string, opts runOptions) error {
 	consoleAddr := consoleURL(cfg.Listen)
 	if !opts.noTray {
 		go func() {
+			// The icon is a convenience; the gateway it decorates is the
+			// product. A panic here used to take the whole process down, so a
+			// broken tray degrades to a warning instead.
+			defer func() {
+				if r := recover(); r != nil {
+					err := fmt.Errorf("tray panicked: %v", r)
+					logx.Warnf("%v", err)
+					reportTrayFailure(err, consoleAddr, logPath)
+				}
+			}()
 			if err := startTray(trayActions{
 				ConsoleURL: consoleAddr,
 				ConfigPath: configPath,
@@ -401,6 +411,7 @@ func run(configPath string, opts runOptions) error {
 				},
 			}); err != nil {
 				logx.Warnf("tray unavailable: %v", err)
+				reportTrayFailure(err, consoleAddr, logPath)
 			}
 		}()
 	}

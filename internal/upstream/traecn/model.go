@@ -1,15 +1,25 @@
 package traecn
 
-import "strings"
+import (
+	"strings"
+	"sync"
+
+	"github.com/ZicongCheung/CodeNexus/internal/upstream"
+)
 
 // The upstream matches models by an exact, case-sensitive config name, while
 // clients expect the loose lowercase ids every other OpenAI-compatible surface
 // uses. This file holds the translation between the two.
 //
-// The catalog is deliberately static: /v1/models has to answer even when every
-// account is cooling, and a deterministic list keeps the router's same-name
-// logic stable across restarts. The live catalog the upstream publishes is
-// merged on top of it when it is reachable.
+// The table below is a resolution index, not the advertised list: it is what
+// maps a client's spelling onto the exact string the upstream wants, including
+// the alias families (the Claude ids that are all served through one config
+// name). /v1/models is answered from the account's live catalogue instead, and
+// only falls back to advertisedModelIDs when that cannot be read at all.
+//
+// Keeping retired names resolvable is deliberate — an old client that still
+// asks for one gets the upstream's own answer, which is more useful than a
+// local rejection.
 
 // Capability labels reported on a ModelSpec.
 const (
@@ -42,6 +52,38 @@ const defaultContext = 200000
 
 // agentMaxOutput is the output ceiling for the agent-family models.
 const agentMaxOutput = 64000
+
+// advertisedModelIDs is what /v1/models answers when no account has a usable
+// live catalogue — every account cooling, the upstream unreachable, or a fresh
+// install with no credential yet.
+//
+// It is a snapshot of what the upstream advertised when the adapter was last
+// checked against it, so the fallback cannot offer a model the upstream has
+// already retired. The live catalogue is the real answer; this only has to be
+// honest about the moment it was taken.
+var advertisedModelIDs = []string{
+	"glm-5.3", "glm-5.3-flash", "glm-5.3-flashx", "glm-5.2", "glm-4.7-flash",
+	"deepseek-v4-pro-official", "deepseek-v4-flash-official", "deepseek-v4.1-flash",
+	"doubao-seed-2.1-pro", "doubao-seed-2.1-turbo", "doubao-seed-code", "doubao-seed-evolving",
+	"kimi-k3", "kimi-k2.7-code", "kimi-k2.6", "minimax-m3",
+	"mimo-v2.6-pro", "mimo-v2.6-flash", "qwen-3.7-plus", "qwen3.8-max", "step-5-preview",
+	"auto", "work",
+}
+
+// liveNames maps a lowercase id onto the exact spelling the live catalogue
+// published for it (DeepSeek-V4-Pro-Official, Doubao-Seed-Code, ...). A client
+// that echoes back an id from /v1/models has to reach that exact string, and
+// the built-in table cannot know about a model that was released after it.
+var liveNames sync.Map
+
+// rememberLiveName records the upstream's own spelling for an advertised id.
+func rememberLiveName(name string) {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" || trimmed == strings.ToLower(trimmed) {
+		return
+	}
+	liveNames.Store(strings.ToLower(trimmed), trimmed)
+}
 
 // catalog lists one entry per distinct upstream config name, in the order the
 // console should present them.
@@ -239,15 +281,42 @@ func buildIndex() map[string]Model {
 	return m
 }
 
-// Catalog returns every client-facing model, de-duplicated by id.
+// Catalog returns the models /v1/models advertises when the account's live
+// catalogue is unavailable. An id the table does not describe is passed
+// through by ResolveConfigName, so it is still listed with a plain spec.
 func Catalog() []Model {
-	out := make([]Model, 0, len(catalog))
-	for _, m := range catalog {
-		m.ContextLen = defaultContext
-		if m.MaxOutput == 0 {
-			m.MaxOutput = agentMaxOutput
+	out := make([]Model, 0, len(advertisedModelIDs))
+	for _, id := range advertisedModelIDs {
+		if m, ok := LookupModel(id); ok {
+			m.ID = id
+			m.ContextLen = defaultContext
+			if m.MaxOutput == 0 {
+				m.MaxOutput = agentMaxOutput
+			}
+			out = append(out, m)
+			continue
 		}
-		out = append(out, m)
+		out = append(out, Model{
+			ID: id, ConfigName: id,
+			Capabilities: []string{capChat},
+			ContextLen:   defaultContext,
+			MaxOutput:    agentMaxOutput,
+		})
+	}
+	return out
+}
+
+// defaultModelSpecs is Catalog() in the shape the upstream interface wants.
+func defaultModelSpecs() []upstream.ModelSpec {
+	models := Catalog()
+	out := make([]upstream.ModelSpec, 0, len(models))
+	for _, m := range models {
+		out = append(out, upstream.ModelSpec{
+			ID:            m.ID,
+			Source:        upstream.SourceTraeCN,
+			ContextLength: m.ContextLen,
+			Capabilities:  m.Capabilities,
+		})
 	}
 	return out
 }
@@ -262,12 +331,18 @@ func LookupModel(name string) (Model, bool) {
 }
 
 // ResolveConfigName maps a client name onto the exact upstream config name,
-// passing unknown names through unchanged.
+// passing unknown names through unchanged. A name the live catalogue taught us
+// keeps its exact spelling, which is what a client echoing back a lowercase id
+// needs.
 func ResolveConfigName(name string) string {
 	if m, ok := LookupModel(name); ok {
 		return m.ConfigName
 	}
-	return strings.TrimSpace(name)
+	trimmed := strings.TrimSpace(name)
+	if exact, ok := liveNames.Load(strings.ToLower(trimmed)); ok {
+		return exact.(string)
+	}
+	return trimmed
 }
 
 // WorkModelID is the routing id that pins the Work executor.

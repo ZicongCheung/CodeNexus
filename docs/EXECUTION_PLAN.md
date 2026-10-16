@@ -27,6 +27,7 @@
 | v1.12 | 2026-10-15 | #44 完成并入档；记录第五轮 P4 决策（纯 SQL 聚合 / 明细 10 万条 / 面板最小可用含趋势 / 与 reqlog 各司其职）；**P4 全部编码工作至此完成，仅剩真机探测项** | 张 |
 | v1.14 | 2026-10-16 | **P5 完成**：面板「设置」页（表单 + JSON 双轨）· 配置热生效（分级：55 项即时 / 6 项需重启）· 保存前快照与一键回滚 · 危险字段二次确认 · 一键重启（含监听预检）· 主题切换与视觉/无障碍增强 | 张 |
 | v1.13 | 2026-10-15 | **P4 真机探测完成**（本机已登录 Trae CN，`auto` 一键导入 uid 2561221162711115）；发现并修复 **4 个真实协议缺陷**；三线协议入口真机验收通过；新增 `debug_upstream` 调试开关；遗留 2 个带证据的开放项（§9.9） | 张 |
+| v1.17 | 2026-10-16 | **首轮本地验收发现的缺陷修复**（ADR-57/58）：① 托盘图标两个根因——`make-icons.py` 把 `BITMAPINFOHEADER` 打包成大端（`.ico` 与 `.syso` 一并修正，新增 `internal/assets` 守卫测试）、`GetModuleHandleW` 注册错 DLL 导致**托盘启动 panic 带崩整个进程**；托盘失败改为进程级兜底 + 无控制台时弹一次提示；② `/v1/models` 改为**实时目录优先**（含原生 Solo 目录与 `is_invisible_to_user` 过滤、绝不阻塞、内置快照兜底并与上游对齐）；③ 1M 档位与截断续写的**真机实测结论**入档（含"1M 的实际窗口取自账号自身目录"） | 张 |
 | v1.16 | 2026-10-16 | **§4.2 残留项收口**（ADR-53~56）：`reasoning_effort` 原生档位映射 · 1M Max 档位（含实时目录子系统，绝不虚构账号未标记的档位）· 截断自动续写（**全启发式**）· `previous_response_id` LRU 参数暴露为配置 · **TraeWork 自定义模型入站完整契约对齐**（私有累积 SSE + 连接性探测 `is_preset=false`，忽略入站 `Cloud-IDE-JWT`）；新增 §9.10 协议事实与 §9.11 实现纪实；用**差分测试**对参考逐帧比对 | 张 |
 | v1.15 | 2026-10-16 | **P6 完成**：脚本为唯一事实源的构建/发布（`build.sh` + `package.py` + `checksums.py`）· 6 平台多架构产物 · 双 Windows 产物 + 自研 Win32 托盘（五项菜单、零新增依赖）· 图标与版本元数据（纯标准库合成 + `go-winres` `.syso`）· 首次运行自动开浏览器 · CI（`ci.yml`/`release.yml`）· 多架构 Docker；追加 ADR-50~52 | 张 |
 
@@ -188,6 +189,8 @@
 | **ADR-54** | 截断自动续写的判定口径 | **对齐参考的完整启发式**（`finish_reason` 长度集合 + 未闭合代码围栏 + 括号不平衡 + 结尾字符 + 「思考很长但正文仅碎片」），并以**相似度 0.5 防重复**、**最多 3 轮**封顶；**带工具调用的回合永不续写**；流式中**中间轮不吐 `finish_reason`**（否则客户端会提前停止渲染） | 只认 `finish_reason` 的保守口径在真机上行不通：P4 已实测 SOLO 面常以 `stop` 结束。而用户拿到半截答案的体验损失，远大于多跑一轮的积分成本。因此采用参考口径，但用相似度闸门与轮数上限把"误判成本"封顶；工具回合**必须**原样交给调用方执行，续写会破坏工具协议 |
 | **ADR-55** | TraeWork 自定义模型入站的实现档位 | **完整契约对齐**（非最小可用）：三重识别（路径/头/体，且不劫持普通 OpenAI 调用）· 6 层嵌套展开 · **`config_name` 优先于展示名** · `Extra` 头解析 · 私有累积 SSE（`output`/`token_usage`/`done`/`error`，`tool_calls` 增量 + `tool_call_info` 快照）· 连接性探测 **`is_preset=false`** · **忽略入站 `Cloud-IDE-JWT`**（一律走池内凭证） | 参考实现读完后确认：入站**不是独立上游协议**，而是复用既有 dispatch 的第三种线格式，工具由**桌面客户端**执行。因此"精简版"的失败模式全是**静默的**——静默回落原生通道（连接性 advertising 成 preset）、中途停渲染（中间帧吐出 `finish_reason`）、显示空回答（干净的空回合直接 `done`）、工具参数错位（增量当全量）。逐项对齐后这些都不发生。忽略 `Cloud-IDE-JWT` 是为守住 ADR-39「池里只有一份额度真相」：旁路凭证的请求会同时从计费、冷却、熔断与用量页消失 |
 | **ADR-56** | `previous_response_id` 缓存参数的暴露方式 | **暴露为配置（`responses.*`）并标记为需重启**，默认值保持保守（TTL 3600s / 1024 条 / 2MiB / 256 条消息） | 原计划"待 Codex 实测多轮间隔分布后再定"，但阻塞发版不值得：把参数交给运维比等一个可能永远不来的样本更务实。标记**需重启**而非热生效，是因为就地更换缓存会静默丢弃客户端正在续的会话——"改一个上限导致对话断掉"不是可接受的流畅性代价 |
+| **ADR-57** | `/v1/models` 的来源与降级 | **实时目录优先、内置快照兜底、绝不阻塞**：以账号的 Remote 实时目录（agent/work/design 三档合并）为唯一列表来源，再并入原生 Solo 目录里 Remote 尚未发布的模型，并跳过上游标记 `is_invisible_to_user` 的条目；缓存过期时**后台刷新、本次用已知结果回答**；一处都没读到（全部账号冷却 / 上游不可达 / 全新安装）时回落到内置快照，且该快照必须与最近一次核对时的上游一致 | 原设计把静态表当作 `/v1/models` 的答案，理由是"账号全部冷却时也要答得出来"——这个理由只对**兜底**成立，对**主体**不成立：实测上游已上线 `mimo-v2.6-flash/pro`、下架 `mimo-v2.5/pro`，而列表还在推旧的，用户连"能不能选"都被误导。降级必须**不阻塞**：列表是一个下拉框，卡住比晚几秒更糟；而内置快照只能"如实反映核对那一刻"，否则它会变成第二份会过期的名单（这正是 ADR-53 记的目录子系统存在的意义） |
+| **ADR-58** | 桌面托盘的失败边界 | **托盘是装饰，网关是产品**：托盘创建路径整体 recover，任何失败只降级为警告；**无控制台**时额外弹一次系统提示框（面板地址 + 日志路径 + 原因），有控制台时只写日志（弹框会挡路） | 本轮实测暴露两个缺陷叠加：`GetModuleHandleW` 被注册到 `user32.dll`（实为 `kernel32`）导致 x/sys 直接 panic，而图标 DIB 头字节序错误让托盘更早就失败——**前者会把整个网关进程带走**。一个画在通知区域的图标没有资格决定服务存活；而 windowed 版没有任何可见表面，静默失败等于"双击了没反应"，所以失败必须主动说出来 |
 | **ADR-52** | 图标与版本元数据 | **图标纯标准库合成、资源用 `go-winres` 生成 `.syso` 提交入库**：`scripts/make-icons.py` 只依赖 Python 标准库从源 PNG 合成多尺寸 `.ico` → `internal/assets/`（`go:embed`）；`go-winres` 一次性生成 `cmd/codenexus/rsrc_windows_{amd64,arm64}.syso`（图标 + 版本信息 + `manifest cli`），提交后可脱离工具链重建 | 图标合成若引 Pillow 会让"重新生成图标"变成一个需要装依赖的动作；`.ico` 是简单容器，标准库足够。`.syso` 入库而非每次构建生成，是因为 `go-winres` 是需要额外安装的工具——提交产物让"没有该工具的机器"也能完整构建发布 |
 
 ### 4.1 P3 待验证项（实测结论）
@@ -1304,6 +1307,50 @@ TraeWork（Trae 桌面 Agent 客户端）相关能力是**两件方向相反的�
 
 > 注意：真实目录用的是 **`reasoning_effort`** 键（而非 `reasoning_effort_level`），正是"按对象已声明的键写入、绝不同时给两个"这条规则的适用场景；实测未出现另一个键。
 
+### 9.12 首轮本地验收发现的缺陷与修复（as-built，ADR-57/58）
+
+> 触发：用户双击 `CodeNexus.exe` 后托盘无图标、托盘功能无从验证；`CodeNexus-console.exe` 打印 `tray unavailable: tray icon: CreateIconFromResourceEx failed: The operation completed successfully.`；`/v1/models` 与 Trae2api-cn 不一致（缺 `mimo-v2.6-flash/pro`，仍是 `mimo-v2.5/pro`）。
+
+#### 缺陷 1：托盘图标的 DIB 头是大端（静默失败）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `CreateIconFromResourceEx` 返回 `HICON = 0`，且 `GetLastError` 为 0，所以日志只能说 "The operation completed successfully."，看起来完全无解 |
+| 根因 | `scripts/make-icons.py` 的 `dib_entry()` 用 `struct.pack(">IiiHHIIiiII", ...)` 打包 `BITMAPINFOHEADER`——**大端**。ICO/BMP 的 DIB 头必须小端：解出来看是 `00 00 00 28 00 00 00 20 …`（大端读 `biSize=40`/宽 32/高 64，小端读是 `671088640`） |
+| 影响面 | 同一份 `.ico` 被 `go-winres` 逐字嵌进 `rsrc_windows_{amd64,arm64}.syso`，所以**exe 在资源管理器/任务栏里的图标同样失效**（同一个根因，用户只注意到了托盘） |
+| 修复 | ① `make-icons.py` 改 `<`；② 已入库的 `.ico` 与两个 `.syso` 就地重打包 6 段 DIB 头（`.syso` 中逐字嵌有同样的载荷，可精确替换；像素数据字节序无关，不动）；③ 新增 `internal/assets/assets_test.go` 守卫（DIB 头必须小端、`biHeight=2×biWidth`、`40+像素+掩码=长度`、`biSizeImage` 自洽、`IconFromICO` 取到 32px 且仍是合法 DIB） |
+| 为什么守卫值得加 | 这是一个**静默**缺陷：构建通过、启动通过、只在"看不见"的地方失败，而且没有源代码 PNG 就无法重新生成资产（源图不在仓库里） |
+
+#### 缺陷 2：`GetModuleHandleW` 注册到 `user32.dll`（会带崩整个进程）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 修好图标后立刻浮现：`panic: Failed to find GetModuleHandleW procedure in user32.dll`，**整个网关进程退出** |
+| 根因 | `procGetModuleHandleW = user32.NewProc("GetModuleHandleW")`；`GetModuleHandleW` 属于 **`kernel32.dll`**。`x/sys` 的 `LazyProc` 找不到导出函数时直接 panic |
+| 为什么之前没暴露 | `startTray` 在 `CreateIconFromResourceEx` 就返回了，`createTrayWindow()`（调用点）从未被执行——**缺陷 1 恰好掩盖了缺陷 2** |
+| 修复 | 改为 `kernel32.NewProc(...)`；并在 `main.go` 的托盘 goroutine 加 `recover`：托盘失败一律降级为「警告 + 无控制台时弹一次原生 MessageBox（面板地址/日志路径/原因）」，绝不带走服务（ADR-58） |
+
+#### 缺陷 3：`/v1/models` 用的是硬编码静态表
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 列出的模型与上游实际不符：缺 `mimo-v2.6-flash/mimo-v2.6-pro/glm-5.3-flash/glm-5.3-flashx/glm-4.7-flash/deepseek-v4.1-flash/step-5-preview`，仍推 `mimo-v2.5/mimo-v2.5-pro/glm-4.6/kimi-k2.5/qwen3-coder` 等已下架的模型 |
+| 根因 | `model.go` 的静态表既是**名字解析索引**又被当作 `/v1/models` 的**答案**；实时目录只用于判断档位资格，从不参与出列表 |
+| 对齐参考（Trae2api-cn） | 以 Remote 实时目录（agent/work/design 三档合并）为主，再用**原生 Solo 目录** `POST {Base}/api/ide/v1/get_detail_param`（`function=solo_work_lite`）只补 Remote 尚未发布的模型，抓不到才回落内置表，按账号缓存 300s |
+| 实测（本机 uid 2561221162711115） | Remote：agent 21 / work 20 / design 5；Solo：原始 51 条 → 过滤 `usage`、`custom_models` 后 32 条 → 再按上游自己的 `is_invisible_to_user` 去掉 12 条（`aquila`/`sagitta`/`browser_use_subagent`/`computer_use_subagent`/`explore_sub_agent_v2`/`file_search_agent` 及 `DeepSeek-V4-Flash`/`DeepSeek-V4-Pro`/`glm-5`/`glm-5-turbo`/`Doubao-Seed-2.0-Code`/`seed-code-pro-0430`）后剩 20 条，**全部已被 Remote 覆盖**——即"并入 Solo"今天净增 0 个模型，但接上后上游未来若先上 Solo 就能第一时间可见 |
+| 修复（ADR-57） | ① 列表来源改为实时目录（Remote 三档合并 ∪ Solo 补集 ∪ 路由 id `auto`/`work`），跳过 `is_invisible_to_user`；② **绝不阻塞**：缓存过期时后台刷新、本次用已知结果回答；③ 一处都没读到才回落内置快照，且**快照刷新到与上游一致**（21+2 个），已下架的模型不再出现在列表里但**仍可被解析**（别名兼容，如 `gpt-4o`→`DeepSeek-V4-Pro`）；④ 从实时目录学习大小写映射（`kimi-k9-turbo`→上游的 `Kimi-K9-Turbo`） |
+
+#### 真机复验（同一天，`/tmp/probe` 独立配置 + 本机真实账号）
+
+| 项 | 结论 |
+|---|---|
+| `/v1/models` | ✅ 23 条 = 21 个实时模型 + `auto` + `work`；含 `mimo-v2.6-flash`/`mimo-v2.6-pro`，**不含** `mimo-v2.5`/`mimo-v2.5-pro`；无 `aquila` 等内部档案 |
+| 新模型可用性 | ✅ `mimo-v2.6-flash` 实测 200 返回（证明"列出来的模型一定请求得到"） |
+| 托盘 | ✅ 双产物启动后日志**无** `tray unavailable`，也无 panic（`CreateIconFromResourceEx` + `Shell_NotifyIcon(NIM_ADD)` 均成功）；点击行为仍需桌面会话人工确认（自动化会话边界的如实记录） |
+| **1M 档位** | ✅ 出站 `initial_message` 实测带 `model_selection_strategy:"max"` / `mode_type:1` / `max_mode:true` / `prompt_max_tokens:936000`。**关键细节：窗口取自账号自己的目录而非硬编码 100 万**——`glm-5.3` 为 `1000000`，`mimo-v2.6-flash` 为 `981504`（上游给该模型标的上限）。新增 `max profile model=… context=… prompt_max=… effort=…` 日志，设置是否生效从此可在控制台直接看到 |
+| **截断自动续写** | ✅ 真机触发两次并正确收尾：①"未闭合代码块"→ `auto-continue round=1` 后补出闭合围栏，最终 ```` ```go``` ````；②"结尾逗号"→ `round=1` 后**相似度闸门命中**（`auto-continue stopped on a repeated short answer`）主动停手。另如实记录一个**未触发**案例：模型把预算全花在思考上、正文只剩一个「。」——启发式认为它以句末标点收尾、不判为截断（`text_threshold` 只作用于"思考很长但正文碎片"的比率闸门，不改变句末标点的判定） |
+| 1M/续写可观测性 | ✅ 两项都从"用户无法自证"变成日志可读：1M 输出 `max profile …`，续写输出 `auto-continue round=…`；设置页说明同步补上"只对哪些模型生效""窗口取自账号目录""答案看起来完整时不会多跑" |
+
 ## 12. 测试策略
 
 | 层级 | 范围 | 手段 |
@@ -1390,7 +1437,8 @@ TraeWork（Trae 桌面 Agent 客户端）相关能力是**两件方向相反的�
 | Agent 单跳面 | `POST {Base}/api/agent/v3/llm_utils_chat` | 带工具调用的一次性流式补全 |
 | 鉴权换发 | `POST {AuthBase}/cloudide/api/v3/trae/oauth/ExchangeToken` | 刷新令牌换发访问令牌 |
 | 授权页 | `https://www.trae.cn/authorization`（回调 `http://127.0.0.1:<port>/authorize`） | 回环授权登录 |
-| 模型目录 | 适配器内置静态目录（`internal/upstream/traecn/model.go`） | `/v1/models` 合并来源；未知名透传 |
+| 模型目录（Remote 面） | `GET {RemoteBase}/models?functions=solo_agent_remote,solo_work_remote,solo_design_remote&show_custom_model=true` | `/v1/models` 的主来源：按 agent 档分组的实时目录，同时决定 1M 与 thinking 档位是否可用 |
+| 模型目录（Solo 原生面） | `POST {Base}/api/ide/v1/get_detail_param`（`function=solo_work_lite`） | 只补 Remote 尚未发布的模型；`is_invisible_to_user=true` 的内部档案不展示 |
 | 签到 | TraeWork 签到接口 | 每日签到（含 9074 风控）——P3 |
 | 用量 | `POST {UsageBase}/api/v1/commercial/get_session_usage` | 回合级积分查询 |
 

@@ -20,9 +20,13 @@ import (
 // compiling with CGO_ENABLED=0.
 
 var (
-	user32  = windows.NewLazySystemDLL("user32.dll")
-	shell32 = windows.NewLazySystemDLL("shell32.dll")
+	user32   = windows.NewLazySystemDLL("user32.dll")
+	shell32  = windows.NewLazySystemDLL("shell32.dll")
+	kernel32 = windows.NewLazySystemDLL("kernel32.dll")
 
+	// GetModuleHandleW is a kernel32 entry point; asking user32 for it panics
+	// inside x/sys before the tray ever gets a window.
+	procGetModuleHandleW         = kernel32.NewProc("GetModuleHandleW")
 	procRegisterClassExW         = user32.NewProc("RegisterClassExW")
 	procCreateWindowExW          = user32.NewProc("CreateWindowExW")
 	procDefWindowProcW           = user32.NewProc("DefWindowProcW")
@@ -31,7 +35,6 @@ var (
 	procTranslateMessage         = user32.NewProc("TranslateMessage")
 	procDispatchMessageW         = user32.NewProc("DispatchMessageW")
 	procPostMessageW             = user32.NewProc("PostMessageW")
-	procGetModuleHandleW         = user32.NewProc("GetModuleHandleW")
 	procLoadCursorW              = user32.NewProc("LoadCursorW")
 	procCreatePopupMenu          = user32.NewProc("CreatePopupMenu")
 	procAppendMenuW              = user32.NewProc("AppendMenuW")
@@ -41,6 +44,7 @@ var (
 	procSetForegroundWindow      = user32.NewProc("SetForegroundWindow")
 	procCreateIconFromResourceEx = user32.NewProc("CreateIconFromResourceEx")
 	procDestroyIcon              = user32.NewProc("DestroyIcon")
+	procMessageBoxW              = user32.NewProc("MessageBoxW")
 	procShellNotifyIconW         = shell32.NewProc("Shell_NotifyIconW")
 )
 
@@ -74,6 +78,11 @@ const (
 	idcArrow = 32512
 
 	iconVersion30000 = 0x00030000
+
+	mbOK            = 0x00000000
+	mbIconWarning   = 0x00000030
+	mbSetForeground = 0x00010000
+	mbTopmost       = 0x00040000
 )
 
 type wndClassExW struct {
@@ -140,6 +149,37 @@ var (
 	trayState  trayActions
 	trayThread uint32
 )
+
+// reportTrayFailure tells the operator that the windowed build is running
+// without its only visible surface. Without this the process is invisible: no
+// console, no icon, no window, and the log it does write lives in the data
+// directory nobody has a reason to open yet.
+//
+// A console build already shows the same warning in its log, where a modal box
+// would just be in the way.
+func reportTrayFailure(err error, consoleAddr, logPath string) {
+	if hasConsole() {
+		return
+	}
+	text := fmt.Sprintf(
+		"无法创建托盘图标，CodeNexus 已在后台继续运行。\n\n"+
+			"面板：%s\n"+
+			"日志：%s\n\n"+
+			"原因：%v",
+		consoleAddr, logPath, err,
+	)
+	title, terr := windows.UTF16PtrFromString("CodeNexus")
+	body, berr := windows.UTF16PtrFromString(text)
+	if terr != nil || berr != nil {
+		return
+	}
+	procMessageBoxW.Call(
+		0,
+		uintptr(unsafe.Pointer(body)),
+		uintptr(unsafe.Pointer(title)),
+		mbOK|mbIconWarning|mbSetForeground|mbTopmost,
+	)
+}
 
 // startTray puts the icon in the notification area and runs its message loop on
 // a dedicated OS thread, which is what Win32 requires for window ownership. It

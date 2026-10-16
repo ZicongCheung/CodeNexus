@@ -21,3 +21,7 @@ type trayActions struct {
 func startTray(trayActions) error {
 	return errors.New("tray: only available on Windows")
 }
+
+// reportTrayFailure is a no-op where the console is the only surface anyway:
+// the warning is already in the log the operator is looking at.
+func reportTrayFailure(error, string, string) {}

@@ -167,7 +167,7 @@ def dib_entry(size, rgba):
     still has to be present, and its rows are padded to four bytes.
     """
     header = struct.pack(
-        ">IiiHHIIiiII",
+        "<IiiHHIIiiII",  # BITMAPINFOHEADER is little-endian, like every DIB
         40,
         size,
         size * 2,  # XOR bitmap + AND mask

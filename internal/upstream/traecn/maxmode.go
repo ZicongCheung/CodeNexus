@@ -211,12 +211,16 @@ func (c *Client) applyModelProfile(ctx context.Context, acc *account.Account, re
 		model = enrichMaxModel(model)
 		initial["custom_model"] = model
 		applyManualCompanions(initial, entry)
-		for key, value := range maxModeWireFields(model) {
+		fields := maxModeWireFields(model)
+		for key, value := range fields {
 			initial[key] = value
 		}
-		if level != "" {
-			logx.Debugf("trae: reasoning effort model=%s level=%s (max profile)", modelName, level)
-		}
+		// The profile otherwise leaves no trace in the request log, and "did
+		// switching the setting on change anything?" is not answerable from
+		// the outside. The window is the account's own, so printing it is also
+		// how a smaller-than-expected ceiling becomes visible.
+		logx.Infof("trae: max profile model=%s context=%v prompt_max=%v effort=%s",
+			modelName, fields["context_window_size"], fields["prompt_max_tokens"], level)
 		return
 	}
 	if level == "" {

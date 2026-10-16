@@ -66,6 +66,14 @@ type stub struct {
 	// upstream that does not serve it, which is the fail-closed case.
 	catalogStatus int
 	catalogBody   string
+	// catalogGate, when set, holds the model-list response until it is closed.
+	// It is how the "listing models must not block" case plays a slow upstream.
+	catalogGate chan struct{}
+
+	// soloBody backs the native Solo catalogue, which supplies the models the
+	// Remote groups have not published yet.
+	soloStatus int
+	soloBody   string
 }
 
 func newStub(t *testing.T) *stub {
@@ -81,7 +89,23 @@ func newStub(t *testing.T) *stub {
 	mux.HandleFunc("/api/remote/v1/models", func(w http.ResponseWriter, r *http.Request) {
 		s.record(r)
 		s.mu.Lock()
-		status, body := s.catalogStatus, s.catalogBody
+		status, body, gate := s.catalogStatus, s.catalogBody, s.catalogGate
+		s.mu.Unlock()
+		if gate != nil {
+			<-gate
+		}
+		if status == 0 {
+			status = http.StatusNotFound
+		}
+		w.WriteHeader(status)
+		if status == http.StatusOK {
+			_, _ = w.Write([]byte(body))
+		}
+	})
+	mux.HandleFunc(soloCataloguePath, func(w http.ResponseWriter, r *http.Request) {
+		s.record(r)
+		s.mu.Lock()
+		status, body := s.soloStatus, s.soloBody
 		s.mu.Unlock()
 		if status == 0 {
 			status = http.StatusNotFound
