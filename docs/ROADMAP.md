@@ -108,10 +108,12 @@
 - [x] **P4 真机探测与验收**（§9.9）：三线协议入口真机通过（含 `previous_response_id` 跨轮续链）；真机抓到并修复 6 个协议缺陷；新增 `debug_upstream` 调试开关
 - [x] **工具调用闭环真机通过**（§9.9）：对照实验（起 `Trae2api-cn` 用**同一账号**实测）证明"上游不调用调用方工具"是**我方缺陷**而非上游限制 → 定位并修复 2 个 SOLO 流形状缺陷（`function_call` 扁平+分片被整通丢弃、`extra_info` 摘要污染正文）；非流式 / 流式 / 完整闭环（调用→结果→回答）均通过
 - [x] 图片输入真机链路**可用**：8×8 纯色图红/蓝反例均答对（此前 1×1 像素样本过小导致误判"上游未消费"）
-- [ ] `reasoning_effort` 映射真机探测（§4.2 待验证项）
+- [x] `reasoning_effort` 映射（§4.2）：原生档位 `light`/`high`/`extra_high`，按目录 `reasoning_effort_config` 向下夹取；仅在账号目录声明 support_thinking 时生效（ADR-53）
 - [x] 用量与积分 + 请求日志摘要迁入 SQLite（`modernc.org/sqlite`，纯 Go 无 CGO）：`internal/usagestore` + 面板「用量」页（总览卡 / 每日趋势 / 模型分布 / 可筛选明细）
-- [ ] 待探测后再定：1M Max、自动续写（见 EXECUTION_PLAN §4.2）
-- [ ] 来源 B 桌面端「自定义模型」入站兼容（纯协议翻译，无原生依赖；可选、可裁剪）
+- [x] 自动续写（§4.2）：全启发式判定 + 相似度防重复 + 轮数封顶；工具回合永不续写；流式并入同一回答（ADR-54）
+- [x] 1M Max 档位（§4.2）：`max_mode` 配置 + 实时目录确证 `max_mode=true` 才生效；绝不虚构账号未标记的档位（ADR-53）
+- [x] `previous_response_id` LRU 参数暴露为配置（`responses.*`，需重启；ADR-56）
+- [x] 来源 B 桌面端「自定义模型」入站兼容：**完整契约对齐**（三重识别 / 嵌套展开 / 私有累积 SSE / 连接性探测 `is_preset=false`；忽略入站 `Cloud-JWT` 走池内凭证）；差分测试对参考逐帧比对（ADR-55）
 
 ## P5 · 统一面板重设计 + 任务合并 + 配置热生效
 - [x] 面板视觉与交互增强（IA 骨架已于 P1b1 落地，见 ADR-27，不重构）：主题切换（亮/暗/跟随系统）、加载骨架、表格与移动端适配、`focus-visible` / `prefers-reduced-motion`；不引第三方依赖

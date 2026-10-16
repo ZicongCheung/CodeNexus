@@ -27,6 +27,7 @@
 | v1.12 | 2026-10-15 | #44 完成并入档；记录第五轮 P4 决策（纯 SQL 聚合 / 明细 10 万条 / 面板最小可用含趋势 / 与 reqlog 各司其职）；**P4 全部编码工作至此完成，仅剩真机探测项** | 张 |
 | v1.14 | 2026-10-16 | **P5 完成**：面板「设置」页（表单 + JSON 双轨）· 配置热生效（分级：55 项即时 / 6 项需重启）· 保存前快照与一键回滚 · 危险字段二次确认 · 一键重启（含监听预检）· 主题切换与视觉/无障碍增强 | 张 |
 | v1.13 | 2026-10-15 | **P4 真机探测完成**（本机已登录 Trae CN，`auto` 一键导入 uid 2561221162711115）；发现并修复 **4 个真实协议缺陷**；三线协议入口真机验收通过；新增 `debug_upstream` 调试开关；遗留 2 个带证据的开放项（§9.9） | 张 |
+| v1.16 | 2026-10-16 | **§4.2 残留项收口**（ADR-53~56）：`reasoning_effort` 原生档位映射 · 1M Max 档位（含实时目录子系统，绝不虚构账号未标记的档位）· 截断自动续写（**全启发式**）· `previous_response_id` LRU 参数暴露为配置 · **TraeWork 自定义模型入站完整契约对齐**（私有累积 SSE + 连接性探测 `is_preset=false`，忽略入站 `Cloud-IDE-JWT`）；新增 §9.10 协议事实与 §9.11 实现纪实；用**差分测试**对参考逐帧比对 | 张 |
 | v1.15 | 2026-10-16 | **P6 完成**：脚本为唯一事实源的构建/发布（`build.sh` + `package.py` + `checksums.py`）· 6 平台多架构产物 · 双 Windows 产物 + 自研 Win32 托盘（五项菜单、零新增依赖）· 图标与版本元数据（纯标准库合成 + `go-winres` `.syso`）· 首次运行自动开浏览器 · CI（`ci.yml`/`release.yml`）· 多架构 Docker；追加 ADR-50~52 | 张 |
 
 **阅读指引**
@@ -183,6 +184,10 @@
 | **ADR-49** | 遥测落库范围 | **用量/积分 + 请求日志摘要落 SQLite**（承接 ADR-11 的 `modernc.org/sqlite`，纯 Go 无 CGO）：表存的是现有窄字段（时间/来源/账号标签/模型/token/积分/耗时/状态）；**提示词、回答正文与凭证永不落库** | 面板的「用量 / 额度」页要有趋势与明细就只能落库；只落用量而请求日志留内存，会让"这条积分记在哪次请求上"在重启后失去对应关系。字段沿用既有窄集，红线不动 |
 | **ADR-50** | P6 构建与发布的事实源 | **脚本为唯一事实源，CI 只调用**：`scripts/build.sh`（`build`/`release`/`docker`/`icons`/`res`/`web`/`test`/`clean`）承载全部构建逻辑，GitHub Actions 只做 `bash scripts/build.sh test|release` 与产物上传，**不复制任何构建步骤** | "本地能出包、CI 出不了"几乎总是两份构建逻辑漂移的结果（漏 `-trimpath`、漏双产物、漏校验和）。让 CI 调用同一脚本，则"笔记本上失败"与"发布会失败"是同一件事，且任何一次构建都能在本地逐字复现。代价是脚本必须跨 Windows(Git Bash) 与 Linux 可用——因此打包用 Python 标准库（`zip`/`tarfile`）而非 shell 外部命令 |
 | **ADR-51** | Windows 桌面呈现形态 | **双产物 + 自研 Win32 托盘 + 首次运行自动开浏览器**：`CodeNexus.exe`（`-H=windowsgui`，无黑框，双击即用，日志落 `DataDir/codenexus.log`）+ `CodeNexus-console.exe`（保留控制台，排障用）；托盘用 `golang.org/x/sys/windows` 直接调 `Shell_NotifyIcon`，**零新增依赖**；首次运行（无 `config.json`）自动打开 `http://127.0.0.1:6828/panel/` | 目标用户是双击 exe 的开发者，一个常驻网关没有托盘就只能靠任务管理器停，且面板地址无处可寻。"无黑框"与"能看日志"是两个互相冲突的诉求——控制台被 `windowsgui` 关掉后无法再开，因此只能出两个产物而不是一个开关。托盘不引第三方库是因为它已经在依赖树的 `x/sys` 里就能做到，多一个库只为省几十行并不划算 |
+| **ADR-53** | 可选档位的生效条件 | **只对账号目录确证的档位生效**：`reasoning_effort` 与 1M Max 都必须先在实时模型目录里找到该模型条目（前者要求 `reasoning_effort_config.support_thinking`，后者要求 `max_mode=true`）；**目录不可达或未列出该模型时一律不改请求**；1M 还要求 agent 档（work 档无该档位）。为此新增**按账号拉取实时目录并保留原始 `custom_model`** 的缓存子系统 | 这两项都是**账号权益**而非客户端参数。若凭请求里的字段就加档位，上游要么拒绝、要么按更小的档位静默执行——后者会让用户以为在用 1M 却在用 200K，正是"绝不把未知能力假装成可用"要防的。目录另有一层必要性：`reasoning_effort` 的档位值写在 `custom_model` 对象上，而我方此前的目录是静态的，根本不携带该对象 |
+| **ADR-54** | 截断自动续写的判定口径 | **对齐参考的完整启发式**（`finish_reason` 长度集合 + 未闭合代码围栏 + 括号不平衡 + 结尾字符 + 「思考很长但正文仅碎片」），并以**相似度 0.5 防重复**、**最多 3 轮**封顶；**带工具调用的回合永不续写**；流式中**中间轮不吐 `finish_reason`**（否则客户端会提前停止渲染） | 只认 `finish_reason` 的保守口径在真机上行不通：P4 已实测 SOLO 面常以 `stop` 结束。而用户拿到半截答案的体验损失，远大于多跑一轮的积分成本。因此采用参考口径，但用相似度闸门与轮数上限把"误判成本"封顶；工具回合**必须**原样交给调用方执行，续写会破坏工具协议 |
+| **ADR-55** | TraeWork 自定义模型入站的实现档位 | **完整契约对齐**（非最小可用）：三重识别（路径/头/体，且不劫持普通 OpenAI 调用）· 6 层嵌套展开 · **`config_name` 优先于展示名** · `Extra` 头解析 · 私有累积 SSE（`output`/`token_usage`/`done`/`error`，`tool_calls` 增量 + `tool_call_info` 快照）· 连接性探测 **`is_preset=false`** · **忽略入站 `Cloud-IDE-JWT`**（一律走池内凭证） | 参考实现读完后确认：入站**不是独立上游协议**，而是复用既有 dispatch 的第三种线格式，工具由**桌面客户端**执行。因此"精简版"的失败模式全是**静默的**——静默回落原生通道（连接性 advertising 成 preset）、中途停渲染（中间帧吐出 `finish_reason`）、显示空回答（干净的空回合直接 `done`）、工具参数错位（增量当全量）。逐项对齐后这些都不发生。忽略 `Cloud-IDE-JWT` 是为守住 ADR-39「池里只有一份额度真相」：旁路凭证的请求会同时从计费、冷却、熔断与用量页消失 |
+| **ADR-56** | `previous_response_id` 缓存参数的暴露方式 | **暴露为配置（`responses.*`）并标记为需重启**，默认值保持保守（TTL 3600s / 1024 条 / 2MiB / 256 条消息） | 原计划"待 Codex 实测多轮间隔分布后再定"，但阻塞发版不值得：把参数交给运维比等一个可能永远不来的样本更务实。标记**需重启**而非热生效，是因为就地更换缓存会静默丢弃客户端正在续的会话——"改一个上限导致对话断掉"不是可接受的流畅性代价 |
 | **ADR-52** | 图标与版本元数据 | **图标纯标准库合成、资源用 `go-winres` 生成 `.syso` 提交入库**：`scripts/make-icons.py` 只依赖 Python 标准库从源 PNG 合成多尺寸 `.ico` → `internal/assets/`（`go:embed`）；`go-winres` 一次性生成 `cmd/codenexus/rsrc_windows_{amd64,arm64}.syso`（图标 + 版本信息 + `manifest cli`），提交后可脱离工具链重建 | 图标合成若引 Pillow 会让"重新生成图标"变成一个需要装依赖的动作；`.ico` 是简单容器，标准库足够。`.syso` 入库而非每次构建生成，是因为 `go-winres` 是需要额外安装的工具——提交产物让"没有该工具的机器"也能完整构建发布 |
 
 ### 4.1 P3 待验证项（实测结论）
@@ -199,9 +204,11 @@
 | 项 | 说明 |
 |---|---|
 | 图片输入 | 目录里存在 `glm-5v-turbo` 等视觉模型，但**上游是否真收多模态请求尚未验证**。P4 先真机探测：能用则纳入并做必要的编码转换，不可用则明确报错而非静默丢弃图片（"绝不把未知能力假装成可用"） |
-| 1M Max 上下文 | 参考实现有"上下文档位"概念（`max_1m` 等）并有实际生效上报字段；需要探测本站账号是否具备该档位，再决定是否暴露为模型别名或参数 |
-| 自动续写 | 参考实现按"答案被截断"自动追加轮次。是否纳入取决于上游 `finish_reason` / 停止原因是否可靠可判；不可判则不做（宁可不续写，也不要把用户的单轮变成多轮计费） |
-| `previous_response_id` 的 TTL 与容量 | ADR-47 定为内存有界 LRU，但**容量与 TTL 的具体取值**待 Codex 实测的多轮间隔分布出来后再定，先给保守默认并暴露为配置 |
+| 1M Max 上下文 | 参考实现有"上下文档位"概念并**必须先满足账号目录 `custom_model.max_mode=true`**；开启后要富化 `context_window_size`/`prompt_max_tokens`/`max_turns`/`features.context_windows` 并置 `model_selection_strategy="max"`、`mode_type=1`。**已实现**（ADR-53），仅对 agent 档且目录确证的模型生效（§9.10） |
+| 自动续写 | 参考实现的完整启发式（长度 finish_reason 集合 + 未闭合代码围栏 + 括号不平衡 + 结尾字符 + 思考后碎片）**可判**，因此纳入并全量对齐（ADR-54）；相似度与轮数封顶，工具回合永不续写 |
+| `previous_response_id` 的 TTL 与容量 | **已暴露为配置**（`responses.ttl_seconds`/`max_entries`/`max_bytes`/`max_messages`，标记需重启；ADR-56），默认维持保守值 |
+| `reasoning_effort` 映射 | 参考的原生档位是 **`light`/`high`/`extra_high`**，值写在 `custom_model.reasoning_effort[_level]` 上并按 `reasoning_effort_config.options` **向下夹取**。**已实现**（ADR-53），仅在目录声明 `support_thinking` 时生效（§9.10） |
+| 来源 B 桌面端「自定义模型」入站兼容 | 参考的 `traework_compat.py` 本体是**第三种线格式 + 私有 SSE**（非独立上游）。**已完整契约对齐**（ADR-55），并用差分测试对参考逐帧比对（§9.11） |
 
 ---
 
@@ -1221,6 +1228,69 @@ TraeWork（Trae 桌面 Agent 客户端）相关能力是**两件方向相反的�
 > **验证边界（如实记录）**：托盘与"无黑框"GUI 产物**已编译通过并产出**，但托盘图标的实际点击行为需在真机（有桌面会话）双击验证——自动化会话中不弹托盘。非 Windows 平台托盘为显式 no-op，不影响服务。
 
 ---
+
+### 9.10 §4.2 协议事实（2026-10-16 逐行核对参考后固化）
+
+**实时模型目录（`reasoning_effort` 与 1M 的前置）**
+
+- 端点：`{remote_base}/models?functions=solo_agent_remote,solo_work_remote,solo_design_remote&show_custom_model=true`（`{remote_base}` = 我方 `remote_base_url`）。
+- 形状：`data.list[]` 每项为 `{function|agent_type, models[]}`；每个 model 即**桌面客户端会原样发送的 `custom_model` 对象**。
+- 归一：`features` 可能是 JSON 字符串，需解码；`config_name`/`model_name` 缺省取 `name`；`config_source` 缺省 1。
+- **档位必须按 agent tier 分开存**：`solo_agent_remote` 带 1M 档位与思考档位配置，`solo_work_remote` 是 200K 回落档。
+- 我方实现：`internal/upstream/traecn/catalog.go`（按账号缓存，成功 10min / 失败 1min；**目录不可达或未列出该模型 = 不改请求**）。
+
+**`reasoning_effort` 档位映射**
+
+- 原生档位（由弱到强）：`light` / `high` / `extra_high`。
+- 落点：写在 `custom_model` 上——**该对象已含 `reasoning_effort_level` 键就用它并删除 `reasoning_effort`，否则用 `reasoning_effort`**；绝不同时给两个。
+- 取值来源：`reasoning_effort`/`reasoningEffort`/`thinking_effort`，或 `reasoning.effort`，或 `thinking.effort|level`，或 `thinking.budget_tokens`（<4096→light，<16384→high，否则 extra_high）。
+- 别名：none/minimal/min/low/light→light；medium/mid/normal/default/high→high；xhigh/x-high/extra_high/extra-high/very_high/max/maximum→extra_high。
+- **夹取**：在 `reasoning_effort_config.options` 里取"不超过请求档位的最强档"，都不满足则取最低档；模型未声明 `support_thinking` 则**什么也不写**。
+- work 档的条目通常没有 `reasoning_effort_config`，需**借用同模型 agent 档的该字段**再夹取。
+- 我方实现：`internal/upstream/traecn/effort.go` + `maxmode.go`（`applyModelProfile`）。
+
+**1M Max（`max_mode`）**
+
+- 仅 `agent_type == solo_agent_remote`；且**账号目录必须 `custom_model.max_mode == true`**（"Never fabricate max limits for a model the account config does not mark"）。
+- 富化 `custom_model`：`max_mode=true`、`context_window_size={default,max:[max]}`、`context_window_tokens={dev,max}`、`prompt_max_tokens`、`max_tokens`、`max_turn`、`max_turns`、`features.context_windows={enable,data{dev_context,max_context,max_context_list,dev_turns,max_turns}}`。
+- 定档 wire 字段：`model_auto_selection={strategy:"max",fallback_to_advance_model:null,entitlement_id:null}`、`model_selection_strategy:"max"`、`mode_type:1`、`context_window_size`、`prompt_max_tokens`、`max_tokens`。
+- 默认值：`1_000_000` / `936_000` / `64_000` / `200_000`（dev context）/ `500`（turns）。
+
+**截断自动续写**
+
+- 判定（任一命中即视为截断）：`finish_reason` ∈ {length, max_tokens, max_output_tokens, max_token, token_limit, model_context_window_exceeded, context_window_exceeded, context_length_exceeded}；**未闭合代码围栏**（``` 计数为奇）；**括号不平衡**（末 100 字符，含"结尾在未闭合组内"的强判据）；**结尾字符**（`,` `|｜` `...` `\` `//` `#` `-–—` `:：`）；**思考很长但正文仅碎片**（正文 ≤40 字且思考 ≥200 字且思考 ≥ 正文×4 且正文未以句末符收尾）。
+- 正文为空时：有思考内容→按 reasoning-only 续写（换一条指令）；完全没有→交给空响应重试路径，不在此续写。
+- 续写消息：**原始 messages + `{role:assistant, content:累计正文}` + `{role:user, content:续写指令}`**（每轮都用原始 messages 重建）。
+- 闸门：本轮可见文本 < 阈值（默认 200）时与上一短轮做**字符位置相似度**，> 0.5 即停止（防复读）；总轮数 ≤ 3。
+- **带工具调用的回合永不续写**。
+- 流式：并入同一响应；**中间轮不得把 `finish_reason` 交给客户端**（客户端会视为终止）；用量按轮累加，只在最后一个终帧报告一次。
+
+**TraeWork 自定义模型入站（第三种线格式）**
+
+- **本质**：不是独立上游协议——入站归一为中立请求后**复用既有 dispatch**（默认 remote），工具由**桌面客户端**执行，网关只中继。
+- 识别（三重，且明确不劫持普通 OpenAI 调用）：路径别名（`/api/ide/v2/llm_raw_chat`、`/api/agent/v3/llm_raw_chat_custom_model`、`/api/agent/v3/custom_model_proxy/chat`、`/v1/traework/chat`；连接性另有 3 个别名）／头特征（`user-agent`/`x-trae-*`/`x-bridge-transport` 含 `traework`/`trae-work`/`aha`/`custom-model`，或 `Extra`+`x-app-id`+`x-ide-function` 三件套）／体特征（`is_custom_model`、`custom_model`、`model_info.custom_model_id|is_custom_base_url`）。
+- 归一：展开最多 6 层嵌套（`data`/`params`/`request`/`payload`/`body`/`input`，**外层在前**）；消息可从 `messages`/`chat_messages`/`history` 或回退到 `query`/`prompt`/`content`（parts 数组）；**模型优先取 `config_name`（取最内层）**，其次 `model`，再 `model_name`；`session_id`/`request_id` 多路回退；`Extra` 头支持 base64 或纯 JSON。
+- 私有 SSE 形状：`event: output`（`response`=**累积全文**；`reasoning_delta` 独立旁路；`tool_calls`=**增量**；单调用时额外给 `tool_call_info{tool_call_id,name,parameters}`，**parameters 在"切片自报 id"时取累积值、在"仅参数切片"时取该切片**）→ `event: token_usage` → `event: done`（`status`/`response`/`model`/`finish_reason`/`tool_calls`（无 index）/错误时 `error` 对象）。
+- 三条硬约束：**中间帧绝不吐 `finish_reason`**（除终帧 `done`）；**干净的空回合必须转成显式 `error{code:"empty_response"}`**（否则客户端显示空回答）；**首个 delta 必须开流**（否则慢请求被判定为空响应而取消）。
+- 连接性探测：`custom_model_connectivity_check` 必须返回 **`is_preset=false`** + `is_custom_base_url=true`，否则客户端**静默切回原生通道**。
+- 我方实现：`internal/api/traework.go`（识别/归一）、`traework_wire.go`（私有 SSE 渲染）、`traework_handler.go`（回合与连接性）。**入站 `Cloud-IDE-JWT` 被忽略**，一律走池内凭证（ADR-39/ADR-55）。
+
+### 9.11 §4.2 实现纪实与验证（as-built）
+
+| 项 | 落点 | 状态 |
+|---|---|---|
+| 实时目录（保留原始 `custom_model`，按账号缓存、失败降级） | `internal/upstream/traecn/catalog.go` | ✅ |
+| `reasoning_effort` 档位映射与夹取 | `internal/upstream/traecn/effort.go` | ✅ |
+| 1M Max 富化与定档字段（目录确证才生效） | `internal/upstream/traecn/maxmode.go`、`remote.go`（`applyModelProfile`） | ✅ |
+| 截断自动续写（全启发式 + 相似度 + 轮数封顶；流式并入同一回答） | `internal/api/continuation.go`、`chatcore.go` | ✅ |
+| `responses.*` 配置暴露（需重启） | `internal/config`、`internal/configschema`、`internal/api/server.go` | ✅ |
+| TraeWork 入站（识别/归一/私有 SSE/连接性） | `internal/api/traework{,_wire,_handler}.go` | ✅ |
+| 面板配置元数据 | `internal/configschema/schema.go`（「上游·高级」组 + `responses.*`） | ✅ |
+| **差分测试**：同一输入分别喂我方 Go 与参考 Python，逐字段/逐帧比对 | `internal/api/traework_reference_test.go` + `testdata/traework_reference.json`（由 `scripts/gen-traework-fixture.py` 生成） | ✅ |
+| 单元测试：档位夹取/别名、max 资格与富化、目录失效时"不改请求"、续写判定与轮数封顶、工具回合不续写、流式续写单一终帧、入站端到端与连接性 | `internal/upstream/traecn/catalogue_test.go`、`internal/api/continuation_test.go` | ✅ |
+
+> **如实记录的偏差**：①连接性/完成帧里的**模型身份名**按各自目录解析（参考有自己的 raw-model 表，我方用网关目录），别名与 `auto` 场景下取值不同，故差分测试不对该字段做逐字比较；②推理摘要（`reasoning_delta`/`reasoning_content`）我方做**有界去重**压缩，参考另做句子级显著性抽取，属呈现旁路，差分测试排除该字段；③入站 `Cloud-IDE-JWT` **刻意不使用**（走池内凭证），与参考行为不同。
+> **验证边界**：TraeWork 客户端本身未在本机触发（无该形态的客户端），合约保真度由**对参考的差分测试**保证；1M 档位与 `reasoning_effort` 的**账号实际能力**需真机探测确认。
 
 ## 12. 测试策略
 

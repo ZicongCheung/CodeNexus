@@ -63,11 +63,15 @@ type Server struct {
 	router    *modelRouter
 	gate      *snapshotGate
 	respCache *responsesCache
-	root      http.Handler
+	// autoContinue is swapped atomically so the console can retune the
+	// truncation re-issue without a restart.
+	autoCont atomic.Pointer[config.AutoContinueConfig]
+	root     http.Handler
 }
 
 // Responses session cache defaults, mirroring the reference relay: bound both
 // the entry count and the bytes so a long chain cannot grow without limit.
+// The defaults are the fallbacks; the config section overrides them.
 const (
 	responsesCacheTTL      = time.Hour
 	responsesCacheMaxN     = 1024
@@ -75,20 +79,42 @@ const (
 	responsesCacheMaxMsgs  = 256
 )
 
+// responsesCacheLimits resolves the configured bounds, keeping the built-in
+// values for anything the configuration left at zero.
+func responsesCacheLimits(cfg config.ResponsesConfig) (time.Duration, int, int, int) {
+	ttl := time.Duration(cfg.TTLSeconds) * time.Second
+	if ttl <= 0 {
+		ttl = responsesCacheTTL
+	}
+	maxN, maxBytes, maxMsgs := cfg.MaxEntries, cfg.MaxBytes, cfg.MaxMessages
+	if maxN <= 0 {
+		maxN = responsesCacheMaxN
+	}
+	if maxBytes <= 0 {
+		maxBytes = responsesCacheMaxBytes
+	}
+	if maxMsgs <= 0 {
+		maxMsgs = responsesCacheMaxMsgs
+	}
+	return ttl, maxN, maxBytes, maxMsgs
+}
+
 // NewServer builds the HTTP handler. panel may be nil to disable the console.
 func NewServer(cfg *config.Config, p *pool.Pool, panel http.Handler, opts ...Option) *Server {
+	ttl, maxN, maxBytes, maxMsgs := responsesCacheLimits(cfg.Responses)
 	s := &Server{
 		cfg:       cfg,
 		pool:      p,
 		panel:     panel,
 		gate:      newSnapshotGate(),
-		respCache: newResponsesCache(responsesCacheTTL, responsesCacheMaxN, responsesCacheMaxBytes, responsesCacheMaxMsgs),
+		respCache: newResponsesCache(ttl, maxN, maxBytes, maxMsgs),
 	}
 	for _, o := range opts {
 		if o != nil {
 			o(s)
 		}
 	}
+	s.SetAutoContinue(cfg.Upstreams.TraeCN.AutoContinue)
 	s.router = newModelRouter(cfg.Router, p)
 
 	mux := http.NewServeMux()
@@ -99,6 +125,18 @@ func NewServer(cfg *config.Config, p *pool.Pool, panel http.Handler, opts ...Opt
 	mux.HandleFunc("/v1/messages", s.record("anthropic", s.withAuth(s.handleAnthropicMessages)))
 	mux.HandleFunc("/v1/messages/count_tokens", s.withAuth(s.handleAnthropicCountTokens))
 	mux.HandleFunc("/v1/responses", s.record("responses", s.withAuth(s.handleResponses)))
+	// The TraeWork custom-model ingress. Its own alias paths take the dialect
+	// directly; the ordinary chat URL is recognized by the detector inside
+	// handleChat, so an OpenAI caller is never hijacked. The connectivity probe
+	// is deliberately unauthenticated: the client runs it before it has been
+	// given anything to authenticate with, and it only echoes the model
+	// identity back.
+	for _, path := range traeWorkRawAliases {
+		mux.HandleFunc(path, s.record("traework", s.withAuth(s.handleTraeWorkChat)))
+	}
+	for _, path := range traeWorkConnectivityAliases {
+		mux.HandleFunc(path, s.handleTraeWorkConnectivity)
+	}
 	if panel != nil {
 		mux.Handle("/panel/", panel)
 		mux.Handle("/panel", panel)

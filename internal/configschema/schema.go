@@ -24,6 +24,12 @@ var Restart = []string{
 	"auth_dir",
 	"security.key_provider",
 	"security.encrypt_credentials",
+	// The responses cache is created with the server; re-bounding it in place
+	// would silently drop every session a client is mid-conversation on.
+	"responses.ttl_seconds",
+	"responses.max_entries",
+	"responses.max_bytes",
+	"responses.max_messages",
 }
 
 // Field describes one editable setting.
@@ -137,6 +143,18 @@ func Fields() []Field {
 		hot("upstreams.workbuddy.enabled", "上游", "启用 WorkBuddy", "是否注册 WorkBuddy / CodeBuddy 来源。", "bool"),
 		hot("upstreams.workbuddy.timeout_seconds", "上游", "WorkBuddy 超时秒数", "该来源的请求超时时间。", "int"),
 
+		// Trae高级能力（截断续写 / 1M 档位）
+		hot("upstreams.trae-cn.auto_continue.enabled", "上游·高级", "截断自动续写",
+			"上游把回答截断时，自动追加一轮把答案补完，用户仍只看到一条回答。每一轮都真实消耗积分。", "bool"),
+		hot("upstreams.trae-cn.auto_continue.max_rounds", "上游·高级", "续写最大轮数",
+			"单次请求最多追加几轮，用于封顶额外消耗。", "int"),
+		hot("upstreams.trae-cn.auto_continue.text_threshold", "上游·高级", "碎片判定阈值",
+			"「思考很长但正文只有碎片」的判定阈值（字符）。调大更容易触发续写。", "int"),
+		hot("upstreams.trae-cn.auto_continue.similarity_threshold", "上游·高级", "重复停止阈值",
+			"续写结果与上一轮的重合度超过此值时停止，避免无限循环（0~1）。", "float"),
+		hot("upstreams.trae-cn.max_mode.enabled", "上游·高级", "1M 档位",
+			"对账号目录标记为 max 的模型使用最大上下文档位（可用高级 JSON 里的 max_mode.models 限定模型白名单）。只会对账号确实拥有的档位生效，绝不虚构。", "bool"),
+
 		// Features
 		hot("features.sanitize_fingerprints", "出站改写", "清洗客户端指纹", "擦除上游内容过滤器会字面匹配的客户端提示词指纹。", "bool"),
 		hot("features.repair_tool_markup", "出站改写", "修复工具标记", "把正文里的工具调用标记还原为结构化 tool_calls。", "bool"),
@@ -170,6 +188,14 @@ func Fields() []Field {
 		hot("request_log.stdout", "可观测性", "请求日志写标准输出", "是否把每条请求摘要打印到标准输出。", "bool"),
 		hot("usage_store.enabled", "可观测性", "启用用量历史", "把请求摘要写入 SQLite 供「用量」页统计。关闭后面板只显示实时日志。", "bool"),
 		hot("usage_store.max_records", "可观测性", "用量明细保留条数", "超出后裁剪最旧的记录。约每条约 200 字节。", "int"),
+		cold("responses.ttl_seconds", "可观测性", "会话续链有效期（秒）",
+			"`previous_response_id` 对应的上下文在内存中保留多久。过期后客户端需重发全量 input；正文绝不落盘。改后需重启。", "int"),
+		cold("responses.max_entries", "可观测性", "会话续链条数上限",
+			"内存中最多保留多少个会话上下文，超出按最久未用淘汰。改后需重启。", "int"),
+		cold("responses.max_bytes", "可观测性", "会话续链字节上限",
+			"所有会话上下文占用的总字节上限。改后需重启。", "int"),
+		cold("responses.max_messages", "可观测性", "单会话消息数上限",
+			"单个会话超过此消息数后不再缓存，避免一个长对话挤掉其它会话。改后需重启。", "int"),
 
 		// Security
 		cold("security.encrypt_credentials", "安全", "加密凭证", "用信封加密封存凭证文件。开关会改变存储格式，需重启后生效。", "bool", danger),

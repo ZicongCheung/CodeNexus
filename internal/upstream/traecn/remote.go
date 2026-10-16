@@ -49,22 +49,24 @@ type chatSession struct {
 
 // createSession opens a remote conversation and returns its identifiers.
 func (c *Client) createSession(ctx context.Context, acc *account.Account, req *upstream.ChatRequest, agentType, mode, modelName string) (*chatSession, error) {
+	initial := map[string]any{
+		"chat_session_id":          "",
+		"content":                  []any{},
+		"query":                    encodeQuery(req),
+		"model_name":               modelName,
+		"agent_type":               agentType,
+		"agent_id":                 agentType,
+		"model_selection_strategy": "manual",
+		"model_config_source":      1,
+	}
+	c.applyModelProfile(ctx, acc, req, agentType, modelName, initial)
 	payload := map[string]any{
 		"mode":                mode,
 		"environment_id":      "default",
 		"env":                 "remote",
 		"auto_create_project": false,
 		"origin":              "web",
-		"initial_message": map[string]any{
-			"chat_session_id":          "",
-			"content":                  []any{},
-			"query":                    encodeQuery(req),
-			"model_name":               modelName,
-			"agent_type":               agentType,
-			"agent_id":                 agentType,
-			"model_selection_strategy": "manual",
-			"model_config_source":      1,
-		},
+		"initial_message":     initial,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

@@ -61,6 +61,11 @@ type stub struct {
 	sessionStatus  int
 	eventsStatus   int
 	recordExchange bool
+
+	// catalogBody backs the live model list. A zero status emulates an
+	// upstream that does not serve it, which is the fail-closed case.
+	catalogStatus int
+	catalogBody   string
 }
 
 func newStub(t *testing.T) *stub {
@@ -73,6 +78,19 @@ func newStub(t *testing.T) *stub {
 		exchangeToken: fakeToken("exchanged-user"),
 	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/remote/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		s.record(r)
+		s.mu.Lock()
+		status, body := s.catalogStatus, s.catalogBody
+		s.mu.Unlock()
+		if status == 0 {
+			status = http.StatusNotFound
+		}
+		w.WriteHeader(status)
+		if status == http.StatusOK {
+			_, _ = w.Write([]byte(body))
+		}
+	})
 	mux.HandleFunc("/api/remote/v1/chat_sessions", func(w http.ResponseWriter, r *http.Request) {
 		s.record(r)
 		if s.sessionStatus != 0 {

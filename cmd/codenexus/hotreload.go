@@ -31,6 +31,7 @@ var upstreamPaths = []string{
 	"upstreams.trae-cn.auto_route", "upstreams.trae-cn.timeout_seconds",
 	"upstreams.trae-cn.max_tokens", "upstreams.trae-cn.debug_upstream",
 	"upstreams.trae-cn.base_url", "upstreams.trae-cn.remote_base_url",
+	"upstreams.trae-cn.max_mode.enabled", "upstreams.trae-cn.max_mode.models",
 	"upstreams.workbuddy.enabled", "upstreams.workbuddy.timeout_seconds",
 	"features.sanitize_fingerprints", "features.repair_tool_markup",
 }

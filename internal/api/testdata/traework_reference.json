@@ -1,0 +1,445 @@
+{
+ "completion": [
+  {
+   "case": {
+    "choices": [
+     {
+      "finish_reason": "stop",
+      "message": {
+       "content": "ok"
+      }
+     }
+    ]
+   },
+   "want": {
+    "config_name": "glm-5.3",
+    "finish_reason": "stop",
+    "model": "glm-5.3",
+    "response": "ok"
+   }
+  },
+  {
+   "case": {
+    "choices": [
+     {
+      "finish_reason": "tool_calls",
+      "message": {
+       "content": "let me look",
+       "tool_calls": [
+        {
+         "function": {
+          "arguments": "{\"path\":\"a\"}",
+          "name": "read_file"
+         },
+         "id": "call_1"
+        }
+       ]
+      }
+     }
+    ]
+   },
+   "want": {
+    "config_name": "glm-5.3",
+    "finish_reason": "tool_calls",
+    "model": "glm-5.3",
+    "response": "let me look",
+    "tool_call_info": {
+     "name": "read_file",
+     "parameters": "{\"path\":\"a\"}",
+     "tool_call_id": "call_1"
+    },
+    "tool_calls": [
+     {
+      "id": "call_1",
+      "input": "{\"path\":\"a\"}",
+      "name": "read_file"
+     }
+    ]
+   }
+  }
+ ],
+ "connectivity": [
+  {
+   "case": {
+    "data": {
+     "config_name": "glm-5.3"
+    }
+   },
+   "want": {
+    "code": 0,
+    "config_name": "glm-5.3",
+    "is_custom_base_url": true,
+    "is_preset": false,
+    "max_tokens": 64000,
+    "model_id": "glm-5.3",
+    "model_name": "glm-5.3",
+    "prompt_max_tokens": 936000,
+    "provider": "trae-cn-relay",
+    "success": true
+   }
+  },
+  {
+   "case": {
+    "data": {
+     "custom_model": {
+      "config_name": "deepseek-v4-pro",
+      "provider": "acme"
+     }
+    }
+   },
+   "want": {
+    "code": 0,
+    "config_name": "deepseek-v4-pro",
+    "is_custom_base_url": true,
+    "is_preset": false,
+    "max_tokens": 64000,
+    "model_id": "deepseek-v4-pro",
+    "model_name": "DeepSeek-V4-Pro__v2",
+    "prompt_max_tokens": 936000,
+    "provider": "acme",
+    "success": true
+   }
+  },
+  {
+   "case": {
+    "data": {}
+   },
+   "want": {
+    "code": 0,
+    "config_name": "glm-5.2",
+    "is_custom_base_url": true,
+    "is_preset": false,
+    "max_tokens": 64000,
+    "model_id": "glm-5.2",
+    "model_name": "glm-5.2",
+    "prompt_max_tokens": 936000,
+    "provider": "trae-cn-relay",
+    "success": true
+   }
+  }
+ ],
+ "detection": [
+  {
+   "case": {
+    "body": {},
+    "headers": {},
+    "path": "/v1/traework/chat"
+   },
+   "want": true
+  },
+  {
+   "case": {
+    "body": {},
+    "headers": {},
+    "path": "/api/ide/v2/llm_raw_chat"
+   },
+   "want": true
+  },
+  {
+   "case": {
+    "body": {},
+    "headers": {},
+    "path": "/api/agent/v3/custom_model_proxy/chat"
+   },
+   "want": true
+  },
+  {
+   "case": {
+    "body": {},
+    "headers": {},
+    "path": "/api/agent/v3/custom_model_connectivity_check"
+   },
+   "want": true
+  },
+  {
+   "case": {
+    "body": {},
+    "headers": {
+     "user-agent": "TraeWork"
+    },
+    "path": "/v1/chat/completions"
+   },
+   "want": true
+  },
+  {
+   "case": {
+    "body": {},
+    "headers": {
+     "x-bridge-transport": "aha"
+    },
+    "path": "/v1/chat/completions"
+   },
+   "want": true
+  },
+  {
+   "case": {
+    "body": {},
+    "headers": {
+     "extra": "e",
+     "x-app-id": "a",
+     "x-ide-function": "f"
+    },
+    "path": "/v1/chat/completions"
+   },
+   "want": true
+  },
+  {
+   "case": {
+    "body": {
+     "is_custom_model": true
+    },
+    "headers": {},
+    "path": "/v1/chat/completions"
+   },
+   "want": true
+  },
+  {
+   "case": {
+    "body": {
+     "data": {
+      "custom_model": {
+       "config_name": "glm-5.3"
+      }
+     }
+    },
+    "headers": {},
+    "path": "/v1/chat/completions"
+   },
+   "want": true
+  },
+  {
+   "case": {
+    "body": {
+     "model_info": {
+      "custom_model_id": "x"
+     }
+    },
+    "headers": {},
+    "path": "/v1/chat/completions"
+   },
+   "want": true
+  },
+  {
+   "case": {
+    "body": {
+     "model": "gpt-4o"
+    },
+    "headers": {},
+    "path": "/v1/chat/completions"
+   },
+   "want": false
+  },
+  {
+   "case": {
+    "body": {
+     "agent_type": "solo_agent_remote",
+     "messages": []
+    },
+    "headers": {},
+    "path": "/v1/chat/completions"
+   },
+   "want": false
+  }
+ ],
+ "normalize": [
+  {
+   "case": {
+    "body": {
+     "data": {
+      "config_name": "glm-5.3",
+      "is_custom_model": true,
+      "messages": [
+       {
+        "content": "hi",
+        "role": "user"
+       }
+      ],
+      "stream": true,
+      "tools": [
+       {
+        "function": {
+         "name": "f",
+         "parameters": {
+          "type": "object"
+         }
+        },
+        "type": "function"
+       }
+      ]
+     }
+    },
+    "headers": {
+     "user-agent": "TraeWork"
+    },
+    "path": "/v1/traework/chat"
+   },
+   "want": {
+    "messages": [
+     {
+      "content": "hi",
+      "role": "user"
+     }
+    ],
+    "model": "glm-5.3",
+    "protocol": "traework-raw",
+    "request_id_given": true,
+    "session_id_given": true,
+    "stream": true,
+    "tool_protocol_requested": true
+   }
+  },
+  {
+   "case": {
+    "body": {
+     "params": {
+      "payload": {
+       "config_name": "deepseek-v4-pro",
+       "messages": [
+        {
+         "content": [
+          {
+           "text": "deep",
+           "type": "text"
+          }
+         ],
+         "role": 1
+        }
+       ],
+       "request_id": "r-1",
+       "session_id": "s-1",
+       "stream": false
+      }
+     }
+    },
+    "headers": {},
+    "path": "/v1/chat/completions"
+   },
+   "want": {
+    "messages": [
+     {
+      "content": [
+       {
+        "text": "deep",
+        "type": "text"
+       }
+      ],
+      "role": "user"
+     }
+    ],
+    "model": "deepseek-v4-pro",
+    "protocol": "traework-custom",
+    "request_id_given": true,
+    "session_id_given": true,
+    "stream": false,
+    "tool_protocol_requested": false
+   }
+  },
+  {
+   "case": {
+    "body": {
+     "model": "glm-5.2",
+     "query": [
+      {
+       "data": {
+        "content": "from query"
+       },
+       "type": "text"
+      }
+     ]
+    },
+    "headers": {},
+    "path": "/v1/chat/completions"
+   },
+   "want": {
+    "messages": [
+     {
+      "content": [
+       {
+        "text": "from query",
+        "type": "text"
+       }
+      ],
+      "role": "user"
+     }
+    ],
+    "model": "glm-5.2",
+    "protocol": "traework-custom",
+    "request_id_given": true,
+    "session_id_given": true,
+    "stream": true,
+    "tool_protocol_requested": false
+   }
+  },
+  {
+   "case": {
+    "body": {
+     "messages": "plain string",
+     "model_name": "glm-5.2",
+     "thinking": {
+      "budget_tokens": 20000
+     }
+    },
+    "headers": {},
+    "path": "/v1/chat/completions"
+   },
+   "want": {
+    "messages": [
+     {
+      "content": "plain string",
+      "role": "user"
+     }
+    ],
+    "model": "glm-5.2",
+    "protocol": "traework-custom",
+    "request_id_given": true,
+    "session_id_given": true,
+    "stream": true,
+    "tool_protocol_requested": false
+   }
+  }
+ ],
+ "stream": [
+  {
+   "case": [
+    "data: {\"choices\": [{\"delta\": {\"content\": \"He\"}}]}\n\n",
+    "data: {\"choices\": [{\"delta\": {\"content\": \"llo\"}}]}\n\n",
+    "data: {\"choices\": [{\"delta\": {}, \"finish_reason\": \"stop\"}], \"usage\": {\"prompt_tokens\": 3, \"completion_tokens\": 2, \"total_tokens\": 5}}\n\n",
+    "data: [DONE]\n\n"
+   ],
+   "want": [
+    "event: output\ndata: {\"response\":\"He\",\"model\":\"glm-5.3\",\"config_name\":\"glm-5.3\"}\n\n",
+    "event: output\ndata: {\"response\":\"Hello\",\"model\":\"glm-5.3\",\"config_name\":\"glm-5.3\"}\n\n",
+    "event: output\ndata: {\"response\":\"Hello\",\"model\":\"glm-5.3\",\"config_name\":\"glm-5.3\"}\n\n",
+    "event: token_usage\ndata: {\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5,\"prompt_tokens\":3,\"completion_tokens\":2,\"config_name\":\"glm-5.3\"}\n\n",
+    "event: done\ndata: {\"status\":\"completed\",\"response\":\"Hello\",\"model\":\"glm-5.3\",\"config_name\":\"glm-5.3\",\"finish_reason\":\"stop\"}\n\n"
+   ]
+  },
+  {
+   "case": [
+    "data: {\"choices\": [{\"delta\": {\"tool_calls\": [{\"index\": 0, \"id\": \"call_1\", \"function\": {\"name\": \"f\"}}]}}]}\n\n",
+    "data: {\"choices\": [{\"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"{\\\\\\\"a\\\\\\\"\"}}]}}]}\n\n",
+    "data: {\"choices\": [{\"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \":1}\"}}]}}]}\n\n",
+    "data: {\"choices\": [{\"delta\": {}, \"finish_reason\": \"tool_calls\"}]}\n\n",
+    "data: [DONE]\n\n"
+   ],
+   "want": [
+    "event: output\ndata: {\"response\":\"\",\"model\":\"glm-5.3\",\"config_name\":\"glm-5.3\",\"tool_calls\":[{\"id\":\"call_1\",\"name\":\"f\",\"input\":\"{}\",\"index\":0}],\"tool_call_info\":{\"tool_call_id\":\"call_1\",\"name\":\"f\",\"parameters\":\"{}\"}}\n\n",
+    "event: output\ndata: {\"response\":\"\",\"model\":\"glm-5.3\",\"config_name\":\"glm-5.3\",\"tool_calls\":[{\"input\":\"{\\\\\\\"a\\\\\\\"\",\"index\":0}],\"tool_call_info\":{\"tool_call_id\":\"call_1\",\"name\":\"f\",\"parameters\":\"{\\\\\\\"a\\\\\\\"\"}}\n\n",
+    "event: output\ndata: {\"response\":\"\",\"model\":\"glm-5.3\",\"config_name\":\"glm-5.3\",\"tool_calls\":[{\"input\":\":1}\",\"index\":0}],\"tool_call_info\":{\"tool_call_id\":\"call_1\",\"name\":\"f\",\"parameters\":\":1}\"}}\n\n",
+    "event: output\ndata: {\"response\":\"\",\"model\":\"glm-5.3\",\"config_name\":\"glm-5.3\"}\n\n",
+    "event: done\ndata: {\"status\":\"completed\",\"response\":\"\",\"model\":\"glm-5.3\",\"config_name\":\"glm-5.3\",\"tool_calls\":[{\"id\":\"call_1\",\"name\":\"f\",\"input\":\"{}{\\\\\\\"a\\\\\\\":1}\"}],\"finish_reason\":\"tool_calls\"}\n\n"
+   ]
+  },
+  {
+   "case": [
+    "data: {\"choices\": [{\"delta\": {}}]}\n\n",
+    "data: [DONE]\n\n"
+   ],
+   "want": [
+    "event: output\ndata: {\"response\":\"\",\"model\":\"glm-5.3\",\"config_name\":\"glm-5.3\"}\n\n",
+    "event: error\ndata: {\"code\":\"empty_response\",\"message\":\"Trae upstream returned no text or tool call\",\"request_id\":\"req-1\",\"config_name\":\"glm-5.3\"}\n\n",
+    "event: done\ndata: {\"status\":\"error\",\"response\":\"\",\"model\":\"glm-5.3\",\"config_name\":\"glm-5.3\",\"error\":{\"code\":\"empty_response\",\"message\":\"Trae upstream returned no text or tool call\"}}\n\n"
+   ]
+  }
+ ]
+}

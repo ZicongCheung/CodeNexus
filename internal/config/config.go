@@ -30,7 +30,26 @@ type Config struct {
 	Schedule      ScheduleConfig      `json:"schedule"`
 	ReqLog        ReqLogConfig        `json:"request_log"`
 	UsageStore    UsageStoreConfig    `json:"usage_store"`
+	Responses     ResponsesConfig     `json:"responses"`
 	Upstreams     UpstreamsConfig     `json:"upstreams"`
+}
+
+// ResponsesConfig bounds the in-memory `previous_response_id` cache.
+//
+// The cache only exists so a client can continue a conversation without
+// resending the whole transcript; it is deliberately never persisted (the
+// prompt text must not touch the disk). The defaults are conservative and are
+// exposed so the operator can raise them once real multi-turn spacing is known.
+type ResponsesConfig struct {
+	// TTLSeconds expires an entry. Zero/negative takes the default.
+	TTLSeconds int `json:"ttl_seconds"`
+	// MaxEntries is the entry-count ceiling; the oldest is evicted first.
+	MaxEntries int `json:"max_entries"`
+	// MaxBytes bounds the total cached payload size.
+	MaxBytes int `json:"max_bytes"`
+	// MaxMessages drops entries whose transcript grew past this many messages,
+	// so one runaway conversation cannot evict everything else.
+	MaxMessages int `json:"max_messages"`
 }
 
 // ScheduleConfig controls the built-in daily task scheduler.
@@ -234,6 +253,41 @@ type TraeCNConfig struct {
 	CLI TraeCLIConfig `json:"cli"`
 	// Checkin configures the daily check-in and its risk-control handling.
 	Checkin CheckinConfig `json:"checkin"`
+	// AutoContinue transparently finishes an answer the upstream cut short.
+	AutoContinue AutoContinueConfig `json:"auto_continue"`
+	// MaxMode pins eligible sessions to the account's 1M/agent-max profile.
+	MaxMode MaxModeConfig `json:"max_mode"`
+}
+
+// AutoContinueConfig controls the truncation re-issue.
+//
+// An upstream turn can stop mid-answer (output budget, provider disconnect, or
+// a model that spent the whole turn thinking). Re-issuing it means paying for
+// another turn, so every knob is exposed: the thresholds decide when a turn is
+// "cut off", and MaxRounds caps the cost of a loop.
+type AutoContinueConfig struct {
+	// Enabled turns the behaviour on. Defaults to true, matching the desktop
+	// client's transparent continuation.
+	Enabled bool `json:"enabled"`
+	// MaxRounds caps how many extra turns one request may cost.
+	MaxRounds int `json:"max_rounds"`
+	// TextThreshold is the minimum visible length before a "stopped after
+	// thinking" fragment counts as truncated.
+	TextThreshold int `json:"text_threshold"`
+	// SimilarityThreshold (0..1) stops a loop when the continuation repeats
+	// the answer it already produced.
+	SimilarityThreshold float64 `json:"similarity_threshold"`
+}
+
+// MaxModeConfig pins selected models to the account's largest context profile.
+//
+// It is off by default and never guesses: a model is only eligible when the
+// account's own catalogue marks it max-capable, so the relay cannot invent an
+// entitlement the account does not own.
+type MaxModeConfig struct {
+	Enabled bool `json:"enabled"`
+	// Models is an allow-list of model ids. Empty means every eligible model.
+	Models []string `json:"models,omitempty"`
 }
 
 // TraeCLIConfig configures the local-CLI executor. Zero values take the
@@ -336,6 +390,7 @@ func Default() Config {
 		},
 		ReqLog:     ReqLogConfig{RecentLimit: 100, Stdout: true},
 		UsageStore: UsageStoreConfig{Enabled: true, MaxRecords: 100000},
+		Responses:  ResponsesConfig{TTLSeconds: 3600, MaxEntries: 1024, MaxBytes: 2 << 20, MaxMessages: 256},
 		Upstreams: UpstreamsConfig{
 			WorkBuddy: WorkBuddyConfig{Enabled: true, TimeoutSeconds: 120},
 			TraeCN: TraeCNConfig{
@@ -378,6 +433,13 @@ func Default() Config {
 					BackoffExponentCap: 3,
 					RotateDeviceID:     boolPtr(true),
 				},
+				AutoContinue: AutoContinueConfig{
+					Enabled:             true,
+					MaxRounds:           3,
+					TextThreshold:       200,
+					SimilarityThreshold: 0.5,
+				},
+				MaxMode: MaxModeConfig{Enabled: false},
 			},
 		},
 	}
@@ -473,6 +535,18 @@ func (c *Config) normalize() {
 	if c.SessionSticky.TTLSeconds <= 0 {
 		c.SessionSticky.TTLSeconds = 1800
 	}
+	if c.Responses.TTLSeconds <= 0 {
+		c.Responses.TTLSeconds = 3600
+	}
+	if c.Responses.MaxEntries <= 0 {
+		c.Responses.MaxEntries = 1024
+	}
+	if c.Responses.MaxBytes <= 0 {
+		c.Responses.MaxBytes = 2 << 20
+	}
+	if c.Responses.MaxMessages <= 0 {
+		c.Responses.MaxMessages = 256
+	}
 	switch c.Security.KeyProvider {
 	case "auto", "os", "file":
 	default:
@@ -492,6 +566,21 @@ func (c *Config) normalize() {
 	}
 	if c.Upstreams.TraeCN.UpstreamMode == "" {
 		c.Upstreams.TraeCN.UpstreamMode = "auto-route"
+	}
+	// A negative round cap is meaningless; zero is respected as "no extra
+	// rounds" because Enabled already covers turning the feature off.
+	ac := &c.Upstreams.TraeCN.AutoContinue
+	if ac.MaxRounds < 0 {
+		ac.MaxRounds = 3
+	}
+	if ac.TextThreshold <= 0 {
+		ac.TextThreshold = 200
+	}
+	if ac.SimilarityThreshold < 0 {
+		ac.SimilarityThreshold = 0
+	}
+	if ac.SimilarityThreshold > 1 {
+		ac.SimilarityThreshold = 1
 	}
 	c.normalizeTrae()
 	c.normalizeSchedule()

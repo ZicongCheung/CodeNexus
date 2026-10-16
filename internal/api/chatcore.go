@@ -11,6 +11,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -160,6 +161,7 @@ func (s *Server) runChat(w http.ResponseWriter, r *http.Request, t *turn) {
 		resp, cerr := u.Chat(r.Context(), lease.Account, t.Request)
 		if cerr == nil {
 			lease.Succeed()
+			resp = s.continueNonStream(r.Context(), u, lease.Account, t.Request, resp)
 			finishNonStream(hint, t, w, resp)
 			s.settleCredits(hint, u, lease.Account)
 			return
@@ -167,6 +169,7 @@ func (s *Server) runChat(w http.ResponseWriter, r *http.Request, t *turn) {
 		if s.tryRefresh(r.Context(), lease.Account, cerr, refreshed) {
 			if resp, cerr = u.Chat(r.Context(), lease.Account, t.Request); cerr == nil {
 				lease.Succeed()
+				resp = s.continueNonStream(r.Context(), u, lease.Account, t.Request, resp)
 				finishNonStream(hint, t, w, resp)
 				s.settleCredits(hint, u, lease.Account)
 				return
@@ -197,6 +200,69 @@ func finishNonStream(hint *recHint, t *turn, w http.ResponseWriter, resp *upstre
 	t.Result(w, resp)
 }
 
+// continueNonStream re-issues a turn the upstream cut short and folds the extra
+// rounds into the one answer the caller asked for.
+//
+// Each round is a real upstream turn, so the token counts are summed and the
+// round count is logged: the caller is charged for what it caused, and the
+// console's usage page shows the real total rather than only the last round.
+// A round that fails is not fatal — the rounds already produced are a usable
+// answer, and discarding them would waste what the caller already paid for.
+func (s *Server) continueNonStream(ctx context.Context, u upstream.Upstream, acc *account.Account, req *upstream.ChatRequest, resp *upstream.ChatResponse) *upstream.ChatResponse {
+	cfg := s.autoContinue()
+	if !cfg.Enabled || cfg.MaxRounds <= 0 || resp == nil {
+		return resp
+	}
+	total := resp.Content
+	lastShort := ""
+	for round := 1; round <= cfg.MaxRounds; round++ {
+		hasTools := len(resp.ToolCalls) > 0
+		roundReasoning := resp.ReasoningContent
+		truncated := looksTruncated(total, resp.FinishReason, roundReasoning, hasTools)
+		reasoningOnly := looksReasoningOnly(resp.Content, roundReasoning, hasTools)
+		if !truncated && !reasoningOnly {
+			break
+		}
+		roundText := strings.TrimSpace(resp.Content)
+		if len([]rune(roundText)) < cfg.TextThreshold && lastShort != "" &&
+			continuationSimilarity(lastShort, roundText) > cfg.SimilarityThreshold {
+			logx.Warnf("auto-continue stopped on a repeated short answer")
+			break
+		}
+		if len([]rune(roundText)) < cfg.TextThreshold {
+			lastShort = roundText
+		}
+		next := *req
+		next.Messages = continuedMessages(req.Messages, total, reasoningOnly)
+		extra, err := u.Chat(ctx, acc, &next)
+		if err != nil || extra == nil {
+			logx.Warnf("auto-continue round %d failed: %v", round, err)
+			break
+		}
+		logx.Infof("auto-continue round=%d reason=%s finish=%s chars=%d",
+			round, continueReason(reasoningOnly), extra.FinishReason, len(extra.Content))
+		total += extra.Content
+		resp.Content = total
+		resp.FinishReason = extra.FinishReason
+		resp.ReasoningContent = extra.ReasoningContent
+		resp.ToolCalls = extra.ToolCalls
+		resp.TurnID = extra.TurnID
+		resp.CreditsConsumed = extra.CreditsConsumed
+		resp.CreditsSource = extra.CreditsSource
+		resp.Usage.PromptTokens += extra.Usage.PromptTokens
+		resp.Usage.CompletionTokens += extra.Usage.CompletionTokens
+		resp.Usage.TotalTokens += extra.Usage.TotalTokens
+	}
+	return resp
+}
+
+func continueReason(reasoningOnly bool) string {
+	if reasoningOnly {
+		return "reasoning-only"
+	}
+	return "truncated"
+}
+
 // runStream runs one streaming attempt. It reports whether anything reached the
 // client, which decides whether a retry on another account is still possible,
 // and the upstream turn id when the stream carried one.
@@ -221,30 +287,115 @@ func (s *Server) runStream(w http.ResponseWriter, r *http.Request, t *turn, u up
 		}()
 	}
 
+	var (
+		answer      strings.Builder // everything the caller has been shown
+		roundText   strings.Builder // the round being read, for the loop guard
+		roundThink  strings.Builder
+		sawToolCall bool
+		finish      string
+		usage       upstream.Usage
+		sawUsage    bool
+		pending     upstream.StreamDelta // a bookkeeping-only tail, held back
+	)
+
 	emit := func(d upstream.StreamDelta) error {
 		if turnID == "" && d.TurnID != "" {
 			turnID = d.TurnID
 		}
-		// A settlement-only delta tells us what to bill against and carries
-		// nothing the client should see.
+		if d.FinishReason != "" {
+			finish = d.FinishReason
+		}
+		if d.Usage != nil {
+			usage.PromptTokens += d.Usage.PromptTokens
+			usage.CompletionTokens += d.Usage.CompletionTokens
+			usage.TotalTokens += d.Usage.TotalTokens
+			sawUsage = true
+		}
+		if len(d.ToolCalls) > 0 {
+			sawToolCall = true
+		}
+		if d.Content != "" {
+			answer.WriteString(d.Content)
+			roundText.WriteString(d.Content)
+		}
+		if d.ReasoningContent != "" {
+			roundThink.WriteString(d.ReasoningContent)
+		}
+		// A delta that only carries the turn's bookkeeping is withheld: if the
+		// turn turns out to be truncated it is not the last one, and a
+		// finish_reason reaching the client mid-answer reads as "the model is
+		// done" — the caller would stop reading a stream that is still going.
 		if !renderable(d) {
+			pending = d
 			return nil
 		}
 		return op.Emit(d)
 	}
 
-	err := u.ChatStream(r.Context(), acc, t.Request, emit)
+	cfg := s.autoContinue()
+	req := t.Request
+	lastShort := ""
+	for round := 1; ; round++ {
+		err := u.ChatStream(r.Context(), acc, req, emit)
+		if err != nil {
+			if stop != nil {
+				close(stop)
+			}
+			out, started := op.Abort()
+			if !started {
+				return false, turnID, err
+			}
+			out.Fail(err)
+			return true, turnID, err
+		}
+		if !cfg.Enabled || round > cfg.MaxRounds {
+			break
+		}
+		truncated := looksTruncated(answer.String(), finish, roundThink.String(), sawToolCall)
+		reasoningOnly := looksReasoningOnly(roundText.String(), roundThink.String(), sawToolCall)
+		if !truncated && !reasoningOnly {
+			break
+		}
+		current := strings.TrimSpace(roundText.String())
+		if len([]rune(current)) < cfg.TextThreshold && lastShort != "" &&
+			continuationSimilarity(lastShort, current) > cfg.SimilarityThreshold {
+			logx.Warnf("auto-continue stopped on a repeated short answer")
+			break
+		}
+		if len([]rune(current)) < cfg.TextThreshold {
+			lastShort = current
+		}
+		logx.Infof("auto-continue round=%d reason=%s finish=%s chars=%d",
+			round, continueReason(reasoningOnly), finish, roundText.Len())
+		next := *t.Request
+		next.Messages = continuedMessages(t.Request.Messages, answer.String(), reasoningOnly)
+		req = &next
+		roundText.Reset()
+		roundThink.Reset()
+		finish = ""
+		// Drop the round's own tail too: the frame that ends the whole answer
+		// has to describe the last round, not the one that was cut short.
+		pending = upstream.StreamDelta{}
+	}
 	if stop != nil {
 		close(stop)
 	}
-
-	if err != nil {
-		out, started := op.Abort()
-		if !started {
-			return false, turnID, err
+	// The withheld tail is emitted once, after the last round, so the client
+	// sees exactly one terminal frame carrying the summed usage.
+	if pending.FinishReason != "" || pending.Usage != nil {
+		final := pending
+		final.Content, final.ReasoningContent, final.ToolCalls = "", "", nil
+		if sawUsage {
+			final.Usage = &usage
 		}
-		out.Fail(err)
-		return true, turnID, err
+		if err := op.Emit(final); err != nil {
+			out, started := op.Abort()
+			if !started {
+				return false, turnID, err
+			}
+			out.Fail(err)
+			return true, turnID, err
+		}
 	}
 	out, started := op.Finish()
 	if !started {

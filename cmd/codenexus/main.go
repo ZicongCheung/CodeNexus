@@ -259,6 +259,11 @@ func run(configPath string, opts runOptions) error {
 				func() { srv.SetRouterConfig(next.Router) }, "模型路由"},
 			{[]string{"request_log.recent_limit", "request_log.stdout"},
 				func() { recorder.Reconfigure(next.ReqLog.RecentLimit, next.ReqLog.Stdout) }, "请求日志"},
+			{[]string{"upstreams.trae-cn.auto_continue.enabled",
+				"upstreams.trae-cn.auto_continue.max_rounds",
+				"upstreams.trae-cn.auto_continue.text_threshold",
+				"upstreams.trae-cn.auto_continue.similarity_threshold"},
+				func() { srv.SetAutoContinue(next.Upstreams.TraeCN.AutoContinue) }, "截断自动续写"},
 			{[]string{"usage_store.max_records"}, func() {
 				if usage != nil {
 					usage.SetMaxRecords(next.UsageStore.MaxRecords)
@@ -591,6 +596,10 @@ func registerUpstreams(cfg *config.Config) {
 			DebugUpstream:  cfg.Upstreams.TraeCN.DebugUpstream,
 			AutoRoute:      cfg.Upstreams.TraeCN.AutoRoute,
 			LocalDataDirs:  cfg.Upstreams.TraeCN.LocalDataDirs,
+			MaxMode: traecn.MaxModeConfig{
+				Enabled: cfg.Upstreams.TraeCN.MaxMode.Enabled,
+				Models:  cfg.Upstreams.TraeCN.MaxMode.Models,
+			},
 			CLI: traecn.CLIConfig{
 				Command:         cfg.Upstreams.TraeCN.CLI.Command,
 				Args:            cfg.Upstreams.TraeCN.CLI.Args,

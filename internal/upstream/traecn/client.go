@@ -94,6 +94,10 @@ type Config struct {
 	UsageBaseURL string
 	// Checkin tunes the daily check-in and its risk-control handling.
 	Checkin CheckinConfig
+	// MaxMode pins eligible sessions to the account's largest context profile.
+	// It is honoured only when the account's own catalogue marks the model
+	// max-capable, so the relay never invents an entitlement.
+	MaxMode MaxModeConfig
 	// DebugUpstream dumps every raw upstream event into the debug log. It is a
 	// troubleshooting aid for protocol drift, never a default.
 	DebugUpstream bool
@@ -111,6 +115,7 @@ type Client struct {
 	login  *webLoginHost
 	cli    *cliRunner
 	ck     *checkinState
+	cat    modelCatalogue
 }
 
 // New builds an adapter, applying defaults for zero-valued fields.

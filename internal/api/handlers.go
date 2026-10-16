@@ -107,6 +107,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error(), "")
 		return
 	}
+	// A TraeWork custom model may post to the ordinary chat URL, but its
+	// headers and body are distinct enough to route it without changing what
+	// an OpenAI caller gets.
+	if looksLikeTraeWork(r.URL.Path, r.Header, body) {
+		s.serveTraeWork(w, r, body)
+		return
+	}
 	t, err := parseChatTurn(r, body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error(), "")
