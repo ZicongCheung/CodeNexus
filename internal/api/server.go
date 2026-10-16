@@ -66,7 +66,10 @@ type Server struct {
 	// autoContinue is swapped atomically so the console can retune the
 	// truncation re-issue without a restart.
 	autoCont atomic.Pointer[config.AutoContinueConfig]
-	root     http.Handler
+	// stall is the stream watchdog's silence bound, swapped atomically for the
+	// same reason: it is retuned from the console.
+	stall atomic.Pointer[time.Duration]
+	root  http.Handler
 }
 
 // Responses session cache defaults, mirroring the reference relay: bound both
@@ -115,6 +118,7 @@ func NewServer(cfg *config.Config, p *pool.Pool, panel http.Handler, opts ...Opt
 		}
 	}
 	s.SetAutoContinue(cfg.Upstreams.TraeCN.AutoContinue)
+	s.SetStreamStall(cfg.Stream.StallSeconds)
 	s.router = newModelRouter(cfg.Router, p)
 
 	mux := http.NewServeMux()

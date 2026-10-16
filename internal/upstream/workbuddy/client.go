@@ -206,7 +206,7 @@ func (c *Client) Chat(ctx context.Context, acc *account.Account, req *upstream.C
 	if err := json.NewDecoder(resp.Body).Decode(&cc); err != nil {
 		return nil, err
 	}
-	out := &upstream.ChatResponse{ID: cc.ID, Model: cc.Model}
+	out := &upstream.ChatResponse{ID: cc.ID, Model: cc.Model, Surface: "cloud"}
 	if len(cc.Choices) > 0 {
 		out.Content = cc.Choices[0].Message.Content
 		out.ReasoningContent = cc.Choices[0].Message.ReasoningContent

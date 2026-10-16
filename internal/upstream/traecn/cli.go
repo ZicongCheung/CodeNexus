@@ -328,7 +328,7 @@ func (c *Client) cliChat(ctx context.Context, req *upstream.ChatRequest, write f
 	prompt := cliPrompt(req, cfg)
 	inv := c.cliInvocation(cfg, command, req, prompt, usesTools(req))
 
-	out := &upstream.ChatResponse{Model: req.Model}
+	out := &upstream.ChatResponse{Model: req.Model, Surface: "cli"}
 	st := &snapshotState{emit: write}
 	tools := &toolStream{}
 

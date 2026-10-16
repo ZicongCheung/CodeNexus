@@ -2,6 +2,12 @@
   // CodeNexus console. Sources are a first-class concept: every account carries
   // the upstream it belongs to, and the whole UI is grouped around that.
   import Settings from './Settings.svelte'
+  import Icon from './ui/Icon.svelte'
+  import ToastHost from './ui/ToastHost.svelte'
+  import ConfirmHost from './ui/ConfirmHost.svelte'
+  import { toastOk, toastErr, pushToast } from './ui/toast.svelte.js'
+  import { ask } from './ui/confirm.svelte.js'
+  import { t } from './strings.js'
 
   const API = '/panel/api'
 
@@ -11,6 +17,7 @@
   let banner = $state('')
 
   let tab = $state('accounts')
+  let scrolled = $state(false)
 
   // ── theme ───────────────────────────────────────────────────────────────
   // The console follows the system by default but remembers an explicit choice,
@@ -77,7 +84,6 @@
   let expanded = $state({})
   let accountTasks = $state({}) // uid -> { loading, tasks, error }
   let opBusy = $state('') // "<uid>:<op>" for one account, "<op>" for a batch
-  let taskMsg = $state('')
   let queue = $state([])
   let queueBusy = $state(false)
   let results = $state({}) // uid -> last growth run
@@ -98,7 +104,6 @@
   let usageMsg = $state('')
   let logTimer = null
 
-  const sources = $derived(session?.sources ?? ['workbuddy'])
   // Only offer a flow the backend can actually serve: a source that cannot run
   // an interactive login must not appear in the device picker, and vice versa.
   const deviceSources = $derived(session?.device_sources ?? [])
@@ -115,12 +120,28 @@
     localSources.includes(localSource) ? localSource : localSources[0] ?? '',
   )
   const tokenPlaceholder = $derived(
-    manualSource === 'trae-cn' ? 'Cloud-IDE-JWT…' : '访问令牌',
+    manualSource === 'trae-cn' ? 'Cloud-IDE-JWT…' : t.add.token.placeholder,
   )
   const modeHint = $derived(manualSource === 'trae-cn' ? 'Cloud-IDE-JWT' : '')
 
   const inlinePlaceholder =
     '[{"source":"workbuddy","uid":"...","access_token":"...","refresh_token":"..."}]'
+
+  const tabs = [
+    { id: 'accounts', label: t.nav.accounts, icon: 'accounts' },
+    { id: 'tasks', label: t.nav.tasks, icon: 'tasks' },
+    { id: 'usage', label: t.nav.usage, icon: 'usage' },
+    { id: 'logs', label: t.nav.logs, icon: 'logs' },
+  ]
+  const accessTabs = [
+    { id: 'add', label: t.nav.add, icon: 'add' },
+    { id: 'import', label: t.nav.import, icon: 'importAcc' },
+  ]
+  const themeOptions = [
+    { value: 'system', label: t.nav.theme.system, icon: 'monitor' },
+    { value: 'light', label: t.nav.theme.light, icon: 'sun' },
+    { value: 'dark', label: t.nav.theme.dark, icon: 'moon' },
+  ]
 
   async function api(path, options = {}) {
     const res = await fetch(API + path, {
@@ -176,21 +197,29 @@
   })
 
   function health(acc) {
-    if (!acc.enabled) return { cls: 'off', text: '已停用' }
-    if (acc.broken) return { cls: 'bad', text: '熔断' }
-    if (acc.cooling) return { cls: 'warn', text: '冷却中' }
-    if (acc.healthy) return { cls: 'ok', text: '健康' }
-    return { cls: 'idle', text: '待命' }
+    if (!acc.enabled) return { cls: 'off', text: t.health.off }
+    if (acc.broken) return { cls: 'bad', text: t.health.bad }
+    if (acc.cooling) return { cls: 'warn', text: t.health.warn }
+    if (acc.healthy) return { cls: 'ok', text: t.health.ok }
+    return { cls: 'idle', text: t.health.idle }
   }
 
   function fmtTime(sec) {
-    if (!sec) return '—'
+    if (!sec) return t.common.dash
     const d = new Date(sec * 1000)
     return d.toLocaleString()
   }
 
   async function removeAccount(acc) {
-    if (!confirm(`移除账号 ${acc.label || acc.uid}（${acc.source}）？`)) return
+    const label = acc.label || acc.uid
+    const ok = await ask({
+      title: t.common.remove,
+      body: t.accounts.removeConfirm(label, acc.source),
+      detail: acc.uid,
+      confirmLabel: t.common.remove,
+      danger: true,
+    })
+    if (!ok) return
     try {
       await api('/accounts/remove', {
         method: 'POST',
@@ -198,8 +227,9 @@
       })
       await loadAccounts()
       await loadSession()
+      toastOk(t.accounts.removeDone(label))
     } catch (err) {
-      banner = err.message
+      toastErr(err.message)
     }
   }
 
@@ -245,7 +275,7 @@
       if (body.done) {
         stopPolling()
         authPhase = 'done'
-        authMsg = `已添加：${body.label || body.uid}`
+        authMsg = t.add.device.added(body.label || body.uid)
         authState = ''
         await refresh()
       }
@@ -267,7 +297,7 @@
   async function submitToken() {
     if (!tokenValue.trim() && !tokenRefresh.trim()) {
       tokenPhase = 'error'
-      tokenMsg = '请粘贴令牌，或填写刷新令牌'
+      tokenMsg = t.add.token.needToken
       return
     }
     tokenPhase = 'running'
@@ -284,7 +314,7 @@
         }),
       })
       tokenPhase = 'done'
-      tokenMsg = `已添加：${body.label || body.uid}`
+      tokenMsg = t.add.token.added(body.label || body.uid)
       tokenValue = ''
       tokenRefresh = ''
       tokenUid = ''
@@ -308,8 +338,11 @@
       const imported = body.imported ?? []
       localPhase = 'done'
       localMsg = imported.length
-        ? `已导入 ${imported.length} 个账号：${imported.map((a) => a.label || a.uid).join('、')}`
-        : '本机未找到可导入的账号'
+        ? t.add.local.imported(
+            imported.length,
+            imported.map((a) => a.label || a.uid).join('、'),
+          )
+        : t.add.local.none
       await refresh()
     } catch (err) {
       localPhase = 'error'
@@ -326,7 +359,7 @@
     if (importMode === 'inline') {
       if (!importText.trim()) {
         importPhase = 'error'
-        importMsg = '请粘贴账号 JSON'
+        importMsg = t.importAcc.needJSON
         return
       }
       let parsed
@@ -334,21 +367,21 @@
         parsed = JSON.parse(importText)
       } catch (err) {
         importPhase = 'error'
-        importMsg = 'JSON 解析失败：' + err.message
+        importMsg = t.importAcc.jsonBad(err.message)
         return
       }
       payload = { accounts: Array.isArray(parsed) ? parsed : parsed.accounts || [parsed] }
     } else if (importMode === 'path') {
       if (!importPath.trim()) {
         importPhase = 'error'
-        importMsg = '请输入服务器上的文件路径'
+        importMsg = t.importAcc.needPath
         return
       }
       payload = { path: importPath.trim() }
     } else {
       if (!importBundle.trim() || !importPass) {
         importPhase = 'error'
-        importMsg = '请粘贴加密包并填写口令'
+        importMsg = t.importAcc.needBundle
         return
       }
       payload = { bundle: importBundle.trim(), passphrase: importPass }
@@ -360,7 +393,7 @@
       })
       importResult = body
       importPhase = 'done'
-      importMsg = `导入 ${body.imported}/${body.total} 个账号`
+      importMsg = t.importAcc.done(body.imported, body.total)
       await refresh()
     } catch (err) {
       importPhase = 'error'
@@ -369,6 +402,7 @@
   }
 
   function switchTab(name) {
+    if (tab !== name) window.scrollTo({ top: 0 })
     tab = name
     if (name !== 'add') {
       resetAuth()
@@ -387,11 +421,7 @@
   }
 
   // ── task center ──────────────────────────────────────────────────────────
-  const classLabels = {
-    account: '账号原生',
-    desktop: '桌面端事件链',
-    mini_program: '小程序事件链',
-  }
+  const classLabels = t.tasks.catalog.classes
   const classOrder = ['account', 'desktop', 'mini_program']
 
   const catalogGroups = $derived.by(() => {
@@ -444,13 +474,14 @@
 
   // guard serialises the console's write operations: one at a time, with the
   // button labelled after the key, so a double click cannot start two sweeps.
+  // Failures surface as a toast, because a sweep that partially failed is not
+  // something to leave sitting in a corner of one card.
   async function guard(key, fn) {
     opBusy = key
-    taskMsg = ''
     try {
       await fn()
     } catch (err) {
-      taskMsg = err.message
+      toastErr(err.message)
     } finally {
       opBusy = ''
     }
@@ -462,7 +493,7 @@
         method: 'POST',
         body: JSON.stringify(code ? { task_code: code } : { all: true }),
       })
-      taskMsg = code ? `已接取 ${code}` : '已接取全部可接取任务'
+      toastOk(code ? t.tasks.msg.accepted(code) : t.tasks.msg.acceptedAll)
       await loadAccountTasks(acc.uid)
     })
   }
@@ -473,7 +504,10 @@
         method: 'POST',
         body: JSON.stringify({ task_code: code }),
       })
-      taskMsg = `${code} 领取成功：+${body.credit} 额度${body.energy ? ` +${body.energy} 能量` : ''}`
+      toastOk(
+        t.tasks.msg.claimed(code, body.credit) +
+          (body.energy ? ` +${body.energy} 能量` : ''),
+      )
       await loadAccountTasks(acc.uid)
       await loadAccounts()
     })
@@ -486,7 +520,7 @@
         body: JSON.stringify({ task_code: code }),
       })
       results = { ...results, [acc.uid]: [res] }
-      taskMsg = describeResult(res)
+      toastOk(describeResult(res))
       await loadAccountTasks(acc.uid)
       await loadAccounts()
     })
@@ -496,7 +530,7 @@
     await guard(`${acc.uid}:auto`, async () => {
       const body = await api(`/accounts/${encodeURIComponent(acc.uid)}/tasks/auto_all`, { method: 'POST' })
       results = { ...results, [acc.uid]: body.results ?? [] }
-      taskMsg = summarize(body.results ?? [])
+      toastOk(summarize(body.results ?? []))
       await loadAccountTasks(acc.uid)
       await loadAccounts()
     })
@@ -509,11 +543,10 @@
       if (op === 'checkin') {
         // The sweep logs a failure and moves on, so report what happened: a
         // rate-limited check-in stays open and the automatic retry picks it up.
-        taskMsg = body.checkin_done
-          ? `${who}：今日签到完成`
-          : `${who}：签到未生效（上游限流或设备风控），已排入自动重试`
+        if (body.checkin_done) toastOk(t.tasks.msg.checkinDone(who))
+        else pushToast(t.tasks.msg.checkinRetry(who), 'warn')
       } else {
-        taskMsg = `${who}：${label} 已完成`
+        toastOk(t.tasks.msg.opDone(who, label))
       }
       await loadAccounts()
       if (expanded[acc.uid]) await loadAccountTasks(acc.uid)
@@ -525,8 +558,8 @@
       await api(`/batch/${op}`, { method: 'POST' })
       // A batch sweep reports nothing per account; the honest summary names the
       // automatic retry instead of claiming every account succeeded.
-      taskMsg =
-        op === 'checkin_all' ? '全部签到已执行；未生效的会按退避自动重试' : `${label} 执行完成`
+      if (op === 'checkin_all') pushToast(t.tasks.msg.batchCheckin, 'warn')
+      else toastOk(t.tasks.msg.batchDone(label))
       await loadAccounts()
       await reloadExpanded()
       await loadQueue()
@@ -539,7 +572,7 @@
       const body = await api('/tasks/queue')
       queue = body.queue ?? []
     } catch (err) {
-      taskMsg = err.message
+      toastErr(err.message)
     } finally {
       queueBusy = false
     }
@@ -547,18 +580,17 @@
 
   async function runQueue() {
     queueBusy = true
-    taskMsg = ''
     try {
       const body = await api('/tasks/run_queue', { method: 'POST' })
       for (const row of body.accounts ?? []) {
         results = { ...results, [row.uid]: row.results ?? [] }
       }
-      taskMsg = '队列执行完成'
+      toastOk(t.tasks.msg.queueDone)
       await loadQueue()
       await reloadExpanded()
       await loadAccounts()
     } catch (err) {
-      taskMsg = err.message
+      toastErr(err.message)
     } finally {
       queueBusy = false
     }
@@ -567,31 +599,32 @@
   function describeResult(r) {
     const parts = [`${r.task_code}：${r.status}`]
     if (r.progress_before || r.progress_after) {
-      parts.push(`${r.progress_before || '—'} → ${r.progress_after || '—'}`)
+      parts.push(`${r.progress_before || t.common.dash} → ${r.progress_after || t.common.dash}`)
     }
-    if (r.claimed) parts.push(`已领奖 +${r.credit}`)
+    if (r.claimed) parts.push(t.tasks.result.claimed(r.credit))
     if (r.message) parts.push(r.message)
     return parts.join(' · ')
   }
 
   function summarize(list) {
-    if (!list.length) return '没有可执行的任务'
+    if (!list.length) return t.tasks.result.none
     const done = list.filter((r) => r.status === 'done').length
     const skipped = list.filter((r) => r.status === 'skipped').length
     const failed = list.filter((r) => r.status === 'error').length
     const credit = list.reduce((n, r) => n + (r.credit || 0), 0)
-    return `执行 ${list.length} 项：${done} 完成 / ${skipped} 跳过 / ${failed} 失败${credit ? `，共 +${credit} 额度` : ''}`
+    return t.tasks.result.summary(list.length, done, skipped, failed, credit)
   }
 
-  function taskState(t) {
-    if (t.claimed) return { cls: 'off', text: '已领取' }
-    if (t.locked) return { cls: 'idle', text: '未解锁' }
-    const cur = Number(t.current || 0)
-    const target = Number(t.target || 0)
-    if (t.claimable || (target > 0 && cur >= target)) return { cls: 'ok', text: '可领取' }
-    if (t.accept_status === 'completed') return { cls: 'ok', text: '已完成' }
-    if (cur > 0) return { cls: 'warn', text: '进行中' }
-    return { cls: 'idle', text: '待完成' }
+  function taskState(task) {
+    const st = t.tasks.state
+    if (task.claimed) return { cls: 'off', text: st.claimed }
+    if (task.locked) return { cls: 'idle', text: st.locked }
+    const cur = Number(task.current || 0)
+    const target = Number(task.target || 0)
+    if (task.claimable || (target > 0 && cur >= target)) return { cls: 'ok', text: st.claimable }
+    if (task.accept_status === 'completed') return { cls: 'ok', text: st.completed }
+    if (cur > 0) return { cls: 'warn', text: st.inProgress }
+    return { cls: 'idle', text: st.pending }
   }
 
   // ── request log ──────────────────────────────────────────────────────────
@@ -614,7 +647,7 @@
       metrics = m
       logEvents = l.recent ?? []
     } catch (err) {
-      taskMsg = err.message
+      banner = err.message
     }
   }
 
@@ -671,941 +704,1289 @@
     return Number(n || 0).toFixed(2)
   }
 
-  function fmtDateTime(t) {
-    if (!t) return '—'
-    const d = new Date(t)
-    if (Number.isNaN(d.getTime())) return '—'
+  function fmtDateTime(value) {
+    if (!value) return t.common.dash
+    const d = new Date(value)
+    if (Number.isNaN(d.getTime())) return t.common.dash
     return d.toLocaleString()
   }
 
-  function fmtClock(t) {
-    if (!t) return '—'
-    const d = new Date(t)
-    if (Number.isNaN(d.getTime())) return '—'
+  function fmtClock(value) {
+    if (!value) return t.common.dash
+    const d = new Date(value)
+    if (Number.isNaN(d.getTime())) return t.common.dash
     return d.toLocaleTimeString()
   }
 
-  // The charge of one turn, and where the number came from. An unsettled turn
-  // never reads as a free one, so "待结算" is shown instead of 0.
-  const creditSources = {
-    upstream: '上游随响应返回',
-    session_usage: '按回合查询上游用量',
-    pending: '上游尚未结算；稍后自动补齐',
-  }
+  // Where a charge came from. An unsettled turn never reads as a free one, so
+  // "待结算" is shown instead of 0.
   function creditTitle(e) {
-    if (!e.credits_source) return '本次请求没有可结算的积分'
-    return creditSources[e.credits_source] || e.credits_source
+    if (!e.credits_source) return t.logs.creditNone
+    return t.logs.creditSources[e.credits_source] || e.credits_source
+  }
+
+  function surfaceLabel(e) {
+    return t.logs.surface[e.surface] || t.logs.surface.unknown
   }
 </script>
 
 <svelte:head>
-  <title>CodeNexus 控制台</title>
+  <title>{t.brand.title}</title>
 </svelte:head>
 
+<svelte:window onscroll={() => (scrolled = window.scrollY > 4)} />
+
 <div class="shell">
-  <header>
-    <div class="brand">
-      <span class="logo">CN</span>
-      <div>
-        <h1>CodeNexus</h1>
-        <p class="muted">统一 AI 编码账号网关 · 控制台</p>
+  <header class="topbar" class:scrolled>
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">{'{ }'}</span>
+        <div class="brand-text">
+          <span class="brand-name">{t.brand.name}</span>
+          <span class="brand-sub">{t.brand.tagline}</span>
+        </div>
       </div>
-    </div>
-    <div class="stat">
-      <span class="count">{accounts.length}</span>
-      <span class="muted">个账号</span>
-      {#if session}
-        <span class="dot"></span>
-        <span class="muted">{session.service}</span>
-      {/if}
+
+      <nav class="tabs" aria-label={t.nav.aria}>
+        {#each tabs as item (item.id)}
+          <button
+            class="tab"
+            data-tab={item.id}
+            class:active={tab === item.id}
+            aria-current={tab === item.id ? 'page' : undefined}
+            onclick={() => switchTab(item.id)}
+          >
+            <Icon name={item.icon} size={16} />
+            <span>{item.label}</span>
+          </button>
+        {/each}
+        <span class="tab-sep" aria-hidden="true"></span>
+        {#each accessTabs as item (item.id)}
+          <button
+            class="tab"
+            data-tab={item.id}
+            class:active={tab === item.id}
+            aria-current={tab === item.id ? 'page' : undefined}
+            onclick={() => switchTab(item.id)}
+          >
+            <Icon name={item.icon} size={16} />
+            <span>{item.label}</span>
+          </button>
+        {/each}
+        <button
+          class="tab"
+          data-tab="settings"
+          class:active={tab === 'settings'}
+          aria-current={tab === 'settings' ? 'page' : undefined}
+          onclick={() => switchTab('settings')}
+        >
+          <Icon name="settings" size={16} />
+          <span>{t.nav.settings}</span>
+        </button>
+      </nav>
+
+      <div class="topbar-right">
+        <span class="stat">
+          <span class="count">{accounts.length}</span>
+          <span class="muted small">{t.nav.accountsUnit}</span>
+          {#if session}
+            <span class="dot" title={session.service}></span>
+          {/if}
+        </span>
+        <div class="segmented theme-switch" role="group" aria-label={t.nav.appearance}>
+          {#each themeOptions as opt (opt.value)}
+            <button
+              class="theme-opt"
+              class:active={theme === opt.value}
+              aria-pressed={theme === opt.value}
+              title={opt.label}
+              onclick={() => setTheme(opt.value)}
+            >
+              <Icon name={opt.icon} size={15} />
+              <span class="theme-label">{opt.label}</span>
+            </button>
+          {/each}
+        </div>
+      </div>
     </div>
   </header>
 
-  {#if banner}
-    <div class="banner">
-      <span>{banner}</span>
-      <button class="link" onclick={() => (banner = '')}>关闭</button>
-    </div>
-  {/if}
+  <main class="page">
+    {#if banner}
+      <div class="note error banner">
+        <Icon name="alert" size={16} />
+        <span class="spacer">{banner}</span>
+        <button class="btn icon" onclick={() => (banner = '')} aria-label={t.common.close}>
+          <Icon name="close" size={14} />
+        </button>
+      </div>
+    {/if}
 
-  <nav class="tabs">
-    <button class:active={tab === 'accounts'} onclick={() => switchTab('accounts')}>账号</button>
-    <button class:active={tab === 'tasks'} onclick={() => switchTab('tasks')}>任务中心</button>
-    <button class:active={tab === 'logs'} onclick={() => switchTab('logs')}>运行日志</button>
-    <button class:active={tab === 'usage'} onclick={() => switchTab('usage')}>用量</button>
-    <button class:active={tab === 'add'} onclick={() => switchTab('add')}>添加账号</button>
-    <button class:active={tab === 'import'} onclick={() => switchTab('import')}>导入</button>
-    <button class:active={tab === 'settings'} onclick={() => switchTab('settings')}>设置</button>
-    <span class="spacer"></span>
-    <div class="theme-switch" role="group" aria-label="外观">
-      {#each [['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']] as [value, label]}
-        <button
-          class:active={theme === value}
-          aria-pressed={theme === value}
-          onclick={() => setTheme(value)}>{label}</button
-        >
-      {/each}
-    </div>
-  </nav>
+    {#if tab === 'accounts'}
+      <div class="page-head">
+        <div class="titles">
+          <h1>{t.nav.accounts}</h1>
+          <p class="lede">{t.lede.accounts}</p>
+        </div>
+      </div>
 
-  {#if tab === 'accounts'}
-    <section>
       {#if loading}
-        <p class="muted pad">加载中…</p>
+        <div class="table">
+          {#each Array(4) as _}
+            <div class="row skeleton-row"><span class="skeleton"></span><span class="skeleton"></span><span class="skeleton"></span></div>
+          {/each}
+        </div>
       {:else if accounts.length === 0}
         <div class="empty">
-          <p>还没有账号。</p>
-          <p class="muted">前往「添加账号」完成设备授权，或从「导入」接入已有凭据。</p>
+          <span class="empty-mark"><Icon name="accounts" size={22} /></span>
+          <p>{t.accounts.empty.title}</p>
+          <p class="muted">{t.accounts.empty.body}</p>
+          <button class="btn primary" onclick={() => switchTab('add')}>
+            <Icon name="add" size={16} />
+            {t.nav.add}
+          </button>
         </div>
       {:else}
         {#each grouped as group (group.source)}
-          <div class="group">
-            <h2>
-              <span class="src">{group.source}</span>
-              <span class="pill">{group.items.length}</span>
-            </h2>
-            <div class="table">
-              <div class="row head">
-                <span>账号</span>
-                <span>状态</span>
-                <span>凭据</span>
-                <span>调用</span>
-                <span>过期</span>
-                <span></span>
+          <section class="group">
+            <div class="group-head">
+              <h2><span class="src">{group.source}</span></h2>
+              <span class="badge outline">{group.items.length}</span>
+            </div>
+            <div class="table scroll accounts-table">
+              <div class="row head" style="--cols: var(--cols-accounts)">
+                <span>{t.accounts.col.account}</span>
+                <span>{t.accounts.col.status}</span>
+                <span>{t.accounts.col.credential}</span>
+                <span>{t.accounts.col.calls}</span>
+                <span>{t.accounts.col.expires}</span>
+                <span class="right">{t.accounts.col.actions}</span>
               </div>
               {#each group.items as acc (acc.key)}
                 {@const h = health(acc)}
-                <div class="row">
+                <div class="row" style="--cols: var(--cols-accounts)">
                   <span class="label" title={acc.uid}>
                     {acc.label || acc.uid}
-                    <em class="uid">{acc.uid}</em>
+                    <em>{acc.uid}</em>
                   </span>
-                  <span>
+                  <span class="cell-status">
                     <span class="badge {h.cls}">{h.text}</span>
                     {#if acc.in_flight > 0}
-                      <span class="muted small">· {acc.in_flight} 进行中</span>
+                      <span class="badge info">{t.accounts.inFlight(acc.in_flight)}</span>
                     {/if}
                   </span>
                   <span class="muted small">
-                    {#if acc.has_refresh_token}可刷新{:else}仅访问令牌{/if}
+                    {#if acc.has_refresh_token}{t.accounts.credentialRefreshable}{:else}{t.accounts.credentialAccessOnly}{/if}
                   </span>
-                  <span class="muted small">{acc.success}✓ / {acc.errors}✗</span>
+                  <span class="muted small mono">{acc.success}✓ / {acc.errors}✗</span>
                   <span class="muted small">{fmtTime(acc.expires_at)}</span>
                   <span class="right">
-                    <button class="link danger" onclick={() => removeAccount(acc)}>移除</button>
+                    <button class="btn link danger" onclick={() => removeAccount(acc)}>{t.common.remove}</button>
+                  </span>
+                </div>
+              {/each}
+            </div>
+          </section>
+        {/each}
+      {/if}
+    {/if}
+
+    {#if tab === 'tasks'}
+      <div class="page-head">
+        <div class="titles">
+          <h1>{t.nav.tasks}</h1>
+          <p class="lede">{t.lede.tasks}</p>
+        </div>
+      </div>
+
+      <div class="column">
+        <div class="card">
+          <div class="card-head">
+            <div class="titles">
+              <h2>{t.tasks.batch.title}</h2>
+            </div>
+            <div class="btn-row">
+              <button class="btn ghost" onclick={loadQueue} disabled={queueBusy}>
+                <Icon name="refresh" size={15} />
+                {t.tasks.queue.refresh}
+              </button>
+              <button class="btn primary" onclick={runQueue} disabled={queueBusy}>
+                {#if queueBusy}<span class="spinner"></span>{/if}
+                {queueBusy ? t.tasks.queue.running : t.tasks.queue.run}
+              </button>
+            </div>
+          </div>
+          <div class="btn-row">
+            <button class="btn" onclick={() => batch('checkin_all', t.tasks.batch.checkinAll)} disabled={!!opBusy}>
+              {t.tasks.batch.checkinAll}
+            </button>
+            <button class="btn" onclick={() => batch('activity_all', t.tasks.batch.activityAll)} disabled={!!opBusy}>
+              {t.tasks.batch.activityAll}
+            </button>
+            <button class="btn" onclick={() => batch('balance_all', t.tasks.batch.balanceAll)} disabled={!!opBusy}>
+              {t.tasks.batch.balanceAll}
+            </button>
+            <button class="btn" onclick={() => batch('travel_all', t.tasks.batch.travelAll)} disabled={!!opBusy}>
+              {t.tasks.batch.travelAll}
+            </button>
+            <button class="btn" onclick={() => batch('keepalive_all', t.tasks.batch.keepaliveAll)} disabled={!!opBusy}>
+              {t.tasks.batch.keepaliveAll}
+            </button>
+          </div>
+          {#if opBusy && !opBusy.includes(':')}
+            <p class="msg"><span class="spinner inline"></span> {t.tasks.msg.running(opBusy)}</p>
+          {/if}
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div class="titles">
+              <h2>{t.tasks.queue.title}</h2>
+              <span class="hint">{t.tasks.queue.hint}</span>
+            </div>
+            {#if queue.length}<span class="badge outline">{queue.length}</span>{/if}
+          </div>
+          {#if queue.length === 0}
+            <p class="muted small">{t.tasks.queue.empty}</p>
+          {:else}
+            <div class="table">
+              <div class="row head" style="--cols: var(--cols-queue)">
+                <span>{t.tasks.queue.col.account}</span>
+                <span>{t.tasks.queue.col.pending}</span>
+                <span>{t.tasks.queue.col.claimable}</span>
+              </div>
+              {#each queue as row (row.uid)}
+                <div class="row" style="--cols: var(--cols-queue)">
+                  <span class="truncate">{row.label || row.uid}</span>
+                  <span class="mono">{row.pending}</span>
+                  <span class="mono">{row.claimable > 0 ? row.claimable : t.common.dash}</span>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
+
+        <div class="card">
+          <details>
+            <summary>{t.tasks.catalog.title(catalog.length)}</summary>
+            {#if catalogErr}
+              <p class="msg error">{catalogErr}</p>
+            {:else}
+              {#each catalogGroups as g (g.cls)}
+                <div class="catalog">
+                  <h3>{g.label}<span class="badge outline">{g.items.length}</span></h3>
+                  <ul>
+                    {#each g.items as a (a.task_code)}
+                      <li>
+                        <code>{a.task_code}</code>
+                        <span class="muted">{a.desc}</span>
+                        {#if a.attempt}<span class="badge warn">{t.tasks.catalog.bestEffort}</span>{/if}
+                      </li>
+                    {/each}
+                  </ul>
+                </div>
+              {/each}
+            {/if}
+          </details>
+        </div>
+
+        <section class="group">
+          <div class="group-head">
+            <h2><span class="src">{t.tasks.accounts.title}</span></h2>
+            <span class="badge outline">{accounts.length}</span>
+          </div>
+          {#if accounts.length === 0}
+            <div class="empty">
+              <span class="empty-mark"><Icon name="tasks" size={22} /></span>
+              <p>{t.accounts.empty.title}</p>
+              <p class="muted">{t.tasks.accounts.empty}</p>
+            </div>
+          {/if}
+          {#each accounts as acc (acc.key)}
+            {@const st = accountTasks[acc.uid] || {}}
+            <div class="card acc-card">
+              <div class="acc-head">
+                {#if acc.local}
+                  <span class="acc-name">{acc.label || acc.uid}</span>
+                {:else}
+                  <button class="btn link strong caret" onclick={() => toggleTasks(acc)} aria-expanded={!!expanded[acc.uid]}>
+                    <span class="caret-glyph" class:open={expanded[acc.uid]}>▸</span>
+                    {acc.label || acc.uid}
+                  </button>
+                {/if}
+                <span class="badge {health(acc).cls}">{health(acc).text}</span>
+                {#if acc.local}<span class="badge idle">{t.tasks.accounts.local}</span>{/if}
+                <span class="muted small">{acc.source}</span>
+                {#if !acc.local}
+                  <span class="muted small">
+                    {t.tasks.accounts.credit(acc.credits_known ? acc.credits : t.common.dash)}
+                    {#if acc.expiring > 0} · {t.tasks.accounts.expiring(acc.expiring)}{/if}
+                  </span>
+                {/if}
+                <span class="spacer"></span>
+                {#if !acc.local}
+                  <div class="acc-ops">
+                    <button class="btn link" onclick={() => runAllTasks(acc)} disabled={!!opBusy}>{t.tasks.accountOps.runAll}</button>
+                    <button class="btn link" onclick={() => acceptTask(acc, '')} disabled={!!opBusy}>{t.tasks.accountOps.acceptAll}</button>
+                    {#if acc.checkin_applicable}
+                      <button
+                        class="btn link"
+                        onclick={() => accountOp(acc, 'checkin', t.tasks.accountOps.checkin)}
+                        disabled={!!opBusy}
+                        title={acc.checkin_done ? t.tasks.checkinTitle : ''}
+                      >
+                        {acc.checkin_done ? t.tasks.accountOps.checkinDone : t.tasks.accountOps.checkin}
+                      </button>
+                    {/if}
+                    <button class="btn link" onclick={() => accountOp(acc, 'balance', t.tasks.batch.balanceAll)} disabled={!!opBusy}>{t.tasks.accountOps.balance}</button>
+                    <button class="btn link" onclick={() => accountOp(acc, 'keepalive', t.tasks.accountOps.keepalive)} disabled={!!opBusy}>{t.tasks.accountOps.keepalive}</button>
+                    <button
+                      class="btn link"
+                      onclick={() => accountOp(acc, acc.paused ? 'resume' : 'pause', acc.paused ? t.tasks.accountOps.resume : t.tasks.accountOps.pause)}
+                      disabled={!!opBusy}
+                    >
+                      {acc.paused ? t.tasks.accountOps.resume : t.tasks.accountOps.pause}
+                    </button>
+                  </div>
+                {/if}
+              </div>
+
+              {#if opBusy.startsWith(acc.uid + ':')}
+                <p class="msg"><span class="spinner inline"></span> {t.tasks.msg.running(opBusy.split(':').slice(1).join(':'))}</p>
+              {/if}
+
+              {#if expanded[acc.uid]}
+                {#if st.loading}
+                  <div class="table task-skeleton">
+                    {#each Array(2) as _}
+                      <div class="row skeleton-row"><span class="skeleton"></span><span class="skeleton"></span><span class="skeleton"></span></div>
+                    {/each}
+                  </div>
+                {:else if st.error}
+                  <p class="msg error">{st.error}</p>
+                {:else if !st.tasks || st.tasks.length === 0}
+                  <p class="muted small">{t.tasks.noTasks}</p>
+                {:else}
+                  <div class="table scroll">
+                    <div class="row head" style="--cols: var(--cols-tasks)">
+                      <span>{t.tasks.table.task}</span>
+                      <span>{t.tasks.table.progress}</span>
+                      <span>{t.tasks.table.status}</span>
+                      <span>{t.tasks.table.reward}</span>
+                      <span class="right"></span>
+                    </div>
+                    {#each st.tasks as task (task.code)}
+                      {@const s = taskState(task)}
+                      <div class="row" style="--cols: var(--cols-tasks)">
+                        <span class="label" title={task.description || task.desc || task.code}>
+                          {task.title || task.code}
+                          <em>{task.code}{task.mini_program ? ` · ${t.tasks.miniProgram}` : ''}</em>
+                        </span>
+                        <span class="muted small mono">{task.target > 0 ? `${task.current || 0}/${task.target}` : t.common.dash}</span>
+                        <span><span class="badge {s.cls}">{s.text}</span></span>
+                        <span class="muted small">
+                          {#if task.credit > 0}+{task.credit} {t.usage.stat.credits}{/if}
+                          {#if task.energy > 0} +{task.energy} 能量{/if}
+                        </span>
+                        <span class="right actions">
+                          {#if task.claimable && !task.claimed}
+                            <button class="btn link" onclick={() => claimTask(acc, task.code)} disabled={!!opBusy}>{t.tasks.actions.claim}</button>
+                          {/if}
+                          {#if !task.claimed}
+                            <button class="btn link" onclick={() => runTask(acc, task.code)} disabled={!!opBusy}>{t.tasks.actions.run}</button>
+                          {/if}
+                        </span>
+                      </div>
+                    {/each}
+                  </div>
+                  <button class="btn link sm" onclick={() => loadAccountTasks(acc.uid)} disabled={!!opBusy}>
+                    {t.tasks.actions.reload}
+                  </button>
+                {/if}
+
+                {#if results[acc.uid]?.length}
+                  <ul class="results">
+                    {#each results[acc.uid] as r, i (r.task_code + i)}
+                      <li class={r.status}>{describeResult(r)}</li>
+                    {/each}
+                  </ul>
+                {/if}
+              {/if}
+            </div>
+          {/each}
+        </section>
+      </div>
+    {/if}
+
+    {#if tab === 'logs'}
+      <div class="page-head">
+        <div class="titles">
+          <h1>{t.nav.logs}</h1>
+          <p class="lede">{t.lede.logs}</p>
+        </div>
+      </div>
+
+      <div class="column">
+        {#if !metrics || metrics.enabled === false}
+          <div class="card">
+            <h2>{t.logs.title}</h2>
+            <p>{t.logs.disabled}</p>
+          </div>
+        {:else}
+          <div class="stats">
+            <div class="stat-card"><span class="k">{t.logs.metric.inFlight}</span><span class="v">{metrics.in_flight}</span></div>
+            <div class="stat-card"><span class="k">{t.logs.metric.completed}</span><span class="v">{metrics.completed}</span></div>
+            <div class="stat-card"><span class="k">{t.logs.metric.successRate}</span><span class="v">{metrics.success_rate ?? 0}<em>%</em></span></div>
+            <div class="stat-card"><span class="k">{t.logs.metric.avgDuration}</span><span class="v">{Math.round(metrics.avg_duration_ms ?? 0)}<em>ms</em></span></div>
+            <div class="stat-card">
+              <span class="k">{t.logs.metric.avgTtfb}</span>
+              <span class="v">{metrics.avg_ttfb_ms ? metrics.avg_ttfb_ms : t.common.dash}{metrics.avg_ttfb_ms ? 'ms' : ''}</span>
+            </div>
+          </div>
+          <div class="table scroll">
+            <div class="row head" style="--cols: var(--cols-logs)">
+              <span>{t.logs.col.time}</span>
+              <span>{t.logs.col.path}</span>
+              <span>{t.logs.col.account}</span>
+              <span>{t.logs.col.model}</span>
+              <span>{t.logs.col.route}</span>
+              <span>{t.logs.col.status}</span>
+              <span>{t.logs.col.duration}</span>
+              <span>{t.logs.col.token}</span>
+              <span>{t.logs.col.credit}</span>
+            </div>
+            {#if logEvents.length === 0}
+              <div class="row"><span class="muted small">{t.logs.empty}</span></div>
+            {/if}
+            {#each logEvents as e (e.request_id)}
+              <div class="row" style="--cols: var(--cols-logs)">
+                <span class="muted small mono">{fmtClock(e.time)}</span>
+                <span class="mono small truncate">{e.path}</span>
+                <span class="muted small truncate">{e.account || t.common.dash}</span>
+                <span class="muted small mono truncate">{e.model || t.common.dash}</span>
+                <span class="cell-route">
+                  {#if e.surface}
+                    <span class="badge outline" title={t.logs.surfaceTitle}>{surfaceLabel(e)}</span>
+                  {/if}
+                  {#if e.max_profile}
+                    <span class="badge primary" title={t.logs.maxTitle}>{t.logs.maxBadge(e.max_context)}</span>
+                  {/if}
+                  {#if e.continued_rounds > 0}
+                    <span class="badge info" title={t.logs.continueTitle}>{t.logs.continueBadge(e.continued_rounds)}</span>
+                  {/if}
+                  {#if !e.surface && !e.max_profile && !e.continued_rounds}
+                    <span class="muted small">{t.common.dash}</span>
+                  {/if}
+                </span>
+                <span><span class="badge {e.ok ? 'ok' : 'bad'}">{e.status}</span></span>
+                <span class="muted small mono">
+                  {e.duration_ms}ms{#if e.ttfb_ms} / {e.ttfb_ms}ms{/if}
+                  {#if e.stream} · {t.logs.stream}{/if}
+                </span>
+                <span class="cell-stack">
+                  <span class="mono small">{e.total_tokens || t.common.dash}</span>
+                  {#if e.tokens_per_second}<em>{e.tokens_per_second}tok/s</em>{/if}
+                </span>
+                <span class="muted small" title={creditTitle(e)}>
+                  {#if e.credits_source === 'pending'}
+                    <span class="badge warn">{t.logs.pending}</span>
+                  {:else if e.credits_source}
+                    {e.credits_consumed ?? 0}
+                  {:else}
+                    {t.common.dash}
+                  {/if}
+                </span>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
+
+    {#if tab === 'usage'}
+      <div class="page-head">
+        <div class="titles">
+          <h1>{t.nav.usage}</h1>
+          <p class="lede">{t.lede.usage}</p>
+        </div>
+      </div>
+
+      {#if usageAvailable === false}
+        <div class="card">
+          <h2>{t.usage.title}</h2>
+          <p>{t.usage.disabled}</p>
+        </div>
+      {:else}
+        <div class="column">
+          <div class="toolbar">
+            <div class="segmented">
+              {#each [7, 30, 90, 365] as d}
+                <button class:active={usageDays === d} onclick={() => changeUsageDays(d)}>{t.usage.days(d)}</button>
+              {/each}
+            </div>
+            <button class="btn ghost" onclick={loadUsage} disabled={usageLoading}>
+              <Icon name="refresh" size={15} />
+              {usageLoading ? t.common.refreshing : t.common.refresh}
+            </button>
+          </div>
+          {#if usageMsg}<p class="msg error">{usageMsg}</p>{/if}
+
+          {#if usageSummary}
+            <div class="stats">
+              <div class="stat-card"><span class="k">{t.usage.stat.requests}</span><span class="v">{usageSummary.requests}</span></div>
+              <div class="stat-card"><span class="k">{t.usage.stat.successRate}</span><span class="v">{usageSummary.requests ? Math.round((usageSummary.ok / usageSummary.requests) * 100) : 0}<em>%</em></span></div>
+              <div class="stat-card"><span class="k">{t.usage.stat.input}</span><span class="v">{fmtTokens(usageSummary.input_tokens)}</span></div>
+              <div class="stat-card"><span class="k">{t.usage.stat.output}</span><span class="v">{fmtTokens(usageSummary.output_tokens)}</span></div>
+              <div class="stat-card"><span class="k">{t.usage.stat.total}</span><span class="v">{fmtTokens(usageSummary.total_tokens)}</span></div>
+              <div class="stat-card"><span class="k">{t.usage.stat.credits}</span><span class="v">{fmtCredits(usageSummary.credits)}</span></div>
+            </div>
+          {/if}
+
+          {#if usageDaily.length}
+            <div class="card">
+              <div class="card-head">
+                <div class="titles">
+                  <h2>{t.usage.daily.title}</h2>
+                  <span class="hint">{t.usage.daily.peak(fmtTokens(Math.max(...usageDaily.map((r) => r.total_tokens || 0))))}</span>
+                </div>
+              </div>
+              <div class="bars" role="img" aria-label={t.usage.aria.daily}>
+                {#each usageDaily as row (row.date)}
+                  <div class="bar-col" title="{row.date} · {row.total_tokens || 0} tok · {fmtCredits(row.credits)} {t.usage.stat.credits}">
+                    <div class="bar" class:zero={!row.total_tokens} style="height:{usageBarHeight(row)}%"></div>
+                  </div>
+                {/each}
+              </div>
+            </div>
+
+            <div class="table scroll">
+              <div class="row head" style="--cols: var(--cols-daily)">
+                <span>{t.usage.dailyCol.date}</span>
+                <span>{t.usage.dailyCol.requests}</span>
+                <span>{t.usage.dailyCol.ok}</span>
+                <span>{t.usage.dailyCol.failed}</span>
+                <span>{t.usage.dailyCol.input}</span>
+                <span>{t.usage.dailyCol.output}</span>
+                <span>{t.usage.dailyCol.credits}</span>
+              </div>
+              {#each usageDaily.filter((r) => r.requests > 0) as row (row.date)}
+                <div class="row" style="--cols: var(--cols-daily)">
+                  <span class="mono small">{row.date}</span>
+                  <span class="small mono">{row.requests}</span>
+                  <span class="small mono">{row.ok}</span>
+                  <span class="small mono">{row.failed}</span>
+                  <span class="muted small mono">{fmtTokens(row.input_tokens)}</span>
+                  <span class="muted small mono">{fmtTokens(row.output_tokens)}</span>
+                  <span class="muted small mono">{fmtCredits(row.credits)}</span>
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <div class="empty"><p>{t.usage.empty}</p></div>
+          {/if}
+
+          {#if usageModels.length}
+            <div class="card">
+              <h2>{t.usage.models.title}</h2>
+              <div class="table">
+                <div class="row head" style="--cols: var(--cols-models)">
+                  <span>{t.usage.modelCol.model}</span>
+                  <span>{t.usage.modelCol.requests}</span>
+                  <span>{t.usage.modelCol.input}</span>
+                  <span>{t.usage.modelCol.output}</span>
+                  <span>{t.usage.modelCol.total}</span>
+                  <span>{t.usage.modelCol.credits}</span>
+                </div>
+                {#each usageModels as m (m.model)}
+                  <div class="row" style="--cols: var(--cols-models)">
+                    <span class="mono small truncate">{m.model || t.common.dash}</span>
+                    <span class="small mono">{m.requests}</span>
+                    <span class="muted small mono">{fmtTokens(m.input_tokens)}</span>
+                    <span class="muted small mono">{fmtTokens(m.output_tokens)}</span>
+                    <span class="small mono">{fmtTokens(m.total_tokens)}</span>
+                    <span class="muted small mono">{fmtCredits(m.credits)}</span>
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/if}
+
+          <div class="card">
+            <div class="card-head">
+              <div class="titles">
+                <h2>{t.usage.records.title}</h2>
+              </div>
+              <div class="filters">
+                <select bind:value={usageFilter.wire} onchange={loadUsageRecords}>
+                  <option value="">{t.usage.records.wireAll}</option>
+                  <option value="chat">chat</option>
+                  <option value="anthropic">anthropic</option>
+                  <option value="responses">responses</option>
+                </select>
+                <input placeholder={t.usage.records.modelPlaceholder} bind:value={usageFilter.model} onchange={loadUsageRecords} />
+                <select bind:value={usageFilter.outcome} onchange={loadUsageRecords}>
+                  <option value="">{t.usage.records.outcomeAll}</option>
+                  <option value="success">{t.usage.records.outcomeSuccess}</option>
+                  <option value="http_error">{t.usage.records.outcomeHTTPError}</option>
+                </select>
+              </div>
+            </div>
+            <div class="table scroll">
+              <div class="row head" style="--cols: var(--cols-records)">
+                <span>{t.logs.col.time}</span>
+                <span>{t.logs.col.path}</span>
+                <span>{t.logs.col.account}</span>
+                <span>{t.logs.col.model}</span>
+                <span>{t.logs.col.status}</span>
+                <span>{t.logs.col.duration}</span>
+                <span>{t.logs.col.token}</span>
+                <span>{t.logs.col.credit}</span>
+              </div>
+              {#if usageRecords.length === 0}
+                <div class="row"><span class="muted small">{t.usage.records.empty}</span></div>
+              {/if}
+              {#each usageRecords as rec (rec.request_id)}
+                <div class="row" style="--cols: var(--cols-records)">
+                  <span class="muted small">{fmtDateTime(rec.time)}</span>
+                  <span class="mono small truncate">{rec.wire || t.common.dash}</span>
+                  <span class="muted small truncate">{rec.account || t.common.dash}</span>
+                  <span class="mono small truncate">{rec.model || t.common.dash}</span>
+                  <span><span class="badge {rec.outcome === 'success' ? 'ok' : 'bad'}">{rec.status}</span></span>
+                  <span class="muted small mono">{rec.duration_ms}ms{#if rec.stream} · {t.logs.stream}{/if}</span>
+                  <span class="muted small mono">{fmtTokens(rec.total_tokens)}</span>
+                  <span class="muted small" title={rec.credits_source || ''}>
+                    {#if rec.credits_source === 'pending'}<span class="badge warn">{t.logs.pending}</span>
+                    {:else if rec.credits_source}{fmtCredits(rec.credits)}
+                    {:else}{t.common.dash}{/if}
                   </span>
                 </div>
               {/each}
             </div>
           </div>
-        {/each}
-      {/if}
-    </section>
-  {/if}
-
-  {#if tab === 'tasks'}
-    <section class="column">
-      <div class="card">
-        <div class="rowhead">
-          <h2>批量维护</h2>
-          <span class="muted small">与定时调度共用同一套幂等执行器，随时可手动触发。</span>
-        </div>
-        <div class="ops">
-          <button onclick={() => batch('checkin_all', '全部签到')} disabled={!!opBusy}>全部签到</button>
-          <button onclick={() => batch('activity_all', '全部活跃')} disabled={!!opBusy}>全部活跃</button>
-          <button onclick={() => batch('balance_all', '刷新额度')} disabled={!!opBusy}>刷新额度</button>
-          <button onclick={() => batch('travel_all', '全部出行')} disabled={!!opBusy}>全部出行</button>
-          <button onclick={() => batch('keepalive_all', '全部保活')} disabled={!!opBusy}>全部保活</button>
-          <span class="spacer"></span>
-          <button onclick={loadQueue} disabled={queueBusy}>刷新队列</button>
-          <button class="primary" onclick={runQueue} disabled={queueBusy}>
-            {queueBusy ? '执行中…' : '执行队列'}
-          </button>
-        </div>
-        {#if opBusy && !opBusy.includes(':')}
-          <p class="msg">{opBusy} 执行中…</p>
-        {/if}
-        {#if taskMsg}
-          <p class="msg ok">{taskMsg}</p>
-        {/if}
-      </div>
-
-      <div class="card">
-        <div class="rowhead">
-          <h2>待办队列</h2>
-          <span class="muted small">仍有未完成任务的启用账号。</span>
-        </div>
-        {#if queue.length === 0}
-          <p class="muted small">队列为空：所有账号的任务都已完成或已领取。</p>
-        {:else}
-          <div class="qtable">
-            <div class="qrow qhead"><span>账号</span><span>待完成</span><span>可领取</span></div>
-            {#each queue as row (row.uid)}
-              <div class="qrow">
-                <span>{row.label || row.uid}</span>
-                <span>{row.pending}</span>
-                <span>{row.claimable > 0 ? row.claimable : '—'}</span>
-              </div>
-            {/each}
-          </div>
-        {/if}
-      </div>
-
-      <div class="card">
-        <details>
-          <summary>执行器目录（{catalog.length}）</summary>
-          {#if catalogErr}
-            <p class="msg error">{catalogErr}</p>
-          {:else}
-            {#each catalogGroups as g (g.cls)}
-              <div class="catalog">
-                <h3>{g.label}<span class="pill">{g.items.length}</span></h3>
-                <ul>
-                  {#each g.items as a (a.task_code)}
-                    <li>
-                      <code>{a.task_code}</code>
-                      <span class="muted">{a.desc}</span>
-                      {#if a.attempt}<span class="badge warn">尽力而为</span>{/if}
-                    </li>
-                  {/each}
-                </ul>
-              </div>
-            {/each}
-          {/if}
-        </details>
-      </div>
-
-      <div class="group">
-        <h2>
-          <span class="src">账号任务</span>
-          <span class="pill">{accounts.length}</span>
-        </h2>
-        {#if accounts.length === 0}
-          <div class="empty">
-            <p>还没有账号。</p>
-            <p class="muted">先在「添加账号」完成设备授权，任务中心才有可操作的对象。</p>
-          </div>
-        {/if}
-        {#each accounts as acc (acc.key)}
-          {@const st = accountTasks[acc.uid] || {}}
-          <div class="card acc-card">
-            <div class="acc-head">
-              {#if acc.local}
-                <span class="caret">· {acc.label || acc.uid}</span>
-              {:else}
-                <button class="link caret" onclick={() => toggleTasks(acc)}>
-                  {expanded[acc.uid] ? '▾' : '▸'} {acc.label || acc.uid}
-                </button>
-              {/if}
-              <span class="badge {health(acc).cls}">{health(acc).text}</span>
-              {#if acc.local}<span class="badge idle">本机</span>{/if}
-              <span class="muted small">{acc.source}</span>
-              {#if !acc.local}
-                <span class="muted small">
-                  额度 {acc.credits_known ? acc.credits : '—'}
-                  {#if acc.expiring > 0} · {acc.expiring} 即将过期{/if}
-                </span>
-              {/if}
-              <span class="spacer"></span>
-              {#if !acc.local}
-                <button class="link" onclick={() => runAllTasks(acc)} disabled={!!opBusy}>执行全部</button>
-                <button class="link" onclick={() => acceptTask(acc, '')} disabled={!!opBusy}>接取全部</button>
-                {#if acc.checkin_applicable}
-                  <button
-                    class="link"
-                    onclick={() => accountOp(acc, 'checkin', '签到')}
-                    disabled={!!opBusy}
-                    title={acc.checkin_done ? '今日已签到；再点一次会重签并刷新额度' : ''}
-                  >
-                    {acc.checkin_done ? '已签' : '签到'}
-                  </button>
-                {/if}
-                <button class="link" onclick={() => accountOp(acc, 'balance', '刷新额度')} disabled={!!opBusy}>额度</button>
-                <button class="link" onclick={() => accountOp(acc, 'keepalive', '保活')} disabled={!!opBusy}>保活</button>
-                <button
-                  class="link"
-                  onclick={() => accountOp(acc, acc.paused ? 'resume' : 'pause', acc.paused ? '恢复' : '暂停')}
-                  disabled={!!opBusy}
-                >
-                  {acc.paused ? '恢复' : '暂停'}
-                </button>
-              {/if}
-            </div>
-
-            {#if opBusy.startsWith(acc.uid + ':')}
-              <p class="msg small">{opBusy.split(':').slice(1).join(':')} 执行中…</p>
-            {/if}
-
-            {#if expanded[acc.uid]}
-              {#if st.loading}
-                <p class="muted small pad-sm">加载任务中…</p>
-              {:else if st.error}
-                <p class="msg error">{st.error}</p>
-              {:else if !st.tasks || st.tasks.length === 0}
-                <p class="muted small">该账号没有可用的成长任务。</p>
-              {:else}
-                <div class="ttable">
-                  <div class="trow thead">
-                    <span>任务</span><span>进度</span><span>状态</span><span>奖励</span><span></span>
-                  </div>
-                  {#each st.tasks as t (t.code)}
-                    {@const s = taskState(t)}
-                    <div class="trow">
-                      <span class="label" title={t.description || t.desc || t.code}>
-                        {t.title || t.code}
-                        <em class="uid">{t.code}{t.mini_program ? ' · 小程序' : ''}</em>
-                      </span>
-                      <span class="muted small">{t.target > 0 ? `${t.current || 0}/${t.target}` : '—'}</span>
-                      <span><span class="badge {s.cls}">{s.text}</span></span>
-                      <span class="muted small">
-                        {#if t.credit > 0}+{t.credit} 额度{/if}
-                        {#if t.energy > 0} +{t.energy} 能量{/if}
-                      </span>
-                      <span class="right actions">
-                        {#if t.claimable && !t.claimed}
-                          <button class="link" onclick={() => claimTask(acc, t.code)} disabled={!!opBusy}>领取</button>
-                        {/if}
-                        {#if !t.claimed}
-                          <button class="link" onclick={() => runTask(acc, t.code)} disabled={!!opBusy}>执行</button>
-                        {/if}
-                      </span>
-                    </div>
-                  {/each}
-                </div>
-                <button class="link tiny" onclick={() => loadAccountTasks(acc.uid)} disabled={!!opBusy}>重新加载</button>
-              {/if}
-
-              {#if results[acc.uid]?.length}
-                <ul class="results">
-                  {#each results[acc.uid] as r, i (r.task_code + i)}
-                    <li class={r.status}>{describeResult(r)}</li>
-                  {/each}
-                </ul>
-              {/if}
-            {/if}
-          </div>
-        {/each}
-      </div>
-    </section>
-  {/if}
-
-  {#if tab === 'logs'}
-    <section class="column">
-      {#if !metrics || metrics.enabled === false}
-        <div class="card">
-          <h2>运行日志</h2>
-          <p class="muted small">
-            请求日志未启用。在配置中开启 reqlog 后，这里会显示最近的网关请求：接口、账号、模型、状态、耗时与令牌用量，
-            但绝不包含提示词、回复内容或任何凭据。
-          </p>
-        </div>
-      {:else}
-        <div class="stats">
-          <div class="stat-card"><span class="k">处理中</span><span class="v">{metrics.in_flight}</span></div>
-          <div class="stat-card"><span class="k">已完成</span><span class="v">{metrics.completed}</span></div>
-          <div class="stat-card"><span class="k">成功率</span><span class="v">{metrics.success_rate ?? 0}%</span></div>
-          <div class="stat-card"><span class="k">平均耗时</span><span class="v">{metrics.avg_duration_ms ?? 0}<em>ms</em></span></div>
-          <div class="stat-card">
-            <span class="k">平均首字节</span>
-            <span class="v">{metrics.avg_ttfb_ms ? metrics.avg_ttfb_ms : '—'}{metrics.avg_ttfb_ms ? 'ms' : ''}</span>
-          </div>
-        </div>
-        <div class="table">
-          <div class="row logrow loghead">
-            <span>时间</span>
-            <span>接口</span>
-            <span>账号</span>
-            <span>模型</span>
-            <span>状态</span>
-            <span>耗时</span>
-            <span>Token</span>
-            <span>积分</span>
-          </div>
-          {#if logEvents.length === 0}
-            <div class="row logrow"><span class="muted small">暂无请求记录</span></div>
-          {/if}
-          {#each logEvents as e (e.request_id)}
-            <div class="row logrow">
-              <span class="muted small">{fmtClock(e.time)}</span>
-              <span class="mono small">{e.path}</span>
-              <span class="muted small">{e.account || '—'}</span>
-              <span class="muted small">{e.model || '—'}</span>
-              <span><span class="badge {e.ok ? 'ok' : 'bad'}">{e.status}</span></span>
-              <span class="muted small">
-                {e.duration_ms}ms{#if e.ttfb_ms} / {e.ttfb_ms}ms{/if}
-                {#if e.stream} · 流式{/if}
-              </span>
-              <span class="muted small">
-                {e.total_tokens || '—'}{#if e.tokens_per_second} · {e.tokens_per_second}tok/s{/if}
-              </span>
-              <span class="muted small" title={creditTitle(e)}>
-                {#if e.credits_source === 'pending'}
-                  <span class="badge warn">待结算</span>
-                {:else if e.credits_source}
-                  {e.credits_consumed ?? 0}
-                {:else}
-                  —
-                {/if}
-              </span>
-            </div>
-          {/each}
         </div>
       {/if}
-    </section>
-  {/if}
+    {/if}
 
-  {#if tab === 'usage'}
-    <section>
-      {#if usageAvailable === false}
-        <div class="card">
-          <h2>用量</h2>
-          <p class="muted small">
-            用量历史未启用。在配置中设置 <code>usage_store.enabled</code> 后，这里会按日汇总请求数、令牌与积分，
-            并保留可筛选的明细；提示词、回复内容与任何凭据都不会落库。
-          </p>
+    {#if tab === 'settings'}
+      <div class="page-head">
+        <div class="titles">
+          <h1>{t.nav.settings}</h1>
+          <p class="lede">{t.lede.settings}</p>
         </div>
-      {:else}
+      </div>
+      <Settings />
+    {/if}
+
+    {#if tab === 'add'}
+      <div class="page-head">
+        <div class="titles">
+          <h1>{t.nav.add}</h1>
+          <p class="lede">{t.lede.add}</p>
+        </div>
+      </div>
+
+      <div class="card">
         <div class="segmented">
-          {#each [7, 30, 90, 365] as d}
-            <button class:active={usageDays === d} onclick={() => changeUsageDays(d)}>{d} 天</button>
-          {/each}
-          <button onclick={loadUsage} disabled={usageLoading}>{usageLoading ? '刷新中…' : '刷新'}</button>
-        </div>
-        {#if usageMsg}<p class="msg error">{usageMsg}</p>{/if}
-
-        {#if usageSummary}
-          <div class="stats">
-            <div class="stat-card"><span class="k">请求</span><span class="v">{usageSummary.requests}</span></div>
-            <div class="stat-card"><span class="k">成功率</span><span class="v">{usageSummary.requests ? Math.round((usageSummary.ok / usageSummary.requests) * 100) : 0}%</span></div>
-            <div class="stat-card"><span class="k">输入</span><span class="v">{fmtTokens(usageSummary.input_tokens)}</span></div>
-            <div class="stat-card"><span class="k">输出</span><span class="v">{fmtTokens(usageSummary.output_tokens)}</span></div>
-            <div class="stat-card"><span class="k">总令牌</span><span class="v">{fmtTokens(usageSummary.total_tokens)}</span></div>
-            <div class="stat-card"><span class="k">积分</span><span class="v">{fmtCredits(usageSummary.credits)}</span></div>
-          </div>
-        {/if}
-
-        {#if usageDaily.length}
-          <div class="card">
-            <h2>每日趋势</h2>
-            <div class="bars" role="img" aria-label="每日总令牌用量">
-              {#each usageDaily as row (row.date)}
-                <div class="bar-col" title="{row.date} · {row.total_tokens || 0} tok · {fmtCredits(row.credits)} 积分">
-                  <div class="bar" style="height:{usageBarHeight(row)}%"></div>
-                </div>
-              {/each}
-            </div>
-            <p class="muted small">峰值日 {fmtTokens(Math.max(...usageDaily.map((r) => r.total_tokens || 0)))} tok</p>
-          </div>
-
-          <div class="table">
-            <div class="row head"><span>日期</span><span>请求</span><span>成功</span><span>失败</span><span>输入</span><span>输出</span><span>积分</span></div>
-            {#each usageDaily.filter((r) => r.requests > 0) as row (row.date)}
-              <div class="row">
-                <span class="mono small">{row.date}</span>
-                <span class="small">{row.requests}</span>
-                <span class="small">{row.ok}</span>
-                <span class="small">{row.failed}</span>
-                <span class="muted small">{fmtTokens(row.input_tokens)}</span>
-                <span class="muted small">{fmtTokens(row.output_tokens)}</span>
-                <span class="muted small">{fmtCredits(row.credits)}</span>
-              </div>
-            {/each}
-          </div>
-        {:else}
-          <div class="empty"><p>这段时间还没有请求记录。</p></div>
-        {/if}
-
-        {#if usageModels.length}
-          <div class="card">
-            <h2>模型分布</h2>
-            <div class="table">
-              <div class="row head"><span>模型</span><span>请求</span><span>输入</span><span>输出</span><span>总令牌</span><span>积分</span></div>
-              {#each usageModels as m (m.model)}
-                <div class="row">
-                  <span class="mono small">{m.model || '—'}</span>
-                  <span class="small">{m.requests}</span>
-                  <span class="muted small">{fmtTokens(m.input_tokens)}</span>
-                  <span class="muted small">{fmtTokens(m.output_tokens)}</span>
-                  <span class="small">{fmtTokens(m.total_tokens)}</span>
-                  <span class="muted small">{fmtCredits(m.credits)}</span>
-                </div>
-              {/each}
-            </div>
-          </div>
-        {/if}
-
-        <div class="card">
-          <h2>请求明细</h2>
-          <div class="segmented filters">
-            <select bind:value={usageFilter.wire} onchange={loadUsageRecords}>
-              <option value="">全部接口</option>
-              <option value="chat">chat</option>
-              <option value="anthropic">anthropic</option>
-              <option value="responses">responses</option>
-            </select>
-            <input placeholder="模型筛选" bind:value={usageFilter.model} onchange={loadUsageRecords} />
-            <select bind:value={usageFilter.outcome} onchange={loadUsageRecords}>
-              <option value="">全部结果</option>
-              <option value="success">成功</option>
-              <option value="http_error">HTTP 错误</option>
-            </select>
-          </div>
-          <div class="table">
-            <div class="row head"><span>时间</span><span>接口</span><span>账号</span><span>模型</span><span>状态</span><span>耗时</span><span>Token</span><span>积分</span></div>
-            {#if usageRecords.length === 0}
-              <div class="row"><span class="muted small">没有匹配的记录</span></div>
-            {/if}
-            {#each usageRecords as rec (rec.request_id)}
-              <div class="row">
-                <span class="muted small">{fmtDateTime(rec.time)}</span>
-                <span class="mono small">{rec.wire || '—'}</span>
-                <span class="muted small">{rec.account || '—'}</span>
-                <span class="mono small">{rec.model || '—'}</span>
-                <span><span class="badge {rec.outcome === 'success' ? 'ok' : 'bad'}">{rec.status}</span></span>
-                <span class="muted small">{rec.duration_ms}ms{#if rec.stream} · 流式{/if}</span>
-                <span class="muted small">{fmtTokens(rec.total_tokens)}</span>
-                <span class="muted small" title={rec.credits_source || ''}>
-                  {#if rec.credits_source === 'pending'}<span class="badge warn">待结算</span>
-                  {:else if rec.credits_source}{fmtCredits(rec.credits)}
-                  {:else}—{/if}
-                </span>
-              </div>
-            {/each}
-          </div>
-        </div>
-      {/if}
-    </section>
-  {/if}
-
-  {#if tab === 'settings'}
-    <Settings />
-  {/if}
-
-  {#if tab === 'add'}
-    <section class="card">
-      <div class="segmented">
-        <button class:active={addMode === 'device'} onclick={() => (addMode = 'device')}>设备授权登录</button>
-        {#if manualSources.length}
-          <button class:active={addMode === 'manual'} onclick={() => (addMode = 'manual')}>粘贴令牌</button>
-        {/if}
-        {#if localSources.length}
-          <button class:active={addMode === 'local'} onclick={() => (addMode = 'local')}>从本机导入</button>
-        {/if}
-      </div>
-
-      {#if addMode === 'local'}
-      <h2>从本机导入</h2>
-      <p class="muted">
-        读取本机已登录客户端的会话，直接导入账号，无需复制令牌。这是一次显式操作：仅在你点击后读取，不会在后台扫描。
-      </p>
-      {#if localSources.length > 1}
-        <label class="stack">
-          <span>来源</span>
-          <select bind:value={localSource}>
-            {#each localSources as s}<option value={s}>{s}</option>{/each}
-          </select>
-        </label>
-      {/if}
-      <button class="primary" onclick={importLocal} disabled={localPhase === 'running'}>
-        {localPhase === 'running' ? '读取中…' : '从本机导入账号'}
-      </button>
-      {#if localMsg}
-        <p class="msg {localPhase === 'error' ? 'error' : 'ok'}">{localMsg}</p>
-      {/if}
-      {:else if addMode === 'device' || !manualSources.length}
-      <h2>设备授权登录</h2>
-      <p class="muted">
-        选择来源与区域后开始授权，浏览器会打开登录页；完成后此页面自动接收账号，无需手工粘贴令牌。
-      </p>
-
-      {#if authPhase === 'idle' || authPhase === 'error'}
-        <div class="form">
-          <label>
-            <span>来源</span>
-            <select bind:value={authSource}>
-              {#each deviceSources as s}<option value={s}>{s}</option>{/each}
-            </select>
-          </label>
-          <label>
-            <span>区域</span>
-            <select bind:value={authRealm}>
-              <option value="cn">中国大陆</option>
-              <option value="global">国际</option>
-            </select>
-          </label>
-          <button class="primary" onclick={startAuth}>开始授权</button>
-        </div>
-        {#if authPhase === 'error'}
-          <p class="msg error">{authMsg}</p>
-        {/if}
-      {/if}
-
-      {#if authPhase === 'starting'}
-        <p class="muted">正在申请授权码…</p>
-      {/if}
-
-      {#if authPhase === 'waiting'}
-        <div class="auth-wait">
-          <p class="spin">等待浏览器完成授权…</p>
-          {#if authUrl}
-            <p>
-              <a href={authUrl} target="_blank" rel="noreferrer">打开登录页</a>
-            </p>
-            <p class="muted small mono">{authUrl}</p>
+          <button class:active={addMode === 'device'} onclick={() => (addMode = 'device')}>{t.add.mode.device}</button>
+          {#if manualSources.length}
+            <button class:active={addMode === 'manual'} onclick={() => (addMode = 'manual')}>{t.add.mode.manual}</button>
           {/if}
-          <button class="link" onclick={resetAuth}>取消</button>
+          {#if localSources.length}
+            <button class:active={addMode === 'local'} onclick={() => (addMode = 'local')}>{t.add.mode.local}</button>
+          {/if}
         </div>
-      {/if}
 
-      {#if authPhase === 'done'}
-        <div class="auth-done">
-          <p class="msg ok">{authMsg}</p>
-          <button class="primary" onclick={resetAuth}>再添加一个</button>
+        {#if addMode === 'local'}
+          <h2 class="section-title">{t.add.local.title}</h2>
+          <p class="muted lede-small">{t.add.local.body}</p>
+          {#if localSources.length > 1}
+            <label class="field">
+              <span class="field-label">{t.add.local.source}</span>
+              <select bind:value={localSource}>
+                {#each localSources as s}<option value={s}>{s}</option>{/each}
+              </select>
+            </label>
+          {/if}
+          <button class="btn primary" onclick={importLocal} disabled={localPhase === 'running'}>
+            {#if localPhase === 'running'}<span class="spinner"></span>{/if}
+            {localPhase === 'running' ? t.add.local.running : t.add.local.button}
+          </button>
+          {#if localMsg}
+            <p class="msg {localPhase === 'error' ? 'error' : 'ok'}">{localMsg}</p>
+          {/if}
+        {:else if addMode === 'device' || !manualSources.length}
+          <h2 class="section-title">{t.add.device.title}</h2>
+          <p class="muted lede-small">{t.add.device.body}</p>
+
+          {#if authPhase === 'idle' || authPhase === 'error'}
+            <div class="field-row">
+              <label class="field">
+                <span class="field-label">{t.add.device.source}</span>
+                <select bind:value={authSource}>
+                  {#each deviceSources as s}<option value={s}>{s}</option>{/each}
+                </select>
+              </label>
+              <label class="field">
+                <span class="field-label">{t.add.device.realm}</span>
+                <select bind:value={authRealm}>
+                  <option value="cn">{t.add.device.realmCn}</option>
+                  <option value="global">{t.add.device.realmGlobal}</option>
+                </select>
+              </label>
+              <button class="btn primary" onclick={startAuth}>{t.add.device.start}</button>
+            </div>
+            {#if authPhase === 'error'}
+              <p class="msg error">{authMsg}</p>
+            {/if}
+          {/if}
+
+          {#if authPhase === 'starting'}
+            <p class="msg"><span class="spinner inline"></span> {t.add.device.starting}</p>
+          {/if}
+
+          {#if authPhase === 'waiting'}
+            <div class="auth-wait">
+              <p class="msg"><span class="spinner inline"></span> {t.add.device.waiting}</p>
+              {#if authUrl}
+                <a class="btn ghost" href={authUrl} target="_blank" rel="noreferrer">
+                  <Icon name="external" size={15} />
+                  {t.add.device.openLogin}
+                </a>
+                <p class="muted small mono url">{authUrl}</p>
+              {/if}
+              <button class="btn quiet" onclick={resetAuth}>{t.common.cancel}</button>
+            </div>
+          {/if}
+
+          {#if authPhase === 'done'}
+            <div class="auth-wait">
+              <p class="msg ok">{authMsg}</p>
+              <button class="btn ghost" onclick={resetAuth}>{t.add.device.again}</button>
+            </div>
+          {/if}
+        {:else}
+          <h2 class="section-title">{t.add.token.title}</h2>
+          <p class="muted lede-small">{t.add.token.body}</p>
+
+          <label class="field">
+            <span class="field-label">{t.add.token.source}</span>
+            <select bind:value={tokenSource}>
+              {#each manualSources as s}<option value={s}>{s}</option>{/each}
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">{modeHint ? t.add.token.labelWithHint(modeHint) : t.add.token.label}</span>
+            <textarea rows="3" bind:value={tokenValue} placeholder={tokenPlaceholder}></textarea>
+          </label>
+          <div class="field-row">
+            <label class="field">
+              <span class="field-label">{t.add.token.refresh}</span>
+              <input bind:value={tokenRefresh} />
+            </label>
+            <label class="field">
+              <span class="field-label">{t.add.token.uid}</span>
+              <input bind:value={tokenUid} />
+            </label>
+            <label class="field">
+              <span class="field-label">{t.add.token.note}</span>
+              <input bind:value={tokenLabel} placeholder={t.add.token.notePlaceholder} />
+            </label>
+          </div>
+          <button class="btn primary" onclick={submitToken} disabled={tokenPhase === 'running'}>
+            {#if tokenPhase === 'running'}<span class="spinner"></span>{/if}
+            {tokenPhase === 'running' ? t.add.token.submitting : t.add.token.submit}
+          </button>
+          {#if tokenMsg}
+            <p class="msg {tokenPhase === 'error' ? 'error' : 'ok'}">{tokenMsg}</p>
+          {/if}
+        {/if}
+      </div>
+    {/if}
+
+    {#if tab === 'import'}
+      <div class="page-head">
+        <div class="titles">
+          <h1>{t.importAcc.title}</h1>
+          <p class="lede">{t.importAcc.body}</p>
         </div>
-      {/if}
-      {:else}
-      <h2>粘贴令牌</h2>
-      <p class="muted">
-        直接从已登录的客户端复制令牌粘贴到此。令牌是本机凭据，仅保存在账号目录中，不会上传。
-      </p>
-
-      <label class="stack">
-        <span>来源</span>
-        <select bind:value={tokenSource}>
-          {#each manualSources as s}<option value={s}>{s}</option>{/each}
-        </select>
-      </label>
-      <label class="stack">
-        <span>令牌{modeHint ? `（${modeHint}）` : ''}</span>
-        <textarea rows="3" bind:value={tokenValue} placeholder={tokenPlaceholder}></textarea>
-      </label>
-      <div class="form">
-        <label>
-          <span>刷新令牌（可选）</span>
-          <input bind:value={tokenRefresh} />
-        </label>
-        <label>
-          <span>用户 ID（可选）</span>
-          <input bind:value={tokenUid} />
-        </label>
-        <label>
-          <span>备注（可选）</span>
-          <input bind:value={tokenLabel} placeholder="例如 主力号" />
-        </label>
-      </div>
-      <button class="primary" onclick={submitToken} disabled={tokenPhase === 'running'}>
-        {tokenPhase === 'running' ? '添加中…' : '添加账号'}
-      </button>
-      {#if tokenMsg}
-        <p class="msg {tokenPhase === 'error' ? 'error' : 'ok'}">{tokenMsg}</p>
-      {/if}
-      {/if}
-    </section>
-  {/if}
-
-  {#if tab === 'import'}
-    <section class="card">
-      <h2>导入账号</h2>
-      <p class="muted">支持直接粘贴 JSON、读取服务器本地文件，或使用口令解密导出的加密包。</p>
-
-      <div class="segmented">
-        <button class:active={importMode === 'inline'} onclick={() => (importMode = 'inline')}>粘贴 JSON</button>
-        <button class:active={importMode === 'path'} onclick={() => (importMode = 'path')}>本地文件</button>
-        <button class:active={importMode === 'bundle'} onclick={() => (importMode = 'bundle')}>加密包</button>
       </div>
 
-      {#if importMode === 'inline'}
-        <label class="stack">
-          <span>账号 JSON（数组，或形如 <code>&#123;accounts: [...]&#125;</code> 的对象）</span>
-          <textarea rows="8" bind:value={importText} placeholder={inlinePlaceholder}></textarea>
-        </label>
-      {:else if importMode === 'path'}
-        <label class="stack">
-          <span>服务器文件路径</span>
-          <input bind:value={importPath} placeholder="D:/backup/accounts.json" />
-        </label>
-      {:else}
-        <label class="stack">
-          <span>加密包内容（JSON 或 base64）</span>
-          <textarea rows="5" bind:value={importBundle}></textarea>
-        </label>
-        <label class="stack">
-          <span>口令</span>
-          <input type="password" bind:value={importPass} />
-        </label>
-      {/if}
+      <div class="card">
+        <div class="segmented">
+          <button class:active={importMode === 'inline'} onclick={() => (importMode = 'inline')}>{t.importAcc.mode.inline}</button>
+          <button class:active={importMode === 'path'} onclick={() => (importMode = 'path')}>{t.importAcc.mode.path}</button>
+          <button class:active={importMode === 'bundle'} onclick={() => (importMode = 'bundle')}>{t.importAcc.mode.bundle}</button>
+        </div>
 
-      <button class="primary" onclick={doImport} disabled={importPhase === 'running'}>
-        {importPhase === 'running' ? '导入中…' : '导入'}
-      </button>
+        {#if importMode === 'inline'}
+          <label class="field">
+            <span class="field-label">{t.importAcc.inlineLabel}</span>
+            <textarea rows="8" bind:value={importText} placeholder={inlinePlaceholder}></textarea>
+          </label>
+        {:else if importMode === 'path'}
+          <label class="field">
+            <span class="field-label">{t.importAcc.pathLabel}</span>
+            <input bind:value={importPath} placeholder={t.importAcc.pathPlaceholder} />
+          </label>
+        {:else}
+          <label class="field">
+            <span class="field-label">{t.importAcc.bundleLabel}</span>
+            <textarea rows="5" bind:value={importBundle}></textarea>
+          </label>
+          <label class="field">
+            <span class="field-label">{t.importAcc.passphrase}</span>
+            <input type="password" bind:value={importPass} />
+          </label>
+        {/if}
 
-      {#if importMsg}
-        <p class="msg {importPhase === 'error' ? 'error' : 'ok'}">{importMsg}</p>
-      {/if}
-      {#if importResult && importResult.errors?.length}
-        <ul class="skips">
-          {#each importResult.errors as e}<li>{e}</li>{/each}
-        </ul>
-      {/if}
-    </section>
-  {/if}
+        <button class="btn primary" onclick={doImport} disabled={importPhase === 'running'}>
+          {#if importPhase === 'running'}<span class="spinner"></span>{/if}
+          {importPhase === 'running' ? t.importAcc.running : t.importAcc.submit}
+        </button>
 
-  <footer class="muted small">
-    本控制台仅从本机回环地址使用；远程访问需在请求中携带网关 api_key。
-  </footer>
+        {#if importMsg}
+          <p class="msg {importPhase === 'error' ? 'error' : 'ok'}">{importMsg}</p>
+        {/if}
+        {#if importResult && importResult.errors?.length}
+          <ul class="skips">
+            {#each importResult.errors as e}<li>{e}</li>{/each}
+          </ul>
+        {/if}
+      </div>
+    {/if}
+  </main>
+
+  <footer class="foot muted small">{t.footer}</footer>
 </div>
 
+<ToastHost />
+<ConfirmHost />
+
 <style>
-  :global(:root) {
-    --bg: #f6f7f9;
-    --surface: #ffffff;
-    --border: #e3e6ea;
-    --text: #1a1d21;
-    --muted: #6b7280;
-    --accent: #2f6fed;
-    --ok: #15803d;
-    --ok-bg: #e7f6ec;
-    --warn: #b45309;
-    --warn-bg: #fdf2e2;
-    --bad: #b91c1c;
-    --bad-bg: #fbe9e9;
-    --idle-bg: #eef1f5;
-  }
-  @media (prefers-color-scheme: dark) {
-    :global(:root:not([data-theme])) {
-      --bg: #14161a;
-      --surface: #1c1f24;
-      --border: #2b3037;
-      --text: #e6e8eb;
-      --muted: #9aa2ad;
-      --accent: #5b8dff;
-      --ok-bg: #12281a;
-      --warn-bg: #2c2109;
-      --bad-bg: #2c1414;
-      --idle-bg: #232830;
-    }
-  }
-
   .shell {
-    font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-    color: var(--text);
-    background: var(--bg);
+    display: flex;
+    flex-direction: column;
     min-height: 100vh;
-    padding: 2rem 1.5rem 3rem;
-    box-sizing: border-box;
-  }
-  .shell > * {
-    max-width: 62rem;
-    margin-left: auto;
-    margin-right: auto;
   }
 
-  header {
+  /* ── top bar ───────────────────────────────────────────────────────────── */
+
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: var(--z-sticky-header);
+    background: var(--nav-bg);
+    backdrop-filter: var(--nav-blur);
+    -webkit-backdrop-filter: var(--nav-blur);
+    border-bottom: 1px solid transparent;
+    transition: background var(--transition-normal), border-color var(--transition-normal),
+      box-shadow var(--transition-normal);
+  }
+
+  .topbar.scrolled {
+    background: var(--nav-bg-scrolled);
+    border-bottom-color: var(--border-subtle);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .topbar-inner {
+    max-width: var(--page-max-width);
+    margin: 0 auto;
+    padding: var(--space-3) var(--page-padding-x);
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    margin-bottom: 1.5rem;
+    gap: var(--space-4);
+    flex-wrap: wrap;
   }
-  .brand { display: flex; align-items: center; gap: .85rem; }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    min-width: 0;
+  }
+
   .logo {
     display: grid;
     place-items: center;
-    width: 2.5rem; height: 2.5rem;
-    border-radius: .6rem;
-    background: var(--accent);
+    width: 34px;
+    height: 34px;
+    flex: none;
+    border-radius: var(--radius);
+    background: linear-gradient(145deg, var(--primary), #fb7185);
     color: #fff;
-    font-weight: 700;
-    letter-spacing: .02em;
+    font-family: var(--font-family-mono);
+    font-size: var(--text-sm);
+    font-weight: var(--font-semibold);
+    letter-spacing: -0.04em;
+    box-shadow: 0 2px 10px var(--glow-orange);
   }
-  h1 { font-size: 1.15rem; margin: 0; }
-  header p { margin: .15rem 0 0; font-size: .8rem; }
-  .stat { display: flex; align-items: center; gap: .45rem; font-size: .85rem; }
-  .count { font-size: 1.1rem; font-weight: 700; font-variant-numeric: tabular-nums; }
-  .dot { width: .35rem; height: .35rem; border-radius: 50%; background: var(--ok); }
 
-  .muted { color: var(--muted); }
-  .small { font-size: .78rem; }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
-  .pad { padding: 2rem 0; }
-  .right { text-align: right; }
+  .brand-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .brand-name {
+    font-size: var(--text-base);
+    font-weight: var(--font-semibold);
+    letter-spacing: var(--tracking-tight);
+    line-height: var(--leading-tight);
+  }
+
+  .brand-sub {
+    font-size: var(--text-2xs);
+    color: var(--muted-foreground);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .tabs {
+    display: flex;
+    align-items: center;
+    gap: var(--space-0-5);
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .tab {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1-5);
+    height: 34px;
+    padding: 0 var(--space-3);
+    border: none;
+    border-radius: 999px;
+    background: none;
+    color: var(--muted-foreground);
+    font: inherit;
+    font-size: var(--text-caption);
+    font-weight: var(--font-medium);
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background var(--transition-fast), color var(--transition-fast);
+  }
+
+  .tab:hover {
+    background: var(--surface-hover);
+    color: var(--foreground);
+  }
+
+  .tab.active {
+    background: var(--primary-light);
+    color: var(--primary);
+    font-weight: var(--font-semibold);
+  }
+
+  .tab-sep {
+    width: 1px;
+    height: 18px;
+    margin: 0 var(--space-1-5);
+    background: var(--border);
+    flex: none;
+  }
+
+  .topbar-right {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin-left: auto;
+  }
+
+  .stat {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1-5);
+    font-size: var(--text-sm);
+    white-space: nowrap;
+  }
+
+  .count {
+    font-size: var(--text-base);
+    font-weight: var(--font-semibold);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 0 3px var(--success-bg);
+  }
+
+  .theme-switch {
+    flex: none;
+  }
+
+  .theme-opt .theme-label {
+    display: none;
+  }
+
+  /* ── page ──────────────────────────────────────────────────────────────── */
+
+  .page {
+    flex: 1;
+    width: 100%;
+    max-width: var(--page-max-width);
+    margin: 0 auto;
+    padding: var(--page-top) var(--page-padding-x) var(--page-bottom);
+  }
+
+  .page-head {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: var(--space-4);
+    flex-wrap: wrap;
+    margin-bottom: var(--space-5);
+  }
+
+  .page-head .titles {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-width: 0;
+  }
+
+  .page-head h1 {
+    margin: 0;
+    font-size: var(--text-2xl);
+    font-weight: var(--font-semibold);
+    letter-spacing: var(--tracking-tight);
+  }
+
+  .lede {
+    margin: 0;
+    max-width: 52rem;
+    font-size: var(--text-caption);
+    color: var(--muted-foreground);
+    line-height: var(--leading-relaxed);
+  }
+
+  .lede-small {
+    font-size: var(--text-caption);
+    line-height: var(--leading-relaxed);
+    max-width: 46rem;
+  }
 
   .banner {
-    display: flex; align-items: center; justify-content: space-between; gap: 1rem;
-    background: var(--bad-bg); color: var(--bad);
-    border: 1px solid var(--border);
-    border-radius: .5rem;
-    padding: .6rem .9rem;
-    margin-bottom: 1rem;
-    font-size: .85rem;
+    margin-bottom: var(--space-4);
   }
 
-  .tabs { display: flex; gap: .25rem; border-bottom: 1px solid var(--border); margin-bottom: 1.25rem; }
-  .tabs button {
-    background: none; border: none; cursor: pointer;
-    padding: .55rem .9rem;
-    font: inherit; color: var(--muted);
-    border-bottom: 2px solid transparent;
-    margin-bottom: -1px;
-  }
-  .tabs button.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+  /* ── groups ────────────────────────────────────────────────────────────── */
 
-  .group { margin-bottom: 1.75rem; }
-  .group h2 { display: flex; align-items: center; gap: .5rem; font-size: .95rem; margin: 0 0 .6rem; }
-  .src {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    background: var(--idle-bg);
-    border-radius: .35rem; padding: .12rem .5rem;
-  }
-  .pill {
-    font-size: .72rem; color: var(--muted);
-    background: var(--idle-bg); border-radius: 999px; padding: .1rem .5rem;
+  .group {
+    margin-bottom: var(--space-6);
   }
 
-  .table { background: var(--surface); border: 1px solid var(--border); border-radius: .6rem; overflow: hidden; }
-  .row {
-    display: grid;
-    grid-template-columns: 2fr 1.2fr 1fr 1fr 1.2fr 4rem;
-    gap: .75rem;
+  .group-head {
+    display: flex;
     align-items: center;
-    padding: .65rem .9rem;
-    border-top: 1px solid var(--border);
-    font-size: .85rem;
+    gap: var(--space-2);
+    margin-bottom: var(--space-3);
   }
-  .row:first-child { border-top: none; }
-  .row.head { background: var(--bg); color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; }
-  .label { display: flex; flex-direction: column; gap: .1rem; font-weight: 500; min-width: 0; }
-  .label .uid { font-style: normal; color: var(--muted); font-size: .72rem; font-family: ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-  .badge { display: inline-block; border-radius: 999px; padding: .1rem .55rem; font-size: .74rem; font-weight: 600; }
-  .badge.ok { background: var(--ok-bg); color: var(--ok); }
-  .badge.warn { background: var(--warn-bg); color: var(--warn); }
-  .badge.bad { background: var(--bad-bg); color: var(--bad); }
-  .badge.off { background: var(--idle-bg); color: var(--muted); }
-  .badge.idle { background: var(--idle-bg); color: var(--muted); }
-
-  .empty { text-align: center; padding: 3rem 1rem; background: var(--surface); border: 1px dashed var(--border); border-radius: .6rem; }
-
-  .card { background: var(--surface); border: 1px solid var(--border); border-radius: .6rem; padding: 1.25rem; }
-  .card h2 { font-size: 1rem; margin: 0 0 .35rem; }
-  .card > p { margin-top: 0; font-size: .85rem; }
-
-  .form { display: flex; align-items: flex-end; gap: 1rem; flex-wrap: wrap; margin-top: 1rem; }
-  label { display: flex; flex-direction: column; gap: .3rem; font-size: .82rem; }
-  label > span { color: var(--muted); }
-  .stack { margin-top: .9rem; }
-  select, input, textarea {
-    font: inherit; color: var(--text); background: var(--bg);
-    border: 1px solid var(--border); border-radius: .45rem; padding: .5rem .6rem;
+  .group-head h2 {
+    margin: 0;
+    font-size: var(--text-base);
+    font-weight: var(--font-semibold);
   }
-  textarea { width: 100%; box-sizing: border-box; font-family: ui-monospace, monospace; font-size: .8rem; resize: vertical; }
-  input { min-width: 16rem; }
-  select { min-width: 9rem; }
 
-  button.primary {
-    font: inherit; cursor: pointer;
-    background: var(--accent); color: #fff; border: none;
-    border-radius: .45rem; padding: .55rem 1.1rem; font-weight: 600;
+  .src {
+    font-family: var(--font-family-mono);
+    font-size: var(--text-sm);
+    background: var(--secondary);
+    border-radius: var(--radius-sm);
+    padding: 3px var(--space-2-5);
   }
-  button.primary:disabled { opacity: .6; cursor: default; }
-  button.link { background: none; border: none; color: var(--accent); cursor: pointer; font: inherit; padding: 0; }
-  button.link.danger { color: var(--bad); }
 
-  .segmented { display: inline-flex; margin: .9rem 0 0; border: 1px solid var(--border); border-radius: .5rem; overflow: hidden; }
-  .segmented button {
-    font: inherit; cursor: pointer; background: var(--surface); color: var(--muted);
-    border: none; padding: .45rem .85rem; border-right: 1px solid var(--border);
+  /* ── layout helpers ────────────────────────────────────────────────────── */
+
+  .column {
+    display: flex;
+    flex-direction: column;
+    gap: var(--section-gap);
   }
-  .segmented button:last-child { border-right: none; }
-  .segmented button.active { background: var(--accent); color: #fff; }
 
-  .msg { margin-top: .9rem; font-size: .85rem; }
-  .msg.ok { color: var(--ok); }
-  .msg.error { color: var(--bad); }
-  .skips { margin: .6rem 0 0; padding-left: 1.2rem; color: var(--warn); font-size: .8rem; }
-
-  .auth-wait, .auth-done { margin-top: 1rem; display: flex; flex-direction: column; gap: .5rem; align-items: flex-start; }
-  .spin::after {
-    content: ''; display: inline-block; width: .6rem; height: .6rem; margin-left: .5rem;
-    border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%;
-    animation: rot .8s linear infinite; vertical-align: middle;
+  .section-title {
+    margin: var(--space-5) 0 var(--space-1-5);
+    font-size: var(--text-lg);
+    font-weight: var(--font-semibold);
   }
-  @keyframes rot { to { transform: rotate(360deg); } }
 
-  code { background: var(--idle-bg); border-radius: .25rem; padding: .05rem .3rem; font-size: .8em; }
-  footer { margin-top: 2rem; text-align: center; }
+  /* ── table column sets ─────────────────────────────────────────────────── */
 
-  /* ── task center ─────────────────────────────────────────────────────── */
-  .column { display: flex; flex-direction: column; gap: 1rem; }
-  .rowhead { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: .6rem; }
-  .rowhead h2 { margin: 0; }
-  .spacer { flex: 1 1 auto; }
-  .pad-sm { padding: .75rem 0; }
-
-  .ops { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }
-  .ops button {
-    font: inherit; cursor: pointer;
-    background: var(--surface); color: var(--text);
-    border: 1px solid var(--border); border-radius: .45rem;
-    padding: .45rem .85rem;
+  .table {
+    --cols-accounts: minmax(9rem, 2fr) minmax(8rem, 1.4fr) 6rem 6rem minmax(9rem, 1.2fr) 4rem;
+    --cols-tasks: minmax(11rem, 2.2fr) 6rem 5.5rem minmax(7rem, 1.2fr) 6rem;
+    --cols-queue: minmax(10rem, 2.4fr) 5rem 5rem;
+    --cols-logs: 5.5rem minmax(8rem, 1.4fr) minmax(6rem, 1fr) minmax(7rem, 1.1fr) 7.5rem 4.5rem
+      minmax(7rem, 1fr) minmax(6rem, 0.9fr) 5rem;
+    --cols-daily: 6.5rem repeat(2, 4rem) 4rem repeat(3, minmax(4.5rem, 1fr));
+    --cols-models: minmax(9rem, 1.6fr) 4.5rem repeat(3, minmax(4.5rem, 1fr)) 5.5rem;
+    --cols-records: minmax(9rem, 1.1fr) 5rem minmax(6rem, 1fr) minmax(7rem, 1.1fr) 4.5rem
+      minmax(7rem, 1fr) 5rem 5.5rem;
   }
-  .ops button:disabled { opacity: .55; cursor: default; }
 
-  .qtable, .ttable { border: 1px solid var(--border); border-radius: .5rem; overflow: hidden; margin-top: .5rem; }
-  .qrow {
-    display: grid; grid-template-columns: 2.4fr 1fr 1fr;
-    gap: .6rem; align-items: center;
-    padding: .5rem .75rem; border-top: 1px solid var(--border); font-size: .82rem;
+  .table.scroll {
+    overflow-x: auto;
   }
-  .qrow:first-child { border-top: none; }
-  .trow {
-    display: grid; grid-template-columns: 2.2fr 1fr 1fr 1.5fr 5rem;
-    gap: .6rem; align-items: center;
-    padding: .5rem .75rem; border-top: 1px solid var(--border); font-size: .82rem;
+
+  .table.scroll > .row {
+    min-width: 720px;
   }
-  .trow:first-child { border-top: none; }
-  .qhead, .trow.thead {
-    background: var(--bg); color: var(--muted);
-    font-size: .7rem; text-transform: uppercase; letter-spacing: .04em;
+
+  .table.scroll .cell-route {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
   }
-  .right.actions { display: flex; gap: .6rem; justify-content: flex-end; }
-  button.link.tiny { font-size: .76rem; margin-top: .6rem; }
 
-  .acc-card { padding: .9rem 1rem; margin-bottom: .6rem; }
-  .acc-head { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }
-  button.link.caret { font-weight: 600; color: var(--text); }
-
-  .results { margin: .75rem 0 0; padding-left: 1.1rem; font-size: .78rem; color: var(--muted); }
-  .results li.error { color: var(--bad); }
-  .results li.done { color: var(--ok); }
-
-  .catalog h3 { display: flex; align-items: center; gap: .45rem; font-size: .85rem; margin: .9rem 0 .35rem; }
-  .catalog ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .3rem; }
-  .catalog li { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; font-size: .8rem; }
-  details summary { cursor: pointer; font-size: .9rem; font-weight: 600; }
-  details[open] summary { margin-bottom: .4rem; }
-
-  /* ── request log ─────────────────────────────────────────────────────── */
-  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr)); gap: .6rem; }
-  .stat-card {
-    display: flex; flex-direction: column; gap: .2rem;
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: .5rem; padding: .7rem .85rem;
+  .cell-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
   }
-  .stat-card .k { font-size: .72rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
-  .stat-card .v { font-size: 1.15rem; font-weight: 700; font-variant-numeric: tabular-nums; }
-  .stat-card .v em { font-style: normal; font-size: .7rem; font-weight: 500; color: var(--muted); margin-left: .15rem; }
 
-  .row.logrow { grid-template-columns: 1fr 1.7fr 1.2fr 1.1fr .7fr 1.3fr .8fr .9fr; }
-  .row.loghead { background: var(--bg); color: var(--muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .04em; }
+  .cell-stack em {
+    font-style: normal;
+    font-size: var(--text-2xs);
+    color: var(--muted-foreground);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .cell-status {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1-5);
+    flex-wrap: wrap;
+  }
+
+  .right.actions {
+    display: flex;
+    gap: var(--space-3);
+    justify-content: flex-end;
+  }
+
+  .task-skeleton {
+    margin-top: var(--space-3);
+  }
+
+  .table .row.skeleton-row {
+    --cols: repeat(3, 1fr);
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .table .row.skeleton-row .skeleton {
+    height: 12px;
+  }
+
+  /* ── task cards ────────────────────────────────────────────────────────── */
+
+  .acc-card {
+    padding: var(--space-4);
+    margin-bottom: var(--space-3);
+  }
+
+  .acc-head {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .acc-name {
+    font-weight: var(--font-semibold);
+  }
+
+  .caret {
+    gap: var(--space-1-5);
+  }
+
+  .caret-glyph {
+    display: inline-block;
+    color: var(--muted-foreground);
+    transition: transform var(--transition-ios);
+    font-size: 0.7em;
+  }
+
+  .caret-glyph.open {
+    transform: rotate(90deg);
+  }
+
+  .acc-ops {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    font-size: var(--text-sm);
+  }
+
+  .results {
+    margin: var(--space-3) 0 0;
+    padding-left: var(--space-4);
+    font-size: var(--text-xs);
+    color: var(--muted-foreground);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .results li.error {
+    color: var(--destructive);
+  }
+
+  .results li.done {
+    color: var(--success);
+  }
+
+  .catalog h3 {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+    font-weight: var(--font-semibold);
+    margin: var(--space-4) 0 var(--space-2);
+  }
+
+  .catalog ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1-5);
+  }
+
+  .catalog li {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    font-size: var(--text-xs);
+  }
+
+  /* ── usage chart ───────────────────────────────────────────────────────── */
 
   .bars {
     display: flex;
     align-items: flex-end;
     gap: 2px;
-    height: 120px;
-    margin: 8px 0 4px;
+    height: 132px;
+    margin: var(--space-2) 0 0;
   }
+
   .bar-col {
     flex: 1 1 0;
     min-width: 3px;
@@ -1613,110 +1994,150 @@
     display: flex;
     align-items: flex-end;
   }
+
   .bar {
     width: 100%;
     min-height: 2px;
-    border-radius: 2px 2px 0 0;
-    background: var(--accent, #4a7dff);
-    opacity: 0.85;
+    border-radius: 3px 3px 0 0;
+    background: linear-gradient(to top, var(--primary), color-mix(in srgb, var(--primary) 55%, transparent));
+    opacity: 0.9;
+    transition: opacity var(--transition-fast), transform var(--transition-fast);
   }
+
+  .bar-col:hover .bar {
+    opacity: 1;
+  }
+
+  /* A day with no traffic is an axis line, not a spike: colouring it like real
+     usage makes an idle week look busy. */
+  .bar.zero {
+    background: var(--border);
+    opacity: 1;
+  }
+
+  .filters {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+
   .filters select,
   .filters input {
-    max-width: 180px;
+    width: auto;
+    min-width: 9rem;
+    font-size: var(--text-sm);
   }
 
-  :global(:root[data-theme='dark']) {
-    --bg: #14161a;
-    --surface: #1c1f24;
-    --border: #2b3037;
-    --text: #e6e8eb;
-    --muted: #9aa2ad;
-    --accent: #5b8dff;
-    --ok: #4ade80;
-    --ok-bg: #14291d;
-    --warn: #fbbf24;
-    --warn-bg: #2a2113;
-    --bad: #f87171;
-    --bad-bg: #2c1618;
-    --idle-bg: #23272e;
-    color-scheme: dark;
-  }
-  :global(:root[data-theme='light']) {
-    color-scheme: light;
+  /* ── misc ──────────────────────────────────────────────────────────────── */
+
+  .empty-mark {
+    display: grid;
+    place-items: center;
+    width: 48px;
+    height: 48px;
+    border-radius: var(--radius-lg);
+    background: var(--primary-light);
+    color: var(--primary);
+    margin-bottom: var(--space-1);
   }
 
-  /* Every interactive element shows where the keyboard is, which is the whole
-     difference between "usable" and "usable without a mouse". */
-  :global(:focus-visible) {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-    border-radius: 4px;
+  .auth-wait {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-3);
+    margin-top: var(--space-4);
   }
 
-  .tabs {
-    align-items: center;
-  }
-  .tabs .spacer {
-    flex: 1;
-  }
-  .theme-switch {
-    display: inline-flex;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    overflow: hidden;
-    background: var(--surface);
-  }
-  .theme-switch button {
-    border: none;
-    background: none;
-    color: var(--muted);
-    font: inherit;
-    font-size: 0.72rem;
-    padding: 3px 10px;
-    cursor: pointer;
-  }
-  .theme-switch button.active {
-    background: var(--accent);
-    color: #fff;
-  }
-  .theme-switch button + button {
-    border-left: 1px solid var(--border);
+  .url {
+    max-width: 100%;
+    overflow-wrap: anywhere;
   }
 
-  /* Tables scroll instead of squeezing on a narrow screen. */
-  .table {
-    overflow-x: auto;
-  }
-  .row:hover {
-    background: color-mix(in srgb, var(--accent) 5%, transparent);
+  .skips {
+    margin: var(--space-3) 0 0;
+    padding-left: var(--space-4);
+    color: var(--warning);
+    font-size: var(--text-xs);
   }
 
-  @media (max-width: 720px) {
-    .tabs {
-      flex-wrap: nowrap;
-      overflow-x: auto;
-      scrollbar-width: thin;
-    }
-    .tabs button {
-      white-space: nowrap;
-    }
-    .theme-switch {
+  .spinner.inline {
+    display: inline-block;
+    vertical-align: -2px;
+    margin-right: var(--space-1);
+  }
+
+  .foot {
+    max-width: var(--page-max-width);
+    width: 100%;
+    margin: 0 auto;
+    padding: var(--space-6) var(--page-padding-x) var(--space-10);
+    text-align: center;
+  }
+
+  /* ── responsive ────────────────────────────────────────────────────────── */
+
+  @media (max-width: 1080px) {
+    .brand-sub {
       display: none;
     }
-    .stats {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  @media (max-width: 900px) {
+    .topbar-inner {
+      gap: var(--space-2);
     }
-    .card {
-      padding: 12px;
+    .brand {
+      flex: 1 1 auto;
     }
-    footer {
-      padding-bottom: 20px;
+    .topbar-right {
+      order: 2;
+    }
+    .tabs {
+      order: 3;
+      flex-basis: 100%;
+      margin: 0 calc(-1 * var(--space-1));
+    }
+    .tab-sep {
+      display: none;
     }
   }
-  @media (prefers-reduced-motion: reduce) {
-    * {
-      animation-duration: 0.01ms !important;
-      transition-duration: 0.01ms !important;
+
+  @media (max-width: 640px) {
+    .page {
+      padding: var(--page-top) var(--page-padding-x-mobile) var(--space-12);
+    }
+    .topbar-inner {
+      padding: var(--space-2-5) var(--page-padding-x-mobile);
+    }
+    .stat {
+      display: none;
+    }
+    .page-head h1 {
+      font-size: var(--text-xl);
+    }
+    .tab span:not(.theme-label) {
+      display: none;
+    }
+    .tab {
+      padding: 0 var(--space-2-5);
+    }
+
+    /* On a phone the account list keeps its identity, its state and its one
+       action. A six-column grid would otherwise force a side-scroll that hides
+       exactly the two things the row is for. */
+    .table {
+      --cols-accounts: minmax(0, 1fr) auto 3.5rem;
+    }
+    .accounts-table > .row,
+    .table.scroll.accounts-table > .row {
+      min-width: 0;
+    }
+    .accounts-table .row > :nth-child(3),
+    .accounts-table .row > :nth-child(4),
+    .accounts-table .row > :nth-child(5) {
+      display: none;
     }
   }
 </style>

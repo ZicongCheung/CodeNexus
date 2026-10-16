@@ -98,7 +98,7 @@ func (c *Client) agentChat(ctx context.Context, acc *account.Account, req *upstr
 		return nil, upstream.ClassifyHTTP(resp.StatusCode, string(raw))
 	}
 
-	out := &upstream.ChatResponse{ID: requestID, Model: req.Model}
+	out := &upstream.ChatResponse{ID: requestID, Model: req.Model, Surface: "ide"}
 	st := &snapshotState{emit: write}
 	tools := &toolStream{}
 	sc := bufio.NewScanner(resp.Body)

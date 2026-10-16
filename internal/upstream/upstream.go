@@ -103,6 +103,27 @@ type ChatResponse struct {
 	CreditsConsumed float64
 	// CreditsSource names where CreditsConsumed came from.
 	CreditsSource string
+	// Surface names the executor that served the turn — "remote", "ide",
+	// "cli" or "cloud". It is what decides whether the max profile and the
+	// thinking strength could be applied at all, so the console can explain a
+	// setting that is on but had no effect.
+	Surface string
+	// MaxProfile reports that the 1M max profile was applied, and MaxContext
+	// is the window the account's own catalogue gave it.
+	MaxProfile bool
+	MaxContext int
+	// ContinuedRounds counts the extra upstream turns auto-continue added on
+	// top of the client's one.
+	ContinuedRounds int
+}
+
+// Route is what served one turn: the executor, and whether the max profile
+// applied with which window. A streaming turn never builds a response object,
+// so its first delta carries this instead.
+type Route struct {
+	Surface    string
+	MaxProfile bool
+	MaxContext int
 }
 
 // StreamDelta is one incremental chunk emitted by ChatStream.
@@ -112,6 +133,9 @@ type StreamDelta struct {
 	ToolCalls        []ToolCall
 	FinishReason     string
 	Usage            *Usage
+	// Route accompanies the first delta of a streaming turn so the caller
+	// learns which executor served it and whether a capability applied.
+	Route *Route
 	// TurnID carries the upstream turn identifier so a streaming caller can
 	// settle the turn's charge after the stream ends.
 	TurnID string

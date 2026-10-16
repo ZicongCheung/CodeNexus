@@ -45,6 +45,10 @@ const (
 type chatSession struct {
 	SessionID string
 	MessageID string
+	// MaxContext is the 1M window the session was pinned to, or 0 when the
+	// max profile did not apply. It travels with the session so the response
+	// can report what the outbound request actually asked for.
+	MaxContext int
 }
 
 // createSession opens a remote conversation and returns its identifiers.
@@ -59,7 +63,7 @@ func (c *Client) createSession(ctx context.Context, acc *account.Account, req *u
 		"model_selection_strategy": "manual",
 		"model_config_source":      1,
 	}
-	c.applyModelProfile(ctx, acc, req, agentType, modelName, initial)
+	applied, maxContext := c.applyModelProfile(ctx, acc, req, agentType, modelName, initial)
 	payload := map[string]any{
 		"mode":                mode,
 		"environment_id":      "default",
@@ -107,6 +111,9 @@ func (c *Client) createSession(ctx context.Context, acc *account.Account, req *u
 	sess := &chatSession{
 		SessionID: firstString(data, "chat_session_id", "session_id", "chatSessionId"),
 		MessageID: firstString(data, "message_id", "user_message_id", "messageId"),
+	}
+	if applied {
+		sess.MaxContext = maxContext
 	}
 	if sess.SessionID == "" || sess.MessageID == "" {
 		if code := remoteErrorCode(raw); code != "" {
@@ -314,11 +321,12 @@ func (c *Client) remoteChat(ctx context.Context, acc *account.Account, req *upst
 		return nil, upstream.ClassifyHTTP(resp.StatusCode, string(raw))
 	}
 
-	out := &upstream.ChatResponse{ID: sess.SessionID, Model: req.Model, TurnID: sess.MessageID}
+	out := &upstream.ChatResponse{ID: sess.SessionID, Model: req.Model, TurnID: sess.MessageID,
+		Surface: "remote", MaxProfile: sess.MaxContext > 0, MaxContext: sess.MaxContext}
 	// Announce the turn id before any content so a streaming caller learns what
 	// to settle the charge against even if the answer is long.
 	if emit != nil {
-		if err := emit(upstream.StreamDelta{TurnID: sess.MessageID}); err != nil {
+		if err := emit(upstream.StreamDelta{TurnID: sess.MessageID, Route: routeOf(out)}); err != nil {
 			return nil, err
 		}
 	}
@@ -423,6 +431,17 @@ type snapshotState struct {
 	text    string
 	reason  string
 	emitted bool
+	// routed records that the turn's routing note has been sent, so the
+	// caller learns the executor once rather than on every chunk.
+	routed bool
+}
+
+// routeOf narrows a response into the routing note a streaming caller needs.
+func routeOf(out *upstream.ChatResponse) *upstream.Route {
+	if out == nil || out.Surface == "" {
+		return nil
+	}
+	return &upstream.Route{Surface: out.Surface, MaxProfile: out.MaxProfile, MaxContext: out.MaxContext}
 }
 
 func (s *snapshotState) write(text, reasoning string, out *upstream.ChatResponse) error {
@@ -441,6 +460,10 @@ func (s *snapshotState) write(text, reasoning string, out *upstream.ChatResponse
 	}
 	if d.Content == "" && d.ReasoningContent == "" {
 		return nil
+	}
+	if !s.routed {
+		s.routed = true
+		d.Route = routeOf(out)
 	}
 	s.emitted = true
 	if s.emit == nil {

@@ -32,6 +32,13 @@ type recHint struct {
 	// Credits and CreditsSource are a charge the response already reported.
 	Credits       float64
 	CreditsSource string
+	// Surface, MaxProfile, MaxContext and ContinuedRounds are what the turn
+	// actually did, which the console shows next to the request so a setting
+	// that could not apply is not mistaken for a broken one.
+	Surface         string
+	MaxProfile      bool
+	MaxContext      int
+	ContinuedRounds int
 	// Snapshot is the open attribution window for the turn in flight. It is
 	// owned by whichever settlement consumes it, and must be released on every
 	// path that leaves the handler.
@@ -110,6 +117,11 @@ func (s *Server) record(source string, h http.HandlerFunc) http.HandlerFunc {
 			Outcome:    outcomeFor(sw.status),
 			Attempts:   hint.Attempts,
 			DurationMS: dur.Milliseconds(),
+
+			Surface:         hint.Surface,
+			MaxProfile:      hint.MaxProfile,
+			MaxContext:      hint.MaxContext,
+			ContinuedRounds: hint.ContinuedRounds,
 		}
 		if hint.Usage != nil {
 			ev.PromptTokens = hint.Usage.Prompt

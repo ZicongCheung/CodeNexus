@@ -3,7 +3,23 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>CodeNexus Console</title>
+    <meta name="color-scheme" content="light dark" />
+    <title>CodeNexus 控制台</title>
+    <script>
+      // Resolve the theme before the first paint. Waiting for the app to mount
+      // means one frame of the wrong palette, which is exactly the flash that
+      // makes a console feel unfinished.
+      ;(function () {
+        try {
+          var saved = localStorage.getItem('codenexus-theme')
+          var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+          var theme = saved === 'light' || saved === 'dark' ? saved : prefersDark ? 'dark' : 'light'
+          document.documentElement.dataset.theme = theme
+        } catch (err) {
+          document.documentElement.dataset.theme = 'light'
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="app"></div>

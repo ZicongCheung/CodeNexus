@@ -31,8 +31,28 @@ type Config struct {
 	ReqLog        ReqLogConfig        `json:"request_log"`
 	UsageStore    UsageStoreConfig    `json:"usage_store"`
 	Responses     ResponsesConfig     `json:"responses"`
+	Stream        StreamConfig        `json:"stream"`
 	Upstreams     UpstreamsConfig     `json:"upstreams"`
 }
+
+// StreamConfig bounds how long a streaming turn may stay silent.
+//
+// An upstream that keeps the connection alive but produces nothing is stuck,
+// not slow: Trae's remote surface in particular emits heartbeats indefinitely
+// while nothing is generated. Left alone the caller waits out the whole
+// request timeout and then receives a 504 for a turn another account could
+// have answered. The watchdog abandons the attempt once the silence passes
+// this bound, so the ordinary failover takes over instead.
+type StreamConfig struct {
+	// StallSeconds is how long an attempt may produce no content, reasoning
+	// or tool call before it is abandoned. Keepalive traffic does not count
+	// as progress. Negative disables the watchdog; zero takes the default.
+	StallSeconds int `json:"stall_seconds"`
+}
+
+// DefaultStreamStallSeconds is the watchdog's default silence bound. It is
+// generous next to a normal think, and far below any request timeout.
+const DefaultStreamStallSeconds = 90
 
 // ResponsesConfig bounds the in-memory `previous_response_id` cache.
 //
@@ -563,6 +583,9 @@ func (c *Config) normalize() {
 	}
 	if c.Upstreams.TraeCN.AuthSource == "" {
 		c.Upstreams.TraeCN.AuthSource = "web-login"
+	}
+	if c.Stream.StallSeconds == 0 {
+		c.Stream.StallSeconds = DefaultStreamStallSeconds
 	}
 	if c.Upstreams.TraeCN.UpstreamMode == "" {
 		c.Upstreams.TraeCN.UpstreamMode = "auto-route"

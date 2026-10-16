@@ -4,6 +4,11 @@
   // covers the fields people actually reach for; the JSON editor underneath it
   // keeps every other field reachable, so nothing is hidden by the form.
 
+  import Icon from './ui/Icon.svelte'
+  import { toastOk, toastErr } from './ui/toast.svelte.js'
+  import { ask } from './ui/confirm.svelte.js'
+  import { t } from './strings.js'
+
   const API = '/panel/api'
 
   let schema = $state([])
@@ -48,9 +53,9 @@
   async function readError(res) {
     try {
       const body = await res.json()
-      return body.error || `请求失败（${res.status}）`
+      return body.error || t.settings.err.request(res.status)
     } catch {
-      return `请求失败（${res.status}）`
+      return t.settings.err.request(res.status)
     }
   }
 
@@ -135,7 +140,7 @@
         confirmPaths = body.confirm_required || []
         return
       }
-      if (!res.ok) throw new Error(body.error || `保存失败（${res.status}）`)
+      if (!res.ok) throw new Error(body.error || t.settings.err.save(res.status))
       values = payload
       draft = {}
       snapshots = body.snapshots || []
@@ -146,6 +151,7 @@
       }
       jsonText = JSON.stringify(values, null, 2)
     } catch (err) {
+      toastErr(err.message)
       error = err.message
     } finally {
       saving = false
@@ -153,7 +159,13 @@
   }
 
   async function rollback(id) {
-    if (!confirm(`回滚到快照 ${id}？当前配置会被覆盖。`)) return
+    const ok = await ask({
+      title: t.settings.snapshot.rollbackTo,
+      body: t.settings.snapshot.confirm(id),
+      confirmLabel: t.settings.snapshot.rollbackTo,
+      danger: true,
+    })
+    if (!ok) return
     saving = true
     error = ''
     try {
@@ -163,10 +175,12 @@
         body: JSON.stringify({ id }),
       })
       const body = await res.json()
-      if (!res.ok) throw new Error(body.error || `回滚失败（${res.status}）`)
+      if (!res.ok) throw new Error(body.error || t.settings.err.rollback(res.status))
       await load()
       result = { applied: body.applied || [], restart: body.restart_required || [] }
+      toastOk(t.settings.saved)
     } catch (err) {
+      toastErr(err.message)
       error = err.message
     } finally {
       saving = false
@@ -174,13 +188,19 @@
   }
 
   async function restart() {
-    if (!confirm('重启网关？当前连接会短暂中断。')) return
+    const ok = await ask({
+      title: t.settings.restartNow,
+      body: t.settings.restartConfirm,
+      confirmLabel: t.settings.restartNow,
+      danger: true,
+    })
+    if (!ok) return
     error = ''
     try {
       const res = await fetch(`${API}/restart`, { method: 'POST' })
       if (!res.ok) {
         const body = await res.json().catch(() => ({}))
-        throw new Error(body.error || `重启失败（${res.status}）`)
+        throw new Error(body.error || t.settings.err.restart(res.status))
       }
       // The process is on its way out; give it a moment and come back.
       await new Promise((r) => setTimeout(r, 3000))
@@ -229,23 +249,30 @@
 
 <section>
   {#if loading}
-    <div class="skeleton-list" aria-busy="true" aria-label="正在加载配置">
-      <div class="skeleton-line"></div>
-      <div class="skeleton-line short"></div>
-      <div class="skeleton-line"></div>
+    <div class="card" aria-busy="true" aria-label={t.settings.loadingAria}>
+      <div class="skeleton-list">
+        <div class="skeleton"></div>
+        <div class="skeleton short"></div>
+        <div class="skeleton"></div>
+      </div>
     </div>
   {:else if error && !values}
     <div class="card">
-      <h2>设置</h2>
+      <h2>{t.settings.title}</h2>
       <p class="msg error">{error}</p>
-      <button onclick={load}>重试</button>
+      <button class="btn ghost" onclick={load}>{t.common.retry}</button>
     </div>
   {:else}
-    <div class="segmented">
-      <button class:active={mode === 'form'} onclick={() => (mode = 'form')}>表单</button>
-      <button class:active={mode === 'json'} onclick={switchToJson}>高级（JSON）</button>
+    <div class="toolbar settings-toolbar">
+      <div class="segmented">
+        <button class:active={mode === 'form'} onclick={() => (mode = 'form')}>{t.settings.tab.form}</button>
+        <button class:active={mode === 'json'} onclick={switchToJson}>{t.settings.tab.json}</button>
+      </div>
       <span class="spacer"></span>
-      <button onclick={load} disabled={saving}>重新载入</button>
+      <button class="btn ghost" onclick={load} disabled={saving}>
+        <Icon name="refresh" size={15} />
+        {t.settings.reload}
+      </button>
     </div>
 
     {#if error}
@@ -254,26 +281,28 @@
 
     {#if result}
       <div class="card result">
-        <p class="ok-line">
-          已保存。
-          {#if result.applied.length}
-            <strong>{result.applied.length}</strong> 项立即生效
-          {/if}
-          {#if result.restart.length}
-            ；<strong>{result.restart.length}</strong> 项需重启后生效
-          {/if}
-          。
-        </p>
+        <div class="result-head">
+          <span class="mark ok"><Icon name="check" size={15} /></span>
+          <p class="ok-line">
+            {t.settings.saved}
+            {#if result.applied.length}
+              <strong>{t.settings.applied(result.applied.length)}</strong>
+            {/if}
+            {#if result.restart.length}
+              <span class="sep">·</span> <strong>{t.settings.restartNeeded(result.restart.length)}</strong>
+            {/if}
+          </p>
+        </div>
         {#if result.restart.length}
-          <ul class="muted small">
+          <ul class="muted small restart-list">
             {#each result.restart as p}
               <li>{labelFor(p)}（{p}）</li>
             {/each}
           </ul>
           {#if canRestart}
-            <button class="primary" onclick={restart}>立即重启</button>
+            <button class="btn primary" onclick={restart}>{t.settings.restartNow}</button>
           {:else}
-            <p class="muted small">当前运行方式不支持自动重启，请手动重启进程。</p>
+            <p class="muted small">{t.settings.noAutoRestart}</p>
           {/if}
         {/if}
       </div>
@@ -281,34 +310,41 @@
 
     {#if confirmPaths.length}
       <div class="card warn-card">
-        <h2>确认保存</h2>
-        <p class="small">以下字段会影响服务可达性或数据存储位置：</p>
-        <ul class="small">
+        <div class="card-head">
+          <div class="titles">
+            <h2>{t.settings.confirm.title}</h2>
+            <span class="hint">{t.settings.confirm.body}</span>
+          </div>
+          <span class="badge warn">{confirmPaths.length}</span>
+        </div>
+        <ul class="small restart-list">
           {#each confirmPaths as p}
             <li>{labelFor(p)}（{p}）</li>
           {/each}
         </ul>
-        <div class="row-actions">
-          <button class="primary" onclick={() => save(true)} disabled={saving}>确认保存</button>
-          <button onclick={() => (confirmPaths = [])}>取消</button>
+        <div class="btn-row">
+          <button class="btn primary" onclick={() => save(true)} disabled={saving}>{t.settings.confirm.save}</button>
+          <button class="btn ghost" onclick={() => (confirmPaths = [])}>{t.common.cancel}</button>
         </div>
       </div>
     {/if}
 
     {#if mode === 'json'}
       <div class="card">
-        <h2>配置文件（原始 JSON）</h2>
-        <p class="muted small">
-          表单未覆盖的字段都能在这里改。保存前会校验字段名，拼错的字段不会被静默忽略。
-        </p>
+        <div class="card-head">
+          <div class="titles">
+            <h2>{t.settings.json.title}</h2>
+            <span class="hint">{t.settings.json.body}</span>
+          </div>
+        </div>
         <textarea class="json-editor" spellcheck="false" bind:value={jsonText}></textarea>
         {#if jsonError}
-          <p class="msg error">JSON 无法解析：{jsonError}</p>
+          <p class="msg error">{t.settings.json.parseError(jsonError)}</p>
         {/if}
-        <div class="row-actions">
-          <button onclick={applyJson} disabled={!!jsonError}>用这份内容填回表单</button>
-          <button class="primary" onclick={() => save(false)} disabled={saving || !!jsonError}>
-            {saving ? '保存中…' : '保存'}
+        <div class="btn-row">
+          <button class="btn ghost" onclick={applyJson} disabled={!!jsonError}>{t.settings.json.apply}</button>
+          <button class="btn primary" onclick={() => save(false)} disabled={saving || !!jsonError}>
+            {saving ? t.settings.saving : t.settings.save}
           </button>
         </div>
       </div>
@@ -320,11 +356,11 @@
             {#each group.fields as field (field.path)}
               <div class="field" class:dirty={isDirty(field)}>
                 <div class="field-head">
-                  <label for="cfg-{field.path}">{field.label}</label>
+                  <label class="field-label" for="cfg-{field.path}">{field.label}</label>
                   <span class="tags">
-                    {#if isDirty(field)}<span class="badge dirty-badge">已改动</span>{/if}
-                    {#if !field.hot}<span class="badge warn">需重启</span>{/if}
-                    {#if field.danger}<span class="badge bad">谨慎</span>{/if}
+                    {#if isDirty(field)}<span class="badge primary">{t.settings.field.changed}</span>{/if}
+                    {#if !field.hot}<span class="badge warn">{t.settings.field.restart}</span>{/if}
+                    {#if field.danger}<span class="badge bad">{t.settings.field.danger}</span>{/if}
                   </span>
                 </div>
 
@@ -362,7 +398,7 @@
                     oninput={(e) => set(field, Number(e.currentTarget.value))}
                   />
                 {:else if field.kind === 'hours'}
-                  <div class="hours" role="group" aria-label="{field.label} 整点">
+                  <div class="hours" role="group" aria-label={t.settings.hoursAria(field.label)}>
                     {#each Array(24) as _, hour}
                       <button
                         type="button"
@@ -383,11 +419,13 @@
                       oninput={(e) => set(field, e.currentTarget.value)}
                     />
                     <button
-                      class="link"
+                      class="btn icon"
+                      aria-label={showSecret[field.path] ? t.settings.secretHide : t.settings.secretShow}
+                      title={showSecret[field.path] ? t.settings.secretHide : t.settings.secretShow}
                       onclick={() =>
                         (showSecret = { ...showSecret, [field.path]: !showSecret[field.path] })}
                     >
-                      {showSecret[field.path] ? '隐藏' : '显示'}
+                      <Icon name={showSecret[field.path] ? 'eyeOff' : 'eye'} size={16} />
                     </button>
                   </div>
                 {:else}
@@ -400,7 +438,7 @@
                   />
                 {/if}
 
-                <p class="help small">{field.help}</p>
+                {#if field.help}<p class="help small">{field.help}</p>{/if}
               </div>
             {/each}
           </div>
@@ -409,147 +447,229 @@
     {/if}
 
     <div class="card sticky-actions">
-      <div class="row-actions">
-        <button class="primary" onclick={() => save(false)} disabled={saving || dirtyCount === 0}>
-          {saving ? '保存中…' : dirtyCount ? `保存 ${dirtyCount} 项改动` : '保存'}
+      <div class="btn-row">
+        <button class="btn primary" onclick={() => save(false)} disabled={saving || dirtyCount === 0}>
+          {saving ? t.settings.saving : dirtyCount ? t.settings.saveCount(dirtyCount) : t.settings.save}
         </button>
-        <button onclick={resetDraft} disabled={saving || dirtyCount === 0}>放弃改动</button>
+        <button class="btn ghost" onclick={resetDraft} disabled={saving || dirtyCount === 0}>
+          {t.settings.discard}
+        </button>
         {#if snapshots.length}
           <span class="spacer"></span>
-          <label class="small muted" for="snap">回滚到</label>
-          <select id="snap" onchange={(e) => e.currentTarget.value && rollback(e.currentTarget.value)}>
-            <option value="">选择快照…</option>
-            {#each snapshots as s}
-              <option value={s.id}>{s.time}</option>
-            {/each}
-          </select>
+          <label class="snap-pick">
+            <span class="muted small">{t.settings.snapshot.rollbackTo}</span>
+            <select id="snap" onchange={(e) => e.currentTarget.value && rollback(e.currentTarget.value)}>
+              <option value="">{t.settings.snapshot.choose}</option>
+              {#each snapshots as s}
+                <option value={s.id}>{s.time}</option>
+              {/each}
+            </select>
+          </label>
         {/if}
       </div>
-      <p class="muted small">
-        保存前会自动留一份快照（最多保留 20 份）。改动监听地址、数据目录或加密开关会导致服务不可达时，可以用快照回滚。
-      </p>
+      <p class="muted small note-line">{t.settings.snapshot.note}</p>
     </div>
   {/if}
 </section>
 
 <style>
+  .settings-toolbar {
+    margin-bottom: var(--space-4);
+  }
+
   .fields {
     display: grid;
-    gap: 14px;
+    gap: var(--space-4);
+    margin-top: var(--space-4);
   }
+
   .field {
     display: grid;
-    gap: 4px;
-    padding: 8px 10px;
-    border-radius: 8px;
+    gap: var(--space-1-5);
+    padding: var(--space-2-5) var(--space-3);
+    margin-bottom: 0;
+    border-radius: var(--radius);
+    border: 1px solid transparent;
     border-left: 2px solid transparent;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
   }
+
+  .field:hover {
+    background: var(--surface-hover);
+  }
+
   .field.dirty {
-    border-left-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 6%, transparent);
+    border-left-color: var(--primary);
+    background: var(--primary-subtle);
   }
+
+  .field > input:not([type='checkbox']),
+  .field > select,
+  .field > .secret {
+    max-width: 26rem;
+  }
+
   .field-head {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-2);
     flex-wrap: wrap;
   }
-  .field-head label {
-    font-weight: 600;
-    font-size: 0.9rem;
-  }
-  .tags {
-    display: inline-flex;
-    gap: 6px;
-  }
-  .help {
-    color: var(--muted);
+
+  .field-head .field-label {
+    font-weight: var(--font-semibold);
+    font-size: var(--text-caption);
+    color: var(--foreground);
+    letter-spacing: var(--tracking-normal);
     margin: 0;
   }
+
+  .tags {
+    display: inline-flex;
+    gap: var(--space-1-5);
+  }
+
+  .help {
+    color: var(--muted-foreground);
+    margin: 0;
+    line-height: var(--leading-relaxed);
+  }
+
   .secret {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-2);
   }
+
   .json-editor {
     width: 100%;
-    min-height: 320px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.8rem;
-    line-height: 1.5;
+    min-height: 22rem;
+    font-size: var(--text-sm);
+    line-height: var(--leading-relaxed);
+    margin-bottom: var(--space-3);
   }
+
   .hours {
     display: flex;
     flex-wrap: wrap;
-    gap: 3px;
+    gap: var(--space-1);
   }
+
   .hour {
-    min-width: 30px;
-    padding: 3px 4px;
-    font-size: 0.72rem;
-    border: 1px solid var(--border);
-    background: var(--bg);
-    color: var(--muted);
-    border-radius: 5px;
+    min-width: 32px;
+    height: 28px;
+    padding: 0 var(--space-1);
+    font: inherit;
+    font-size: var(--text-2xs);
+    font-variant-numeric: tabular-nums;
+    color: var(--muted-foreground);
+    background: var(--secondary);
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
     cursor: pointer;
+    transition: background var(--transition-fast), color var(--transition-fast),
+      transform var(--transition-fast);
   }
+
+  .hour:hover {
+    background: var(--surface-active);
+  }
+
+  .hour:active {
+    transform: scale(0.94);
+  }
+
   .hour.on {
-    background: var(--accent);
-    color: #fff;
-    border-color: var(--accent);
+    background: var(--primary);
+    color: var(--primary-foreground);
   }
-  .row-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  .spacer {
-    flex: 1;
-  }
+
   .sticky-actions {
     position: sticky;
-    bottom: 12px;
+    bottom: var(--space-3);
+    z-index: var(--z-sticky);
+    box-shadow: var(--shadow-lg);
   }
+
+  .note-line {
+    margin: var(--space-3) 0 0;
+    line-height: var(--leading-relaxed);
+  }
+
+  .snap-pick {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .snap-pick select {
+    width: auto;
+    min-width: 10rem;
+    height: 32px;
+    font-size: var(--text-xs);
+  }
+
+  .result-head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2-5);
+  }
+
   .result .ok-line {
-    margin: 0 0 6px;
+    margin: 0;
+    font-size: var(--text-caption);
   }
+
+  .result .sep {
+    color: var(--muted-foreground);
+  }
+
+  .mark {
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    flex: none;
+    border-radius: 999px;
+  }
+
+  .mark.ok {
+    background: var(--success-bg);
+    color: var(--success);
+  }
+
+  .restart-list {
+    margin: var(--space-3) 0 0;
+    padding-left: var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    line-height: var(--leading-relaxed);
+  }
+
   .warn-card {
-    border-left: 3px solid #d98324;
+    border-left: 3px solid var(--warning);
   }
+
   .skeleton-list {
     display: grid;
-    gap: 10px;
+    gap: var(--space-3);
   }
-  .skeleton-line {
-    height: 14px;
-    border-radius: 6px;
-    background: linear-gradient(90deg, var(--bg) 25%, var(--card) 50%, var(--bg) 75%);
-    background-size: 200% 100%;
-    animation: shimmer 1.2s infinite;
+
+  .skeleton {
+    height: 16px;
   }
-  .skeleton-line.short {
+
+  .skeleton.short {
     width: 45%;
   }
-  @keyframes shimmer {
-    from {
-      background-position: 200% 0;
-    }
-    to {
-      background-position: -200% 0;
-    }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .skeleton-line {
-      animation: none;
-    }
-  }
+
   @media (max-width: 640px) {
     .sticky-actions {
       position: static;
     }
     .json-editor {
-      min-height: 220px;
+      min-height: 16rem;
     }
   }
 </style>

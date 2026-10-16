@@ -9,6 +9,7 @@ package reqlog
 import (
 	"crypto/rand"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -65,6 +66,19 @@ type Event struct {
 	// response carried it, "session_usage" for a per-turn lookup, or "pending"
 	// when the upstream had not settled yet. It is empty until settlement runs.
 	CreditsSource string `json:"credits_source,omitempty"`
+
+	// Surface names the executor that served the turn, and MaxProfile /
+	// MaxContext report the 1M profile it applied. They are how "I switched a
+	// capability on and nothing changed" becomes answerable: the max profile
+	// only exists on the remote surface and only for models the account's own
+	// catalogue marks, so a request served elsewhere shows no max at all.
+	Surface string `json:"surface,omitempty"`
+	// MaxProfile is true when the 1M max profile was applied, and MaxContext
+	// is the window it used.
+	MaxProfile bool `json:"max_profile,omitempty"`
+	MaxContext int  `json:"max_context,omitempty"`
+	// ContinuedRounds counts the extra upstream turns auto-continue added.
+	ContinuedRounds int `json:"continued_rounds,omitempty"`
 }
 
 // maxPendingUpdates bounds the held mutations, so a settlement whose event
@@ -193,9 +207,27 @@ func (r *Recorder) Record(e Event) {
 		if label == "" {
 			label = "-"
 		}
-		logx.Infof("req %s %s model=%s account=%s status=%d outcome=%s dur=%dms ttfb=%dms tok=%d%s",
-			e.RequestID, e.Path, orDash(e.Model), label, e.Status, e.Outcome, e.DurationMS, e.TTFBMS, e.TotalTokens, rateSuffix(e.TokensPerSecond))
+		logx.Infof("req %s %s model=%s account=%s status=%d outcome=%s dur=%dms ttfb=%dms tok=%d%s%s",
+			e.RequestID, e.Path, orDash(e.Model), label, e.Status, e.Outcome, e.DurationMS, e.TTFBMS, e.TotalTokens,
+			rateSuffix(e.TokensPerSecond), routeSuffix(e))
 	}
+}
+
+// routeSuffix renders the executor and the capabilities that actually applied
+// to this turn. It is deliberately on the same line as the request: a setting
+// that is switched on but could not apply has to be visible without digging.
+func routeSuffix(e Event) string {
+	var b strings.Builder
+	if e.Surface != "" {
+		b.WriteString(" surface=" + e.Surface)
+	}
+	if e.MaxProfile {
+		fmt.Fprintf(&b, " max=%d", e.MaxContext)
+	}
+	if e.ContinuedRounds > 0 {
+		fmt.Fprintf(&b, " continue=%d", e.ContinuedRounds)
+	}
+	return b.String()
 }
 
 // Update applies fn to the event with the given request id. When that event has

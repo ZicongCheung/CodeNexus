@@ -264,6 +264,8 @@ func run(configPath string, opts runOptions) error {
 				"upstreams.trae-cn.auto_continue.text_threshold",
 				"upstreams.trae-cn.auto_continue.similarity_threshold"},
 				func() { srv.SetAutoContinue(next.Upstreams.TraeCN.AutoContinue) }, "截断自动续写"},
+			{[]string{"stream.stall_seconds"},
+				func() { srv.SetStreamStall(next.Stream.StallSeconds) }, "流式看门狗"},
 			{[]string{"usage_store.max_records"}, func() {
 				if usage != nil {
 					usage.SetMaxRecords(next.UsageStore.MaxRecords)

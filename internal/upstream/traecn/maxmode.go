@@ -192,10 +192,10 @@ func copyMap(v any) map[string]any {
 // the request exactly as it was. Sending a profile the account does not own
 // would either be refused upstream or silently mis-bill, and this gateway
 // never invents a capability it cannot verify.
-func (c *Client) applyModelProfile(ctx context.Context, acc *account.Account, req *upstream.ChatRequest, agentType, modelName string, initial map[string]any) {
+func (c *Client) applyModelProfile(ctx context.Context, acc *account.Account, req *upstream.ChatRequest, agentType, modelName string, initial map[string]any) (maxApplied bool, maxContext int) {
 	entry, ok := c.modelEntry(ctx, acc, agentType, modelName)
 	if !ok {
-		return
+		return false, 0
 	}
 	// The work tier's entries omit the thinking config; the same model's agent
 	// tier advertises it, so borrow that entry when reading the strength.
@@ -221,14 +221,15 @@ func (c *Client) applyModelProfile(ctx context.Context, acc *account.Account, re
 		// how a smaller-than-expected ceiling becomes visible.
 		logx.Infof("trae: max profile model=%s context=%v prompt_max=%v effort=%s",
 			modelName, fields["context_window_size"], fields["prompt_max_tokens"], level)
-		return
+		return true, intFromAny(fields["context_window_size"], 0)
 	}
 	if level == "" {
-		return
+		return false, 0
 	}
 	initial["custom_model"] = model
 	applyManualCompanions(initial, entry)
 	logx.Debugf("trae: reasoning effort model=%s level=%s", modelName, level)
+	return false, 0
 }
 
 // applyManualCompanions adds the sibling fields the upstream reads alongside a

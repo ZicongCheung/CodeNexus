@@ -127,7 +127,7 @@ func (s *Server) runChat(w http.ResponseWriter, r *http.Request, t *turn) {
 		s.beginSettlement(hint, u, lease.Account)
 
 		if t.Stream {
-			emitted, turnID, serr := s.runStream(w, r, t, u, lease.Account)
+			emitted, turnID, serr := s.runStream(w, r, hint, t, u, lease.Account)
 			if serr == nil {
 				lease.Succeed()
 				hint.TurnID = turnID
@@ -135,7 +135,7 @@ func (s *Server) runChat(w http.ResponseWriter, r *http.Request, t *turn) {
 				return
 			}
 			if !emitted && s.tryRefresh(r.Context(), lease.Account, serr, refreshed) {
-				emitted, turnID, serr = s.runStream(w, r, t, u, lease.Account)
+				emitted, turnID, serr = s.runStream(w, r, hint, t, u, lease.Account)
 				if serr == nil {
 					lease.Succeed()
 					hint.TurnID = turnID
@@ -197,6 +197,10 @@ func finishNonStream(hint *recHint, t *turn, w http.ResponseWriter, resp *upstre
 	hint.TurnID = resp.TurnID
 	hint.Credits = resp.CreditsConsumed
 	hint.CreditsSource = resp.CreditsSource
+	hint.Surface = resp.Surface
+	hint.MaxProfile = resp.MaxProfile
+	hint.MaxContext = resp.MaxContext
+	hint.ContinuedRounds = resp.ContinuedRounds
 	t.Result(w, resp)
 }
 
@@ -248,6 +252,7 @@ func (s *Server) continueNonStream(ctx context.Context, u upstream.Upstream, acc
 			round, continueReason(reasoningOnly), extra.FinishReason, len(extra.Content))
 		total = joined
 		resp.Content = total
+		resp.ContinuedRounds = round
 		resp.FinishReason = extra.FinishReason
 		resp.ReasoningContent = extra.ReasoningContent
 		resp.ToolCalls = extra.ToolCalls
@@ -268,12 +273,43 @@ func continueReason(reasoningOnly bool) string {
 	return "truncated"
 }
 
+// SetStreamStall swaps the stream watchdog's silence bound. A value that is
+// not positive disables the watchdog; the console calls this after a save.
+func (s *Server) SetStreamStall(seconds int) {
+	d := time.Duration(seconds) * time.Second
+	if seconds <= 0 {
+		d = 0
+	}
+	s.stall.Store(&d)
+}
+
+// streamStall reads the current silence bound. Zero means no watchdog.
+func (s *Server) streamStall() time.Duration {
+	if p := s.stall.Load(); p != nil {
+		return *p
+	}
+	return 0
+}
+
 // runStream runs one streaming attempt. It reports whether anything reached the
 // client, which decides whether a retry on another account is still possible,
 // and the upstream turn id when the stream carried one.
-func (s *Server) runStream(w http.ResponseWriter, r *http.Request, t *turn, u upstream.Upstream, acc *account.Account) (bool, string, error) {
+func (s *Server) runStream(w http.ResponseWriter, r *http.Request, hint *recHint, t *turn, u upstream.Upstream, acc *account.Account) (bool, string, error) {
 	op := &streamOpener{open: func() (responder, error) { return t.Open(w) }}
 	turnID := ""
+
+	// A connection that stays open but produces nothing is stuck, not slow:
+	// Trae's remote surface can emit heartbeats indefinitely. Cancel the
+	// attempt once it has produced nothing for the configured window, so the
+	// ordinary failover can try another account instead of the caller waiting
+	// out the whole request timeout and receiving a 504.
+	ctx, cancelStalled := context.WithCancel(r.Context())
+	defer cancelStalled()
+	var progress chan struct{}
+	if stall := s.streamStall(); stall > 0 {
+		progress = make(chan struct{}, 1)
+		go watchStreamStall(ctx, stall, progress, cancelStalled)
+	}
 
 	// The keepalive opens the answer if the upstream stays silent past the
 	// window. It races the deltas deliberately: whichever gets there first
@@ -307,6 +343,19 @@ func (s *Server) runStream(w http.ResponseWriter, r *http.Request, t *turn, u up
 	emit := func(d upstream.StreamDelta) error {
 		if turnID == "" && d.TurnID != "" {
 			turnID = d.TurnID
+		}
+		if d.Route != nil {
+			hint.Surface = d.Route.Surface
+			hint.MaxProfile = d.Route.MaxProfile
+			hint.MaxContext = d.Route.MaxContext
+		}
+		if progress != nil && (d.Content != "" || d.ReasoningContent != "" || len(d.ToolCalls) > 0) {
+			// Only real output resets the watchdog; heartbeats never reach
+			// this point because the adapters do not turn them into deltas.
+			select {
+			case progress <- struct{}{}:
+			default:
+			}
 		}
 		if d.FinishReason != "" {
 			finish = d.FinishReason
@@ -361,7 +410,7 @@ func (s *Server) runStream(w http.ResponseWriter, r *http.Request, t *turn, u up
 		} else {
 			hold.start(answer.String())
 		}
-		err := u.ChatStream(r.Context(), acc, req, emit)
+		err := u.ChatStream(ctx, acc, req, emit)
 		if err != nil {
 			if stop != nil {
 				close(stop)
@@ -413,6 +462,7 @@ func (s *Server) runStream(w http.ResponseWriter, r *http.Request, t *turn, u up
 		next := *t.Request
 		next.Messages = continuedMessages(t.Request.Messages, answer.String(), reasoningOnly)
 		req = &next
+		hint.ContinuedRounds = round
 		roundText.Reset()
 		roundThink.Reset()
 		finish = ""
@@ -533,6 +583,33 @@ func (o *streamOpener) openLocked() error {
 
 // renderable reports whether a delta carries anything a client should see. A
 // delta that only names the turn is bookkeeping, not content.
+// watchStreamStall cancels a streaming attempt that has produced no output for
+// the whole window. progress is signalled on every delta that carries content,
+// reasoning or a tool call, so a slow but working turn keeps the watchdog
+// quiet; keepalive traffic deliberately never signals it.
+func watchStreamStall(ctx context.Context, stall time.Duration, progress <-chan struct{}, cancel func()) {
+	timer := time.NewTimer(stall)
+	defer timer.Stop()
+	for {
+		select {
+		case <-progress:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(stall)
+		case <-timer.C:
+			logx.Warnf("stream stalled: no output for %s, abandoning the attempt", stall)
+			cancel()
+			return
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 func renderable(d upstream.StreamDelta) bool {
 	return d.Content != "" || d.ReasoningContent != "" || len(d.ToolCalls) > 0 ||
 		d.Usage != nil || d.FinishReason != ""
