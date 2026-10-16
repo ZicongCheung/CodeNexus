@@ -1,0 +1,23 @@
+# Line endings.
+#
+# The build/release story is "one script, run on Windows and on Linux", so the
+# scripts must survive a Windows checkout: core.autocrlf would otherwise hand
+# them CRLF and `bash scripts/build.sh` would fail on the trailing \r of every
+# line. Anything executed by an interpreter is pinned to LF here.
+* text=auto
+
+*.sh          text eol=lf
+*.py          text eol=lf
+*.go          text eol=lf
+*.yml         text eol=lf
+*.yaml        text eol=lf
+*.json        text eol=lf
+Dockerfile    text eol=lf
+.dockerignore text eol=lf
+.gitignore    text eol=lf
+.gitattributes text eol=lf
+
+# Binary assets keep their bytes untouched.
+*.ico binary
+*.png binary
+*.syso binary

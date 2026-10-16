@@ -3,8 +3,11 @@
 # --- stage 1: build the panel ---
 FROM node:22-alpine AS web
 WORKDIR /web
-COPY web/package.json ./
-RUN npm install
+# Copy the manifest and lockfile first so the dependency layer is cached until
+# the dependencies themselves change; `npm ci` is the reproducible install the
+# build script uses too.
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
 COPY web/ ./
 RUN npm run build -- --outDir /dist-panel
 

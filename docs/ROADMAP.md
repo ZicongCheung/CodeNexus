@@ -121,10 +121,13 @@
 - [x] ~~凭证信封加密（OS 密钥库：DPAPI / Keychain / Secret Service）+ 导出/导入~~ → 提前至 P1b1（ADR-26）
 
 ## P6 · 打包与发布
-- [ ] 前端 embed 进二进制
-- [ ] Windows 单 exe 优先；Linux / macOS 构建
-- [ ] Docker 镜像（多阶段、非 root、HEALTHCHECK）
-- [ ] 发布 Release 资产 + 校验和 + 用户文档
+- [x] 前端 embed 进二进制（`internal/panel` 的 `go:embed dist`，`web/` 由 `scripts/build.sh web` 重建）
+- [x] Windows **双产物**（`CodeNexus.exe` 无黑框 + `CodeNexus-console.exe` 排障）+ 自研 Win32 托盘（五项菜单，零新增依赖，ADR-51）；Linux / macOS 构建（darwin/linux × amd64/arm64 全量）
+- [x] Docker 镜像（多阶段、非 root、HEALTHCHECK、多架构 `linux/amd64,linux/arm64`）
+- [x] 发布 Release 资产 + 校验和：`scripts/build.sh release` 出 6 平台归档 + `SHA256SUMS`；`scripts/package.py` 可复现打包、`scripts/checksums.py` 写校验和
+- [x] 图标与版本元数据（纯标准库合成 `.ico` + `go-winres` `.syso`，ADR-52）；首次运行自动开浏览器
+- [x] CI：`.github/workflows/ci.yml`（push/PR → `build.sh test`）、`release.yml`（tag `v*` → `build.sh release` → GitHub Release）；脚本为唯一事实源（ADR-50）
+- [x] 用户文档（README 构建/发布/双产物/托盘说明）
 
 ## v2 · 可选（v1 明确不做）
 - [ ] 来源 B 桌面端原生桥出站传输 —— 依赖 Windows + 私有 DLL，与纯 Go 单二进制目标冲突（见 EXECUTION_PLAN N1 / §9.4）。**注**：其「自定义模型」入站兼容（无原生依赖）已纳入 v1。

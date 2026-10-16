@@ -123,18 +123,51 @@ flowchart LR
 
 ## 项目状态
 
-🚧 **开发中**：P0–P3 已完成（两个来源的账号体系、统一池与模型路由、签到/风控/额度结算、本机导入与 `cli` 上游模式）。本仓库按 [`docs/EXECUTION_PLAN.md`](docs/EXECUTION_PLAN.md) 分阶段落地，进度勾选见 [`docs/ROADMAP.md`](docs/ROADMAP.md)。
+🚧 **开发中**：P0–P6 已完成（两个来源的账号体系、统一池与模型路由、签到/风控/额度结算、本机导入与 `cli` 上游模式、三线协议入口、用量落库、面板与配置热生效、打包与发布）。本仓库按 [`docs/EXECUTION_PLAN.md`](docs/EXECUTION_PLAN.md) 分阶段落地，进度勾选见 [`docs/ROADMAP.md`](docs/ROADMAP.md)。
 
-规划中的使用方式：
+从源码构建（需要 Go 1.26+）：
 
 ```bash
 git clone https://github.com/ZicongCheung/CodeNexus.git
 cd CodeNexus
-go build -o codenexus ./cmd/codenexus
-./codenexus -config config.json
+bash scripts/build.sh build        # 本平台产物 → dist/<os>-<arch>/
+# 或：go build -o codenexus ./cmd/codenexus
 ```
 
-首次启动将在工作目录生成 `config.json`（含随机 `api_key`，仅在日志中打印一次），随后浏览器打开 `http://127.0.0.1:6828/panel/`。
+`scripts/build.sh` 是构建与发布的**唯一事实源**（CI 只调用它，不复制任何构建步骤）：
+
+| 命令 | 作用 |
+|---|---|
+| `bash scripts/build.sh build` | 构建当前平台产物（面板前端已 embed） |
+| `bash scripts/build.sh release` | 构建 6 平台（windows/linux/darwin × amd64/arm64）+ 归档 + `SHA256SUMS` |
+| `bash scripts/build.sh docker` | 多架构镜像（`linux/amd64,linux/arm64`，需 buildx） |
+| `bash scripts/build.sh test` | gofmt + `go vet` + 单元测试 |
+| `bash scripts/build.sh icons` / `res` / `web` | 重新生成图标 / Windows 资源对象 / 面板前端 |
+
+环境变量：`VERSION=`（覆盖版本号，默认取 `git describe`）、`SKIP_WEB=1`（跳过前端重建，用已提交的 bundle）。
+
+发布由 CI 自动完成：推送形如 `v0.2.0` 的 tag 会触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)，测试通过后构建全部平台并发布 GitHub Release（归档 + `SHA256SUMS`）。
+
+### Docker
+
+多阶段镜像（面板在镜像内构建，运行时基于 alpine、非 root、含 `HEALTHCHECK`）：
+
+```bash
+docker build -t codenexus .
+docker run -d --name codenexus -p 6828:6828 -v "$PWD/data:/app/data" -v "$PWD/auths:/app/auths" codenexus
+# 多架构：bash scripts/build.sh docker   （需 docker buildx，可选 IMAGE= / PUSH=1）
+```
+
+首次启动将在工作目录生成 `config.json`（含随机 `api_key`，仅在日志中打印一次），随后自动打开 `http://127.0.0.1:6828/panel/`。
+
+### Windows 两个产物
+
+发布包内有两个可执行文件，按用途区分：
+
+- **`CodeNexus.exe`** — 双击即用，无控制台黑框；日志写入 `data_dir/codenexus.log`；启动后在系统托盘常驻图标。
+- **`CodeNexus-console.exe`** — 保留控制台窗口，日志直接输出到终端，用于排障。
+
+托盘菜单：**打开面板 / 状态 / 打开日志 / 打开配置目录 / 退出**。可用 `-no-tray` 关闭托盘、`-no-browser` 关闭首次自动开浏览器。
 
 ---
 
@@ -244,7 +277,7 @@ for chunk in resp:
 
 ```
 CodeNexus/
-├── cmd/codenexus/         # 程序入口
+├── cmd/codenexus/         # 程序入口（含 tray / console / browser；Windows 资源 .syso）
 ├── internal/
 │   ├── api/               # 协议入口：Chat / Responses / Anthropic / models / status / healthz
 │   ├── upstream/          # 上游接口 + 注册表；workbuddy/ · traecn/
@@ -252,11 +285,15 @@ CodeNexus/
 │   ├── pool/              # 账号池 + 选号
 │   ├── router/            # 模型 → 来源 路由
 │   ├── scheduler/         # 定时任务
-│   ├── panel/             # 内嵌控制台（go:embed）
-│   ├── store/             # 持久化（文件 + SQLite 遥测）
+│   ├── panel/             # 内嵌控制台（go:embed dist）
+│   ├── usagestore/        # 用量/积分持久化（SQLite）
+│   ├── configschema/      # 配置元数据（热生效/危险字段）
+│   ├── assets/            # 图标资产（go:embed）
 │   ├── crypto/            # 信封加密 + OS 密钥库
 │   └── logx/              # 日志与指标
 ├── web/                   # 面板前端源码（Svelte + Vite）
+├── scripts/               # build.sh · package.py · checksums.py · make-icons.py
+├── .github/workflows/     # ci.yml（push/PR）· release.yml（tag 发布）
 ├── docs/                  # 设计与路线图
 ├── go.mod
 ├── Dockerfile
@@ -275,7 +312,7 @@ CodeNexus/
 4. **P3 来源 B 认证补齐与风控** ✅ — 本机 `storage.json` 一键导入、`cli` 上游模式、签到与 `9074` 风控退避、回合级积分结算（三级取值 + 并发归属闸门）。
 5. **P4 协议超集与高级能力** ✅ — 三线协议入口真机验收通过（chat / messages / responses，含 `previous_response_id` 续链）；**工具调用闭环真机通过**（非流式/流式/完整闭环）· 图片输入可用；用量/积分落 SQLite + 面板「用量」页；真机探测共修复 6 个协议缺陷（详见 EXECUTION_PLAN §9.9）。
 6. **P5 统一面板 + 任务合并 + 配置热生效 + 凭证加密** ✅ — 面板「设置」页（表单 + JSON 双轨）在线改配置：分级热生效（55 项即时生效 / 6 项标「需重启」并给一键重启）、保存前自动快照 + 面板内一键回滚、危险字段二次确认；主题切换（亮/暗/跟随系统）与移动端/无障碍增强。
-7. **P6 打包与发布** — Windows 单 exe 优先，跨平台构建。
+7. **P6 打包与发布** ✅ — 脚本为唯一事实源的构建/发布（`scripts/build.sh` + `package.py` + `checksums.py`）；6 平台（windows/linux/darwin × amd64/arm64）+ 多架构 Docker；Windows 双产物（GUI 无黑框 `CodeNexus.exe` + 控制台 `CodeNexus-console.exe`）与自研 Win32 托盘（五项菜单，零新增依赖）；图标与版本元数据；首次运行自动开浏览器；CI（push/PR 测试、tag 发布 GitHub Release）。
 
 ---
 
@@ -320,14 +357,19 @@ This is an **unofficial, local, self-hosted** account gateway that exposes **you
 
 ## Status & Quick Start
 
-🚧 **Scaffolding stage** — see [`docs/EXECUTION_PLAN.md`](docs/EXECUTION_PLAN.md) for the full plan and [`docs/ROADMAP.md`](docs/ROADMAP.md) for progress.
+🚧 **In development** — P0–P6 are complete. See [`docs/EXECUTION_PLAN.md`](docs/EXECUTION_PLAN.md) for the full plan and [`docs/ROADMAP.md`](docs/ROADMAP.md) for progress.
+
+Build from source (Go 1.26+):
 
 ```bash
 git clone https://github.com/ZicongCheung/CodeNexus.git
 cd CodeNexus
-go build -o codenexus ./cmd/codenexus
-./codenexus -config config.json
+bash scripts/build.sh build       # current platform -> dist/<os>-<arch>/
+bash scripts/build.sh release     # 6 platforms + archives + SHA256SUMS
+bash scripts/build.sh test        # gofmt + go vet + unit tests
 ```
+
+`scripts/build.sh` is the single source of truth for builds; CI only calls it. The Windows release ships two binaries: `CodeNexus.exe` (windowed, tray icon, logs to `data_dir/codenexus.log`) and `CodeNexus-console.exe` (keeps the console, for troubleshooting).
 
 Open `http://127.0.0.1:6828/panel/`.
 

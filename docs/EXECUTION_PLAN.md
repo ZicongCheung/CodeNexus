@@ -27,6 +27,7 @@
 | v1.12 | 2026-10-15 | #44 完成并入档；记录第五轮 P4 决策（纯 SQL 聚合 / 明细 10 万条 / 面板最小可用含趋势 / 与 reqlog 各司其职）；**P4 全部编码工作至此完成，仅剩真机探测项** | 张 |
 | v1.14 | 2026-10-16 | **P5 完成**：面板「设置」页（表单 + JSON 双轨）· 配置热生效（分级：55 项即时 / 6 项需重启）· 保存前快照与一键回滚 · 危险字段二次确认 · 一键重启（含监听预检）· 主题切换与视觉/无障碍增强 | 张 |
 | v1.13 | 2026-10-15 | **P4 真机探测完成**（本机已登录 Trae CN，`auto` 一键导入 uid 2561221162711115）；发现并修复 **4 个真实协议缺陷**；三线协议入口真机验收通过；新增 `debug_upstream` 调试开关；遗留 2 个带证据的开放项（§9.9） | 张 |
+| v1.15 | 2026-10-16 | **P6 完成**：脚本为唯一事实源的构建/发布（`build.sh` + `package.py` + `checksums.py`）· 6 平台多架构产物 · 双 Windows 产物 + 自研 Win32 托盘（五项菜单、零新增依赖）· 图标与版本元数据（纯标准库合成 + `go-winres` `.syso`）· 首次运行自动开浏览器 · CI（`ci.yml`/`release.yml`）· 多架构 Docker；追加 ADR-50~52 | 张 |
 
 **阅读指引**
 
@@ -180,6 +181,9 @@
 | **ADR-47** | Responses `previous_response_id` 的状态 | **内存有界 LRU**：缓存上一轮的 input+output 以重建上下文，**TTL 过期即弃、绝不落盘**；未命中时提示客户端带全量 `input` 重试 | Codex 确实会用该字段做同进程多轮，纯无状态会直接断掉体验；而磁盘持久化等于让网关在**磁盘上存提示词与回答**，与"日志绝不记正文"的红线正面冲突。内存 + TTL 是唯一同时满足"能用"与"不留痕"的档位 |
 | **ADR-48** | Anthropic 入站保真度 | **形状严格对齐官方、入站校验从宽**：`tool_use`/`tool_result` 配对校验（不合法则自动修复并记日志）、`thinking` 块按官方形态回传（`signature` 空串）、`stop_reason` 全枚举映射、`count_tokens` 按**参考口径的本地估算**实现（图片按固定值计，不把 base64 当文本） | Claude Code 对配对与终止原因很敏感，"够用"实现的典型症状是**能连上但一用工具就崩**，届时排查成本远高于一次做对。但**"严格"只适用于我们自己吐出的形状**：入站校验若照官方 400，会让手写调用与宽松客户端突然失败，而 relay 的价值在于让一轮请求跑完 —— 参考实现在这一点上也是从宽的（`max_tokens` 缺失填默认值、`budget_tokens` 映射档位）。`count_tokens` 更是物理上做不到"真实"：官方用的是私有 tokenizer，参考只能用启发式估算，我们照此并**明示为估算** |
 | **ADR-49** | 遥测落库范围 | **用量/积分 + 请求日志摘要落 SQLite**（承接 ADR-11 的 `modernc.org/sqlite`，纯 Go 无 CGO）：表存的是现有窄字段（时间/来源/账号标签/模型/token/积分/耗时/状态）；**提示词、回答正文与凭证永不落库** | 面板的「用量 / 额度」页要有趋势与明细就只能落库；只落用量而请求日志留内存，会让"这条积分记在哪次请求上"在重启后失去对应关系。字段沿用既有窄集，红线不动 |
+| **ADR-50** | P6 构建与发布的事实源 | **脚本为唯一事实源，CI 只调用**：`scripts/build.sh`（`build`/`release`/`docker`/`icons`/`res`/`web`/`test`/`clean`）承载全部构建逻辑，GitHub Actions 只做 `bash scripts/build.sh test|release` 与产物上传，**不复制任何构建步骤** | "本地能出包、CI 出不了"几乎总是两份构建逻辑漂移的结果（漏 `-trimpath`、漏双产物、漏校验和）。让 CI 调用同一脚本，则"笔记本上失败"与"发布会失败"是同一件事，且任何一次构建都能在本地逐字复现。代价是脚本必须跨 Windows(Git Bash) 与 Linux 可用——因此打包用 Python 标准库（`zip`/`tarfile`）而非 shell 外部命令 |
+| **ADR-51** | Windows 桌面呈现形态 | **双产物 + 自研 Win32 托盘 + 首次运行自动开浏览器**：`CodeNexus.exe`（`-H=windowsgui`，无黑框，双击即用，日志落 `DataDir/codenexus.log`）+ `CodeNexus-console.exe`（保留控制台，排障用）；托盘用 `golang.org/x/sys/windows` 直接调 `Shell_NotifyIcon`，**零新增依赖**；首次运行（无 `config.json`）自动打开 `http://127.0.0.1:6828/panel/` | 目标用户是双击 exe 的开发者，一个常驻网关没有托盘就只能靠任务管理器停，且面板地址无处可寻。"无黑框"与"能看日志"是两个互相冲突的诉求——控制台被 `windowsgui` 关掉后无法再开，因此只能出两个产物而不是一个开关。托盘不引第三方库是因为它已经在依赖树的 `x/sys` 里就能做到，多一个库只为省几十行并不划算 |
+| **ADR-52** | 图标与版本元数据 | **图标纯标准库合成、资源用 `go-winres` 生成 `.syso` 提交入库**：`scripts/make-icons.py` 只依赖 Python 标准库从源 PNG 合成多尺寸 `.ico` → `internal/assets/`（`go:embed`）；`go-winres` 一次性生成 `cmd/codenexus/rsrc_windows_{amd64,arm64}.syso`（图标 + 版本信息 + `manifest cli`），提交后可脱离工具链重建 | 图标合成若引 Pillow 会让"重新生成图标"变成一个需要装依赖的动作；`.ico` 是简单容器，标准库足够。`.syso` 入库而非每次构建生成，是因为 `go-winres` 是需要额外安装的工具——提交产物让"没有该工具的机器"也能完整构建发布 |
 
 ### 4.1 P3 待验证项（实测结论）
 
@@ -399,7 +403,7 @@ auths/
 ```jsonc
 {
   "$schema": "./docs/config.schema.json",
-  "listen": "127.0.0.1:7863",
+  "listen": "127.0.0.1:6828",
   "api_key": "",                       // 留空=不鉴权（危险，首次启动自动生成随机值）
   "auth_dir": "./auths",
   "data_dir": "./data",
@@ -1187,7 +1191,34 @@ TraeWork（Trae 桌面 Agent 客户端）相关能力是**两件方向相反的�
 | 项 | 内容 |
 |---|---|
 | 任务 | ① Windows 单 exe（前端 embed、无 CGO）；② Linux/macOS 构建；③ Docker 镜像；④ Release 资产 + 校验和；⑤ 用户文档 |
-| 验收 | 干净 Windows 机器：双击 exe → 生成 `config.json`（随机 `api_key` 打印一次）→ 打开 `http://127.0.0.1:7863/panel/` → 添加账号 → 调用成功 |
+| 验收 | 干净 Windows 机器：双击 exe → 生成 `config.json`（随机 `api_key` 打印一次）→ 打开 `http://127.0.0.1:6828/panel/` → 添加账号 → 调用成功 |
+
+> **P6 决策（用户拍板：先取四项推荐档，追加"常驻托盘"后再拍三项；取向 = 用户体验/流畅性优先，不计实现复杂度）**
+> - **构建事实源**：**脚本为准 + CI 调用**（ADR-50）——`scripts/build.sh` 承载全部逻辑，Actions 只调用与上传。
+> - **首次体验**：**首次运行自动开浏览器**——干净机器上操作者唯一缺的就是面板地址，直接帮他打开而不是让他从日志里抄。
+> - **发布矩阵**：**6 平台（windows/linux/darwin × amd64/arm64）+ 多架构 Docker**——覆盖开发者的主力与副力机器，镜像一次 `buildx` 出双架构。
+> - **资源与元数据**：**加图标 + 版本信息**（ADR-52）——`.exe` 有图标与"文件版本"才算完整交付。
+> - **桌面呈现**：**双产物 + 自研 Win32 托盘 + 五项菜单**（ADR-51）——`CodeNexus.exe`（无黑框）+ `CodeNexus-console.exe`（排障）；托盘菜单为「打开面板 / 状态 / 打开日志 / 打开配置目录 / 退出」，托盘实现基于依赖树里已有的 `golang.org/x/sys`，**零新增依赖**。
+
+**P6 实现纪实（as-built）**
+
+| 项 | 落点 | 状态 |
+|---|---|---|
+| 图标资产：纯标准库从源 PNG 合成多尺寸 `.ico`（16/32/48/64/128/256） | `scripts/make-icons.py` → `internal/assets/`（`codenexus.ico` / `codenexus-256.png`，`go:embed`） | ✅ |
+| Windows 资源元数据：图标 + 版本信息 + `manifest cli`，生成 `.syso` 提交入库 | `cmd/codenexus/rsrc_windows_{amd64,arm64}.syso`（`go-winres`） | ✅ |
+| 双产物：`-H=windowsgui` 去黑框；console 版保留控制台 | `scripts/build.sh`（`release` 目标对 windows 构建两次） | ✅ |
+| 无控制台时日志落文件：`logx.SetOutput`（`std` 改原子指针） + 重定向到 `DataDir/codenexus.log` | `internal/logx/logx.go`、`cmd/codenexus/browser.go` | ✅ |
+| 常驻托盘：`Shell_NotifyIcon` 原生实现，五项菜单，状态文本动态（账号 n/m 可用 · 已运行时长）；非 Windows 为 no-op | `cmd/codenexus/tray_windows.go`、`tray_other.go` | ✅ |
+| 控制台探测与降级：`GetConsoleWindow` 判定是否附着控制台，`-no-tray` / `-no-browser` 开关 | `cmd/codenexus/console_{windows,other}.go`、`main.go` | ✅ |
+| 首次运行自动开浏览器（仅当无 `config.json` 时） | `cmd/codenexus/browser.go`（`openBrowser`） | ✅ |
+| 构建/发布脚本：`build`/`release`/`docker`/`icons`/`res`/`web`/`test`/`clean`；版本取 `git describe`，可 `VERSION=` 覆盖；`-trimpath -s -w -X main.version` | `scripts/build.sh` | ✅ |
+| 可复现打包：zip（固定时间戳 + POSIX 权限位）与 tar.gz（gzip 头 mtime=0、FNAME 置空，成员 uid/gid=0、mtime=0）**同一平台上重复构建字节一致**；`--exec` 由调用方声明可执行条目（Windows 记录不了 Unix 执行位，否则 tar 里二进制会变 0666） | `scripts/package.py` | ✅ |
+| 换行策略：`.gitattributes` 把 `*.sh`/`*.py`/`*.go`/`*.yml`/`Dockerfile` 钉为 `eol=lf`（`core.autocrlf=true` 下 Windows 克隆会把脚本检出 CRLF 导致 `bash` 失败），二进制（`.ico`/`.png`/`.syso`）标 `binary` | `.gitattributes` | ✅ |
+| 校验和：`SHA256SUMS` 覆盖全部归档 | `scripts/checksums.py` | ✅ |
+| CI：push/PR 跑 `build.sh test`；tag `v*` 跑 `build.sh release` 并发布 GitHub Release（归档 + `SHA256SUMS`，仅测试通过才发布） | `.github/workflows/ci.yml`、`release.yml` | ✅ |
+| Docker：多阶段（node 构建面板 → golang 构建二进制 → alpine 运行时），`buildx` 出 `linux/amd64,linux/arm64`，含 `HEALTHCHECK` 与 `ca-certificates`/`tzdata` | `Dockerfile`、`scripts/build.sh docker` | ✅ |
+
+> **验证边界（如实记录）**：托盘与"无黑框"GUI 产物**已编译通过并产出**，但托盘图标的实际点击行为需在真机（有桌面会话）双击验证——自动化会话中不弹托盘。非 Windows 平台托盘为显式 no-op，不影响服务。
 
 ---
 

@@ -52,6 +52,8 @@ func main() {
 
 	configPath := flag.String("config", "config.json", "path to the config file")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	noBrowser := flag.Bool("no-browser", false, "do not open the console in a browser on start")
+	noTray := flag.Bool("no-tray", false, "do not show the notification-area icon (Windows)")
 	flag.Parse()
 
 	if *showVersion {
@@ -59,13 +61,21 @@ func main() {
 		return
 	}
 
-	if err := run(*configPath); err != nil {
+	if err := run(*configPath, runOptions{noBrowser: *noBrowser, noTray: *noTray}); err != nil {
 		fmt.Fprintf(os.Stderr, "codenexus: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(configPath string) error {
+// runOptions carries the switches that change how the process presents itself,
+// as opposed to how the gateway behaves.
+type runOptions struct {
+	noBrowser bool
+	noTray    bool
+}
+
+func run(configPath string, opts runOptions) error {
+	startedAt := time.Now()
 	_, statErr := os.Stat(configPath)
 	fresh := os.IsNotExist(statErr)
 
@@ -75,8 +85,22 @@ func run(configPath string) error {
 	}
 	logx.SetLevel(logx.ParseLevel(cfg.LogLevel))
 
+	// The windowed build has no console, so the log goes to a file next to the
+	// data. Printing the key before this point would put it somewhere the user
+	// of that build cannot read.
+	logPath := ""
+	if !hasConsole() {
+		logPath = filepath.Join(cfg.DataDir, "codenexus.log")
+		if err := redirectLog(logPath); err != nil {
+			return fmt.Errorf("open log file: %w", err)
+		}
+	}
+
 	if fresh {
 		logx.Infof("created %s with a new api_key (shown once): %s", configPath, cfg.APIKey)
+	}
+	if logPath != "" {
+		logx.Infof("log file: %s", logPath)
 	}
 
 	p := buildPool(cfg)
@@ -343,6 +367,45 @@ func run(configPath string) error {
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+
+	// The notification-area icon is the desktop build's main surface: it is how
+	// the console is reopened and how the process is stopped without a terminal.
+	consoleAddr := consoleURL(cfg.Listen)
+	if !opts.noTray {
+		go func() {
+			if err := startTray(trayActions{
+				ConsoleURL: consoleAddr,
+				ConfigPath: configPath,
+				LogPath:    logPath,
+				Dir:        cfg.DataDir,
+				StatusText: func() string {
+					serving, total := 0, 0
+					for _, st := range p.Describe() {
+						total++
+						if st.Enabled && st.Healthy {
+							serving++
+						}
+					}
+					return fmt.Sprintf("账号 %d/%d 可用 · 已运行 %s", serving, total, humanDuration(time.Since(startedAt)))
+				},
+				Quit: func() {
+					select {
+					case stop <- syscall.SIGTERM:
+					default:
+					}
+				},
+			}); err != nil {
+				logx.Warnf("tray unavailable: %v", err)
+			}
+		}()
+	}
+	// On a first run the console address is the one thing the operator does not
+	// have yet, so it is opened rather than left to be copied out of the log.
+	if fresh && !opts.noBrowser {
+		if err := openBrowser(consoleAddr); err != nil {
+			logx.Warnf("could not open the browser: %v", err)
+		}
+	}
 
 	select {
 	case err := <-errCh:

@@ -16,7 +16,17 @@
 
 ## 开发
 
-要求：Go 1.24+。
+要求：Go 1.26+（`go.mod` 为准），Node 22+（仅在重建面板前端时需要）。
+
+构建与测试统一走 `scripts/build.sh`（它是 CI 与本地共用的**唯一事实源**）：
+
+```bash
+bash scripts/build.sh test     # gofmt + go vet + go test
+bash scripts/build.sh build    # 当前平台产物（前端口已 embed）
+bash scripts/build.sh web      # 重建面板前端（web/ → internal/panel/dist）
+```
+
+仅 Go 部分也可直接用标准工具：
 
 ```bash
 go build ./...
@@ -34,4 +44,5 @@ go test ./...
 
 - `cmd/` 仅放入口，业务逻辑放 `internal/`。
 - 上游相关实现集中在 `internal/upstream/<source>/`，通过统一接口暴露。
-- 面板前端源码在 `web/`，构建产物 embed 进 `internal/panel/`。
+- 面板前端源码在 `web/`，构建产物 embed 进 `internal/panel/dist`（**必须提交**）。
+- 构建/发布脚本在 `scripts/`（`build.sh` 为唯一事实源）；CI 位于 `.github/workflows/`，只调用该脚本，不复制构建步骤。

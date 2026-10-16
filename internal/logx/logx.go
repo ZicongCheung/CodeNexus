@@ -6,6 +6,7 @@ package logx
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -24,10 +25,18 @@ const (
 
 var (
 	current atomic.Int32
-	std     = log.New(os.Stdout, "", log.LstdFlags)
+	std     atomic.Pointer[log.Logger]
 )
 
-func init() { current.Store(int32(LevelInfo)) }
+func init() {
+	current.Store(int32(LevelInfo))
+	std.Store(log.New(os.Stdout, "", log.LstdFlags))
+}
+
+// SetOutput redirects the log. The windowed build has no console to write to,
+// so it points the log at a file instead; without this the operator running the
+// tray build would have no way to see what the gateway is doing.
+func SetOutput(w io.Writer) { std.Store(log.New(w, "", log.LstdFlags)) }
 
 // ParseLevel maps a case-insensitive name to a Level, defaulting to info.
 func ParseLevel(s string) Level {
@@ -53,7 +62,7 @@ func logf(l Level, tag, format string, args ...any) {
 	if !Enabled(l) {
 		return
 	}
-	std.Printf("[%s] %s", tag, fmt.Sprintf(format, args...))
+	std.Load().Printf("[%s] %s", tag, fmt.Sprintf(format, args...))
 }
 
 // Debugf logs at debug level.

@@ -1,0 +1,31 @@
+name: ci
+
+# Every push and pull request runs the same `scripts/build.sh test` target a
+# developer runs locally, so a green laptop build and a green CI run mean the
+# same thing. Nothing here duplicates the build logic: the script is the source
+# of truth.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Format, vet and test
+        # SKIP_WEB keeps CI from rebuilding the committed bundle; the bundle is
+        # checked in, and `release` is where it gets rebuilt from source.
+        run: SKIP_WEB=1 bash scripts/build.sh test

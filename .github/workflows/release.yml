@@ -1,0 +1,64 @@
+name: release
+
+# A tag like v0.2.0 is the only thing that produces a downloadable build. The
+# job runs the exact `scripts/build.sh release` a maintainer would run, then
+# publishes whatever the script left in dist/ -- archives plus SHA256SUMS -- so
+# there is no second, CI-only packaging path to drift out of sync.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # Release artefacts are only published if the tests pass, so a tagged commit
+  # that does not build never reaches users.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Format, vet and test
+        run: SKIP_WEB=1 bash scripts/build.sh test
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The version is read back with `git describe`, which needs the tags.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build every platform and package
+        run: bash scripts/build.sh release
+
+      - name: Publish the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/codenexus_*
+            dist/SHA256SUMS
+          generate_release_notes: true
+          fail_on_unmatched_files: true

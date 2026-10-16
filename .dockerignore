@@ -11,6 +11,9 @@ config.local.json
 # 前端依赖（构建在镜像内完成）
 web/node_modules/
 
+# 本地构建产物（仅根目录；internal/panel/dist 是 embed 源，必须保留）
+/dist/
+
 # 本地工具 / AI 记忆
 .workbuddy/
 
