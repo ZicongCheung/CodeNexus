@@ -1290,7 +1290,19 @@ TraeWork（Trae 桌面 Agent 客户端）相关能力是**两件方向相反的�
 | 单元测试：档位夹取/别名、max 资格与富化、目录失效时"不改请求"、续写判定与轮数封顶、工具回合不续写、流式续写单一终帧、入站端到端与连接性 | `internal/upstream/traecn/catalogue_test.go`、`internal/api/continuation_test.go` | ✅ |
 
 > **如实记录的偏差**：①连接性/完成帧里的**模型身份名**按各自目录解析（参考有自己的 raw-model 表，我方用网关目录），别名与 `auto` 场景下取值不同，故差分测试不对该字段做逐字比较；②推理摘要（`reasoning_delta`/`reasoning_content`）我方做**有界去重**压缩，参考另做句子级显著性抽取，属呈现旁路，差分测试排除该字段；③入站 `Cloud-IDE-JWT` **刻意不使用**（走池内凭证），与参考行为不同。
-> **验证边界**：TraeWork 客户端本身未在本机触发（无该形态的客户端），合约保真度由**对参考的差分测试**保证；1M 档位与 `reasoning_effort` 的**账号实际能力**需真机探测确认。
+> **验证边界**：TraeWork 客户端本身未在本机触发（无该形态的客户端），合约保真度由**对参考的差分测试**保证；1M 档位与 `reasoning_effort` 的**账号实际能力**已由真机探测确认（见下）。
+
+#### 真机探测结论（2026-10-16，本机 Trae CN，uid 2561221162711115）
+
+| 探测项 | 结论 |
+|---|---|
+| 实时目录可达性 | ✅ 成功拉取；`solo_agent_remote` 21 个模型、`solo_work_remote` 20 个、`solo_design_remote` 5 个 |
+| **1M 档位（`max_mode`）** | ✅ **账号确实具备**：agent 档 **16 个模型被标记 `max_mode=true`**（含 `glm-5.3`/`glm-5.2`/`kimi-k3`/`qwen3.8-max`/`deepseek-v4.1-flash`/`minimax-m3`/`Doubao-Seed-2.1-Pro` 等）；**work 档与 design 档为 0**——与参考"1M 只在 agent 档、work 是 200K 回落"的说明一致 |
+| **`reasoning_effort` 能力** | ✅ **13 个 agent 档模型声明 `support_thinking`**；**work/design 档为 0**——印证"work 档需借用 agent 档的 `reasoning_effort_config`"的设计 |
+| 档位是否真的落到出站请求 | ✅ 出站 `initial_message` 实测包含 `model_selection_strategy:"max"`、`mode_type:1`、`context_window_size:1000000`、`prompt_max_tokens:936000`、`max_mode:true`、`reasoning_effort:"high"`、`reasoning_effort_config`（原样带上）、`model_is_preset:true`、`model_provider:""` |
+| 端到端 | ✅ 该请求返回 `{"content":"ok","finish_reason":"stop"}`——上游接受"max 定档 + 思考档位"的会话 |
+
+> 注意：真实目录用的是 **`reasoning_effort`** 键（而非 `reasoning_effort_level`），正是"按对象已声明的键写入、绝不同时给两个"这条规则的适用场景；实测未出现另一个键。
 
 ## 12. 测试策略
 

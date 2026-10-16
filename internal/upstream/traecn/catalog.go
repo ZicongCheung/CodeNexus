@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -157,7 +158,41 @@ func (c *Client) fetchCatalogue(ctx context.Context, acc *account.Account) (map[
 	if len(tiers) == 0 {
 		return nil, fmt.Errorf("trae: model catalogue carried no model groups")
 	}
+	if c.cfg.DebugUpstream {
+		logx.Debugf("trae: model catalogue %s", describeCatalogue(tiers))
+	}
 	return tiers, nil
+}
+
+// describeCatalogue summarizes which optional profiles the account actually
+// advertises. It is what a real-machine probe reads back: without it, "does
+// this account have the 1M tier?" is unanswerable from the outside, and the
+// gateway would have to guess.
+func describeCatalogue(tiers map[string]map[string]map[string]any) string {
+	var b strings.Builder
+	names := make([]string, 0, len(tiers))
+	for tier := range tiers {
+		names = append(names, tier)
+	}
+	sort.Strings(names)
+	for _, tier := range names {
+		models := tiers[tier]
+		var maxCapableModels, thinkingModels []string
+		for name, entry := range models {
+			if maxCapable(entry) {
+				maxCapableModels = append(maxCapableModels, name)
+			}
+			if len(supportedEfforts(entry)) > 0 {
+				thinkingModels = append(thinkingModels, name)
+			}
+		}
+		sort.Strings(maxCapableModels)
+		sort.Strings(thinkingModels)
+		fmt.Fprintf(&b, "%s=%d models (max-capable %d: %v; thinking %d: %v); ",
+			tier, len(models), len(maxCapableModels), maxCapableModels,
+			len(thinkingModels), thinkingModels)
+	}
+	return b.String()
 }
 
 // normalizeModelConfig mirrors the client-side view of a model entry: the
