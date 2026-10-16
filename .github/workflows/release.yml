@@ -62,3 +62,7 @@ jobs:
             dist/SHA256SUMS
           generate_release_notes: true
           fail_on_unmatched_files: true
+          # A tag carrying a pre-release marker (v0.0.1-dev, v0.2.0-rc.1) is
+          # published as one, so "latest release" never points at a build that
+          # still says -dev.
+          prerelease: ${{ contains(github.ref_name, '-') }}
