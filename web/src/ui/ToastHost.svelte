@@ -2,8 +2,6 @@
   import { toasts, dismissToast } from './toast.svelte.js'
   import Icon from './Icon.svelte'
   import { t } from '../strings.js'
-
-  const icons = { info: 'info', ok: 'check', warn: 'alert', error: 'alert' }
 </script>
 
 <!-- Toast host. It sits above every other layer and never takes pointer events
@@ -11,10 +9,9 @@
 <div class="toast-host" aria-live="polite" aria-atomic="false">
   {#each toasts as toast (toast.id)}
     <div class="toast {toast.kind}" role="status">
-      <span class="glyph"><Icon name={icons[toast.kind] ?? 'info'} size={16} /></span>
       <span class="body">{toast.text}</span>
       <button class="dismiss" onclick={() => dismissToast(toast.id)} aria-label={t.common.close}>
-        <Icon name="close" size={14} />
+        <Icon name="close" size={15} />
       </button>
     </div>
   {/each}
@@ -23,33 +20,36 @@
 <style>
   .toast-host {
     position: fixed;
-    right: var(--space-5);
-    bottom: var(--space-5);
+    right: var(--sp-8);
+    bottom: var(--sp-8);
     z-index: var(--z-toast);
     display: flex;
     flex-direction: column;
     align-items: flex-end;
-    gap: var(--space-2);
+    gap: var(--sp-3);
     pointer-events: none;
-    max-width: min(26rem, calc(100vw - 2 * var(--space-4)));
+    width: min(320px, calc(100vw - 2 * var(--sp-6)));
   }
 
+  /* Solid, not glass: a toast has to be readable over whatever it covers, and a
+     blur behind 12px text only reduces contrast. The kind rides on the text
+     colour alone — no left rule, no icon tile: the sentence is the toast. */
   .toast {
     pointer-events: auto;
     display: flex;
-    align-items: flex-start;
-    gap: var(--space-2-5);
-    padding: var(--space-3) var(--space-3) var(--space-3) var(--space-3-5);
-    border-radius: var(--radius);
+    align-items: center;
+    gap: var(--sp-3);
+    width: 100%;
+    min-height: 44px;
+    padding: var(--sp-4);
     border: 1px solid var(--border);
-    background: var(--glass-bg);
-    backdrop-filter: var(--nav-blur);
-    -webkit-backdrop-filter: var(--nav-blur);
-    box-shadow: var(--shadow-lg);
-    font-size: var(--text-caption);
-    line-height: var(--leading-normal);
-    color: var(--foreground);
-    animation: toast-in var(--transition-ios);
+    border-radius: var(--r-lg);
+    background: var(--surface);
+    box-shadow: var(--shadow-2);
+    font-size: var(--fs-13);
+    line-height: var(--lh-13);
+    color: var(--text);
+    animation: toast-in var(--dur-3) var(--ease-out);
   }
 
   @keyframes toast-in {
@@ -63,19 +63,12 @@
     }
   }
 
-  .glyph {
-    display: grid;
-    place-items: center;
-    width: 22px;
-    height: 22px;
-    border-radius: 999px;
-    flex: none;
-    margin-top: 1px;
-  }
-
+  /* The sentence is the toast: it takes the state colour and sits centred
+     between the card edges and the dismiss that clears it. */
   .body {
     flex: 1;
     min-width: 0;
+    text-align: center;
     word-break: break-word;
   }
 
@@ -86,43 +79,40 @@
     width: 22px;
     height: 22px;
     border: none;
-    border-radius: 999px;
+    border-radius: var(--r-sm);
     background: none;
-    color: var(--muted-foreground);
+    color: var(--text-2);
     cursor: pointer;
-    transition: background var(--transition-fast), color var(--transition-fast);
+    transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
   }
 
-  .dismiss:hover {
-    background: var(--surface-hover);
-    color: var(--foreground);
+  /* Touch has no hover: without the guard a tapped toast's close button keeps
+     its pressed surface until the toast expires. */
+  @media (hover: hover) and (pointer: fine) {
+    .dismiss:hover {
+      background: var(--surface-2);
+      color: var(--text);
+    }
   }
 
-  .toast.ok .glyph {
-    background: var(--success-bg);
-    color: var(--success);
+  .toast.ok .body {
+    color: var(--ok);
   }
-  .toast.info .glyph {
-    background: var(--info-bg);
+  .toast.info .body {
     color: var(--info);
   }
-  .toast.warn .glyph {
-    background: var(--warning-bg);
-    color: var(--warning);
+  .toast.warn .body {
+    color: var(--warn);
   }
-  .toast.error {
-    border-color: color-mix(in srgb, var(--destructive) 40%, var(--border));
-  }
-  .toast.error .glyph {
-    background: var(--destructive-bg);
-    color: var(--destructive);
+  .toast.error .body {
+    color: var(--danger);
   }
 
   @media (max-width: 640px) {
     .toast-host {
-      right: var(--space-4);
-      left: var(--space-4);
-      bottom: var(--space-4);
+      right: var(--sp-6);
+      left: var(--sp-6);
+      bottom: var(--sp-6);
       align-items: stretch;
     }
   }

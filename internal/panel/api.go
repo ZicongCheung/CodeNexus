@@ -1,18 +1,15 @@
 package panel
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/ZicongCheung/CodeNexus/internal/account"
-	"github.com/ZicongCheung/CodeNexus/internal/authstore"
 	"github.com/ZicongCheung/CodeNexus/internal/pool"
 	"github.com/ZicongCheung/CodeNexus/internal/upstream"
 )
@@ -139,11 +136,22 @@ func (c *Console) accountViews() []accountView {
 	statuses := c.pool.Describe()
 	out := make([]accountView, 0, len(statuses))
 	for _, st := range statuses {
-		out = append(out, accountView{
+		v := accountView{
 			AccountStatus:     st,
 			CheckinDone:       c.checkinDone(st.Key),
 			CheckinApplicable: c.checkinApplicable(st.Key),
-		})
+		}
+		// Check-in is the one action the pool cannot judge: whether a source
+		// has a check-in programme at all is the scheduler's knowledge. The
+		// console offers the button only when the answer is yes, so a Trae
+		// account is never handed a control that would fail.
+		if v.CheckinApplicable {
+			acts := make([]string, 0, len(st.Actions)+1)
+			acts = append(acts, "checkin")
+			acts = append(acts, st.Actions...)
+			v.AccountStatus.Actions = acts
+		}
+		out = append(out, v)
 	}
 	return out
 }
@@ -400,10 +408,7 @@ func (c *Console) persist(acc *account.Account) error {
 // importRequest accepts one of three shapes: an inline account array, a
 // server-side file path, or an encrypted export bundle.
 type importRequest struct {
-	Accounts   []importAccount `json:"accounts"`
-	Path       string          `json:"path"`
-	Bundle     string          `json:"bundle"`
-	Passphrase string          `json:"passphrase"`
+	Accounts []importAccount `json:"accounts"`
 }
 
 // importAccount is a permissive view of an externally produced credential
@@ -430,35 +435,15 @@ func (c *Console) handleImport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	var records []importAccount
-	switch {
-	case len(req.Accounts) > 0:
-		records = req.Accounts
-	case strings.TrimSpace(req.Path) != "":
-		raw, err := os.ReadFile(strings.TrimSpace(req.Path))
-		if err != nil {
-			writeErr(w, http.StatusBadRequest, "read file: "+err.Error())
-			return
-		}
-		parsed, err := parseImportFile(raw)
-		if err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		records = parsed
-	case strings.TrimSpace(req.Bundle) != "":
-		accs, err := decodeBundle(req.Bundle, req.Passphrase)
-		if err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		c.importAccounts(w, accs, nil)
-		return
-	default:
-		writeErr(w, http.StatusBadRequest, "provide 'accounts', 'path', or 'bundle'")
+	// The console pastes records, so this endpoint takes the records
+	// themselves. Reading a file or opening an encrypted bundle used to live
+	// here too; both were removed with their console entries. The keeper still
+	// owns those formats on disk (authstore), which is where they belong.
+	if len(req.Accounts) == 0 {
+		writeErr(w, http.StatusBadRequest, "provide 'accounts'")
 		return
 	}
-	accs, skipped := normalizeImport(records)
+	accs, skipped := normalizeImport(req.Accounts)
 	c.importAccounts(w, accs, skipped)
 }
 
@@ -490,40 +475,6 @@ func (c *Console) importAccounts(w http.ResponseWriter, accs []*account.Account,
 		"errors":   skipped,
 		"accounts": added,
 	})
-}
-
-// parseImportFile accepts either a JSON array of records or a single record.
-func parseImportFile(raw []byte) ([]importAccount, error) {
-	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "" {
-		return nil, errors.New("file is empty")
-	}
-	if strings.HasPrefix(trimmed, "[") {
-		var arr []importAccount
-		if err := json.Unmarshal(raw, &arr); err != nil {
-			return nil, errors.New("invalid JSON array: " + err.Error())
-		}
-		return arr, nil
-	}
-	var one importAccount
-	if err := json.Unmarshal(raw, &one); err != nil {
-		return nil, errors.New("invalid JSON object: " + err.Error())
-	}
-	return []importAccount{one}, nil
-}
-
-// decodeBundle accepts a raw or base64-encoded encrypted export.
-func decodeBundle(bundle, passphrase string) ([]*account.Account, error) {
-	if passphrase == "" {
-		return nil, errors.New("bundle import requires a passphrase")
-	}
-	raw := []byte(strings.TrimSpace(bundle))
-	if !json.Valid(raw) {
-		if decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(bundle)); err == nil {
-			raw = decoded
-		}
-	}
-	return authstore.Import(raw, passphrase)
 }
 
 // normalizeImport validates and converts external records into accounts,

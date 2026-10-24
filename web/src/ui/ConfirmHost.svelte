@@ -2,13 +2,20 @@
   import { confirmState, settle } from './confirm.svelte.js'
   import Icon from './Icon.svelte'
   import { t } from '../strings.js'
+  import { trapFocus } from './focus.js'
 
-  // The dialog owns its own key handling: Escape cancels, Enter confirms. The
-  // backdrop is the click target, so a click inside the card cannot dismiss it.
-  let dialogEl = $state(null)
+  // Escape cancels; Enter is left to the platform. A button already confirms on
+  // Enter when it has focus, and a global Enter handler would also confirm while
+  // focus sat on "cancel" — which is the one place it must never do that.
+  let cancelEl = $state(null)
+  let confirmEl = $state(null)
 
+  // Destructive dialogs open on the safe choice; everything else opens on the
+  // action, so Enter still completes a routine confirmation in one keystroke.
   $effect(() => {
-    if (confirmState.open && dialogEl) dialogEl.focus()
+    if (!confirmState.open) return
+    const target = confirmState.tone === 'danger' ? cancelEl : confirmEl
+    if (target) target.focus({ preventScroll: true })
   })
 
   function onKeydown(e) {
@@ -16,9 +23,6 @@
     if (e.key === 'Escape') {
       e.preventDefault()
       settle(false)
-    } else if (e.key === 'Enter' && !e.isComposing) {
-      e.preventDefault()
-      settle(true)
     }
   }
 
@@ -33,15 +37,15 @@
   <div class="backdrop" role="presentation" onclick={onBackdrop}>
     <div
       class="dialog"
-      bind:this={dialogEl}
+      use:trapFocus
       role="alertdialog"
       aria-modal="true"
       aria-labelledby="confirm-title"
       tabindex="-1"
     >
       <div class="head">
-        <span class="mark" class:danger={confirmState.danger}>
-          <Icon name={confirmState.danger ? 'alert' : 'info'} size={16} />
+        <span class="mark" data-tone={confirmState.tone}>
+          <Icon name={confirmState.tone === 'info' ? 'info' : 'alert'} size={16} />
         </span>
         <h2 id="confirm-title">{confirmState.title}</h2>
       </div>
@@ -51,9 +55,16 @@
       {#if confirmState.detail}
         <p class="detail">{confirmState.detail}</p>
       {/if}
+      <div class="rule" aria-hidden="true"></div>
       <div class="actions">
-        <button class="btn ghost" onclick={() => settle(false)}>{confirmState.cancelLabel}</button>
-        <button class="btn {confirmState.danger ? 'danger' : 'primary'}" onclick={() => settle(true)}>
+        <button class="btn ghost" bind:this={cancelEl} onclick={() => settle(false)}>
+          {confirmState.cancelLabel}
+        </button>
+        <button
+          class="btn {confirmState.tone === 'danger' ? 'danger-solid' : 'primary'}"
+          bind:this={confirmEl}
+          onclick={() => settle(true)}
+        >
           {confirmState.confirmLabel || t.common.confirm}
         </button>
       </div>
@@ -65,14 +76,12 @@
   .backdrop {
     position: fixed;
     inset: 0;
-    z-index: var(--z-modal-backdrop);
+    z-index: var(--z-backdrop);
     display: grid;
     place-items: center;
-    padding: var(--space-4);
-    background: var(--overlay-bg);
-    backdrop-filter: blur(3px);
-    -webkit-backdrop-filter: blur(3px);
-    animation: fade var(--transition-normal);
+    padding: var(--sp-6);
+    background: var(--backdrop);
+    animation: fade var(--dur-3) var(--ease);
   }
 
   @keyframes fade {
@@ -85,15 +94,15 @@
   }
 
   .dialog {
-    z-index: var(--z-modal);
-    width: min(26rem, 100%);
-    background: var(--card);
-    color: var(--card-foreground);
+    z-index: var(--z-dialog);
+    width: min(420px, 100%);
+    background: var(--surface);
+    color: var(--text);
     border: 1px solid var(--border);
-    border-radius: var(--card-radius);
-    box-shadow: var(--shadow-modal);
-    padding: var(--space-5);
-    animation: pop var(--transition-ios);
+    border-radius: var(--r-lg);
+    box-shadow: var(--shadow-dialog);
+    padding: var(--sp-7);
+    animation: pop var(--dur-3) var(--ease-out);
   }
 
   @keyframes pop {
@@ -110,99 +119,76 @@
   .head {
     display: flex;
     align-items: center;
-    gap: var(--space-2-5);
+    gap: var(--sp-4);
   }
 
+  /* The mark is a 24px tile at the small radius: it identifies the tone of the
+     dialog, it is not a badge. Three tones, three soft fills — the confirm
+     button below carries the severity. */
   .mark {
     display: grid;
     place-items: center;
-    width: 28px;
-    height: 28px;
-    border-radius: 999px;
+    width: 24px;
+    height: 24px;
+    border-radius: var(--r-sm);
     flex: none;
-    background: var(--primary-light);
-    color: var(--primary);
+    background: var(--action-soft);
+    color: var(--action);
   }
 
-  .mark.danger {
-    background: var(--destructive-bg);
-    color: var(--destructive);
+  .mark[data-tone='warn'] {
+    background: var(--warn-soft);
+    color: var(--warn);
+  }
+
+  .mark[data-tone='danger'] {
+    background: var(--danger-soft);
+    color: var(--danger);
   }
 
   h2 {
-    font-size: var(--text-lg);
-    font-weight: var(--font-semibold);
+    font-size: var(--fs-16);
+    font-weight: var(--fw-semibold);
     margin: 0;
   }
 
   .body {
-    margin: var(--space-3) 0 0;
-    font-size: var(--text-caption);
-    color: var(--muted-foreground);
+    margin: var(--sp-5) 0 0;
+    font-size: var(--fs-13);
+    color: var(--text-2);
     line-height: var(--leading-relaxed);
   }
 
   .detail {
-    margin: var(--space-3) 0 0;
-    padding: var(--space-2-5) var(--space-3);
-    border-radius: var(--radius);
-    background: var(--secondary);
-    font-family: var(--font-family-mono);
-    font-size: var(--text-xs);
+    margin: var(--sp-5) 0 0;
+    padding: var(--sp-4) var(--sp-5);
+    border-radius: var(--r-md);
+    background: var(--surface-2);
+    font-family: var(--font-mono);
+    font-size: var(--fs-11);
     word-break: break-all;
     max-height: 8rem;
     overflow: auto;
   }
 
+  /* A hairline, not a filled band: the actions belong to the dialog, and a
+     second surface here would read as a footer bar. */
+  .rule {
+    margin-top: var(--sp-7);
+    border-top: 1px solid var(--border);
+  }
+
   .actions {
     display: flex;
     justify-content: flex-end;
-    gap: var(--space-2);
-    margin-top: var(--space-5);
+    gap: var(--sp-3);
+    margin-top: var(--sp-5);
   }
 
-  .btn {
-    font: inherit;
-    font-size: var(--text-caption);
-    font-weight: var(--font-medium);
-    height: var(--button-height);
-    padding: 0 var(--space-5);
-    border-radius: var(--button-radius);
-    border: 1px solid transparent;
-    cursor: pointer;
-    transition: background var(--transition-fast), border-color var(--transition-fast),
-      transform var(--transition-fast), opacity var(--transition-fast);
-  }
-
-  .btn:active {
-    transform: scale(0.97);
-  }
-
-  .btn.ghost {
-    background: var(--secondary);
-    color: var(--foreground);
-    border-color: var(--border);
-  }
-
-  .btn.ghost:hover {
-    background: var(--surface-active);
-  }
-
-  .btn.primary {
-    background: var(--primary);
-    color: var(--primary-foreground);
-  }
-
-  .btn.primary:hover {
-    filter: brightness(1.06);
-  }
-
-  .btn.danger {
-    background: var(--destructive);
-    color: #fff;
-  }
-
-  .btn.danger:hover {
-    filter: brightness(1.06);
+  /* Colour, height, radius, focus and disabled all come from the global .btn.
+     Only the width changes here: a dialog action is the only thing on screen,
+     so it can afford the wider padding a toolbar button cannot. */
+  .actions .btn {
+    padding: 0 var(--sp-7);
   }
 </style>

@@ -19,24 +19,6 @@ import (
 // write endpoint is idempotent because it delegates to the same idempotent
 // tasks the scheduler runs.
 
-// actionView is the JSON shape of one growth executor.
-type actionView struct {
-	Code    string       `json:"task_code"`
-	Desc    string       `json:"desc"`
-	Class   growth.Class `json:"class"`
-	Attempt bool         `json:"attempt"`
-}
-
-// handleTaskCatalog lists the growth executors with their evidence class.
-func (c *Console) handleTaskCatalog(w http.ResponseWriter, _ *http.Request) {
-	actions := growth.Actions()
-	views := make([]actionView, 0, len(actions))
-	for _, a := range actions {
-		views = append(views, actionView{Code: a.Code, Desc: a.Desc, Class: a.Class, Attempt: a.Attempt})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"actions": views, "count": len(views)})
-}
-
 // accountRef resolves one account from its uid.
 func (c *Console) accountRef(uid string) (*account.Account, string, bool) {
 	if c.pool == nil || uid == "" {
@@ -455,13 +437,15 @@ func (c *Console) handleScanAll(w http.ResponseWriter, r *http.Request) {
 		if !ok || acc == nil {
 			continue
 		}
-		entry := accountTasks{UID: st.UID, Label: st.Label}
 		tasks, ok := c.tasksFor(acc)
 		if !ok {
-			entry.Failed = "no task adapter"
-			out = append(out, entry)
+			// A source without the growth surface (Trae CN checks in through
+			// the narrower maintenance interface) is not a scan failure: it
+			// has no task row. Emitting an entry per such account read as a
+			// wall of errors, so it is simply absent.
 			continue
 		}
+		entry := accountTasks{UID: st.UID, Label: st.Label}
 		list, err := tasks.ListTasks(ctx, acc, false)
 		if err != nil {
 			entry.Failed = err.Error()

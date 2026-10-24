@@ -6,8 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -82,6 +80,50 @@ func call(c *Console, method, target, body string, loopback bool, key string) *h
 	return rec
 }
 
+// The rail renders the mark before any session exists, so the logo route is
+// public like the shell itself and answers a conditional GET with a 304 —
+// otherwise every panel open pays for a PNG the browser already has.
+func TestConsoleLogoServesEmbeddedArtwork(t *testing.T) {
+	c, _, _ := newConsole(t)
+	rec := call(c, http.MethodGet, "/panel/logo.png", "", false, "")
+	if rec.Code != 200 {
+		t.Fatalf("GET /panel/logo.png = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "image/png" {
+		t.Errorf("Content-Type = %q, want image/png", got)
+	}
+	if rec.Header().Get("Cache-Control") == "" {
+		t.Error("no Cache-Control: the artwork is embedded and must be cacheable")
+	}
+	body := rec.Body.Bytes()
+	if len(body) < 8 || string(body[:8]) != "\x89PNG\r\n\x1a\n" {
+		t.Fatalf("body is %d bytes and does not start with a PNG signature", len(body))
+	}
+
+	etag := rec.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("no ETag on the first response")
+	}
+	req := httptest.NewRequest(http.MethodGet, "/panel/logo.png", nil)
+	req.RemoteAddr = "203.0.113.7:4444"
+	req.Header.Set("If-None-Match", etag)
+	rec2 := httptest.NewRecorder()
+	c.ServeHTTP(rec2, req)
+	if rec2.Code != http.StatusNotModified {
+		t.Errorf("conditional GET = %d, want 304", rec2.Code)
+	}
+	if rec2.Body.Len() != 0 {
+		t.Errorf("304 carried %d bytes of body", rec2.Body.Len())
+	}
+}
+
+func TestConsoleLogoRejectsWrites(t *testing.T) {
+	c, _, _ := newConsole(t)
+	if rec := call(c, http.MethodPost, "/panel/logo.png", "", false, ""); rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST /panel/logo.png = %d, want 405", rec.Code)
+	}
+}
+
 func TestConsoleLoopbackNeedsNoKey(t *testing.T) {
 	c, _, _ := newConsole(t)
 	if rec := call(c, http.MethodGet, "/panel/api/session", "", true, ""); rec.Code != 200 {
@@ -137,29 +179,6 @@ func TestConsoleImportInline(t *testing.T) {
 	loaded, err := store.Load()
 	if err != nil || len(loaded) != 2 {
 		t.Fatalf("store load = %d accounts, err = %v", len(loaded), err)
-	}
-}
-
-func TestConsoleImportFromPath(t *testing.T) {
-	c, _, p := newConsole(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "export.json")
-	raw := `[{"uid":"p1","access_token":"tok","expires_at":1700000000000}]`
-	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	body, _ := json.Marshal(map[string]string{"path": path})
-	rec := call(c, http.MethodPost, "/panel/api/auth/import", string(body), true, "")
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"imported":1`) {
-		t.Fatalf("code = %d body = %s", rec.Code, rec.Body.String())
-	}
-	st := p.Describe()
-	if len(st) != 1 || st[0].UID != "p1" {
-		t.Fatalf("pool = %+v", st)
-	}
-	// Millisecond expiry should be normalized to seconds.
-	if exp := p.List()[0].ExpiresAtValue(); exp != 1700000000 {
-		t.Fatalf("expiry = %d, want 1700000000", exp)
 	}
 }
 

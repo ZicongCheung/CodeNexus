@@ -12,11 +12,17 @@ export function dismissToast(id) {
 }
 
 // push shows a message. kind is one of info | ok | warn | error. A duration of
-// 0 keeps the toast until it is dismissed, which is what errors deserve.
-export function pushToast(text, kind = 'info', duration = 4000) {
+// 0 keeps the toast until it is dismissed, which is what errors deserve: a
+// failure that disappears after three seconds is a failure nobody read.
+// At most three are on screen — the fourth pushes the oldest out, so a burst of
+// batch results cannot stack into a wall that covers the page.
+const MAX_VISIBLE = 3
+
+export function pushToast(text, kind = 'info', duration = 3200) {
   if (!text) return 0
   const id = ++seq
   toasts.push({ id, text, kind })
+  while (toasts.length > MAX_VISIBLE) toasts.shift()
   if (duration > 0) setTimeout(() => dismissToast(id), duration)
   return id
 }

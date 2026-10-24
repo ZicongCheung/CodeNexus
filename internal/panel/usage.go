@@ -14,18 +14,42 @@ import (
 	"github.com/ZicongCheung/CodeNexus/internal/usagestore"
 )
 
-// usageWindow resolves the ?days= parameter, bounded to a year.
-func usageWindow(r *http.Request) int {
-	days := 30
-	if v := r.URL.Query().Get("days"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			days = n
+// usageWindow resolves the window a request asks for. Three shapes reach here,
+// in priority order:
+//
+//	?from=&to=   a custom range from the console's date pickers
+//	?all=1       everything the store holds
+//	?days=N      a rolling preset
+//
+// The custom range wins because it is the most specific thing the user can
+// say. Both bounds go through parseTimeParam, so a malformed value falls back
+// to the preset rather than producing an accidentally empty window.
+//
+// ?source= narrows to one upstream and rides on the window itself, so the
+// summary, the daily chart and the three breakdowns of one selection can never
+// disagree about which rows they cover.
+func (c *Console) usageWindow(r *http.Request) usagestore.Window {
+	q := r.URL.Query()
+	from := parseTimeParam(q.Get("from"))
+	to := parseTimeParam(q.Get("to"))
+	src := strings.TrimSpace(q.Get("source"))
+	var win usagestore.Window
+	switch {
+	case !from.IsZero() || !to.IsZero():
+		win = usagestore.Window{From: from, To: to}
+	case q.Get("all") != "":
+		win = usagestore.Window{}
+	default:
+		days := 30
+		if v := q.Get("days"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				days = n
+			}
 		}
+		win = usagestore.Days(days, c.usageLocation())
 	}
-	if days > 366 {
-		days = 366
-	}
-	return days
+	win.Source = src
+	return win
 }
 
 // usageLocation resolves the operator timezone, falling back to local time.
@@ -47,14 +71,26 @@ func (c *Console) handleUsageSummary(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"available": false})
 		return
 	}
-	days := usageWindow(r)
-	tz := c.usageLocation()
-	summary, err := st.Summary(days, tz)
+	win := c.usageWindow(r)
+	summary, err := st.Summary(win)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	models, err := st.Models(days, tz)
+	// All three breakdowns are returned together. Switching a dimension is a
+	// sort of data the console already holds, never a round trip: the table has
+	// no loading state to flicker through when the user clicks "by wire".
+	models, err := st.Models(win)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	accounts, err := st.Accounts(win)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	wires, err := st.Wires(win)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -62,12 +98,48 @@ func (c *Console) handleUsageSummary(w http.ResponseWriter, r *http.Request) {
 	if models == nil {
 		models = []usagestore.ModelUsage{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	if accounts == nil {
+		accounts = []usagestore.AccountUsage{}
+	}
+	if wires == nil {
+		wires = []usagestore.WireUsage{}
+	}
+	res := map[string]any{
 		"available": true,
-		"days":      days,
 		"summary":   summary,
 		"models":    models,
-	})
+		"accounts":  accounts,
+		"wires":     wires,
+	}
+	// Period over period, measured against the equally long window immediately
+	// before this one. It travels with the summary so a caller that wants a
+	// delta never has to issue a second round trip for it; "all time" has no
+	// predecessor, so the field is simply absent there.
+	if !win.From.IsZero() {
+		prevWin := win.Prev(time.Now())
+		prev, err := st.Summary(prevWin)
+		if err != nil {
+			// A failed baseline is not a failed page: the summary above is
+			// complete, and the console renders "no baseline" when prev is
+			// absent.
+			c.warn("console: usage prev window: %v", err)
+		} else {
+			res["prev"] = prev
+			res["prev_from"] = prevWin.From.Unix()
+			if !prevWin.To.IsZero() {
+				res["prev_to"] = prevWin.To.Unix()
+			}
+		}
+	}
+	// Echo the resolved bounds so the console can label the window it is
+	// actually showing instead of the label it clicked.
+	if !win.From.IsZero() {
+		res["from"] = win.From.Unix()
+	}
+	if !win.To.IsZero() {
+		res["to"] = win.To.Unix()
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (c *Console) handleUsageDaily(w http.ResponseWriter, r *http.Request) {
@@ -76,8 +148,8 @@ func (c *Console) handleUsageDaily(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"available": false})
 		return
 	}
-	days := usageWindow(r)
-	daily, err := st.Daily(days, dayOffsetSeconds(c.usageLocation()), c.usageLocation())
+	win := c.usageWindow(r)
+	daily, err := st.Daily(win, dayOffsetSeconds(c.usageLocation()), c.usageLocation())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -85,7 +157,7 @@ func (c *Console) handleUsageDaily(w http.ResponseWriter, r *http.Request) {
 	if daily == nil {
 		daily = []usagestore.DailyRow{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"available": true, "days": days, "daily": daily})
+	writeJSON(w, http.StatusOK, map[string]any{"available": true, "buckets": len(daily), "daily": daily})
 }
 
 // handleUsageRecords serves the filterable detail table.
@@ -113,6 +185,10 @@ func (c *Console) handleUsageRecords(w http.ResponseWriter, r *http.Request) {
 		From:    parseTimeParam(q.Get("from")),
 		To:      parseTimeParam(q.Get("to")),
 		Limit:   limit,
+		// before is the cursor the console passes back to append the next
+		// older batch. Without it every "load more" would refetch the newest
+		// rows it already shows.
+		Before: parseTimeParam(q.Get("before")),
 	}
 	records, err := st.Records(filter)
 	if err != nil {

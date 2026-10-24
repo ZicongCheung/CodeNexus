@@ -113,17 +113,18 @@ func (s catalogSource) ListModels(_ context.Context, acc *account.Account) ([]up
 	return s.perUID[acc.UID], nil
 }
 
-func TestModelsProjectsEachAccountsCatalogue(t *testing.T) {
+func TestModelsMergesTheSameModelAcrossAccounts(t *testing.T) {
 	src := catalogSource{perUID: map[string][]upstream.ModelSpec{
 		"u-1": {
 			{ID: "glm-5.3", Source: upstream.SourceTraeCN, ContextLength: 1000000,
-				Capabilities: []string{"chat", "reasoning", "max"}, ThinkingEfforts: []string{"light", "high"}},
+				MaxOutput: 64000, Capabilities: []string{"chat", "reasoning", "max"},
+				ThinkingEfforts: []string{"light", "high"}, Credits: "x0.79"},
 			{ID: "mimo-v2.6-flash", Source: upstream.SourceTraeCN, ContextLength: 981504,
 				Capabilities: []string{"chat"}},
 		},
 		"u-2": {
 			{ID: "glm-5.3", Source: upstream.SourceTraeCN, ContextLength: 200000,
-				Capabilities: []string{"chat", "reasoning"}},
+				Capabilities: []string{"chat", "reasoning", "tools"}},
 		},
 	}}
 	m := &maintOnly{}
@@ -140,24 +141,47 @@ func TestModelsProjectsEachAccountsCatalogue(t *testing.T) {
 		t.Fatalf("code = %d (%s)", res.code, res.body)
 	}
 	rows := decode(t, &res)["models"].([]any)
-	if len(rows) != 3 {
-		t.Fatalf("models = %d rows, want 3 (%#v)", len(rows), rows)
+	if len(rows) != 2 {
+		t.Fatalf("models = %d rows, want 2: one row per model, not per account (%#v)", len(rows), rows)
 	}
-	// The same model under two accounts must stay separate rows with their own
-	// context length — that difference is the point of the page.
-	byUID := map[string]map[string]any{}
+
+	byID := map[string]map[string]any{}
 	for _, raw := range rows {
 		row, _ := raw.(map[string]any)
-		byUID[row["uid"].(string)+"/"+row["id"].(string)] = row
+		byID[row["id"].(string)] = row
 	}
-	if byUID["u-1/glm-5.3"]["context_length"].(float64) != 1000000 {
-		t.Fatalf("u-1 glm context = %v", byUID["u-1/glm-5.3"]["context_length"])
+	glm, ok := byID["glm-5.3"]
+	if !ok {
+		t.Fatalf("glm-5.3 missing: %#v", rows)
 	}
-	if byUID["u-2/glm-5.3"]["context_length"].(float64) != 200000 {
-		t.Fatalf("u-2 glm context = %v", byUID["u-2/glm-5.3"]["context_length"])
+	// Two accounts carry it, so the row counts two and names both.
+	if glm["accounts"].(float64) != 2 {
+		t.Fatalf("glm accounts = %v, want 2", glm["accounts"])
 	}
-	if _, ok := byUID["u-1/glm-5.3"]["thinking_efforts"]; !ok {
-		t.Fatalf("thinking efforts missing: %#v", byUID["u-1/glm-5.3"])
+	if keys := glm["account_keys"].([]any); len(keys) != 2 {
+		t.Fatalf("glm account_keys = %v", keys)
+	}
+	// The widest window wins: routing may pick either account, so the model can
+	// serve the larger context.
+	if glm["context_length"].(float64) != 1000000 {
+		t.Fatalf("glm context = %v, want the widest", glm["context_length"])
+	}
+	if glm["max_output_tokens"].(float64) != 64000 {
+		t.Fatalf("glm max output = %v", glm["max_output_tokens"])
+	}
+	if glm["credits"].(string) != "x0.79" {
+		t.Fatalf("glm credits = %v", glm["credits"])
+	}
+	// Capability bits unite: a tool call works if any account offers it.
+	caps := glm["capabilities"].([]any)
+	hasTools := false
+	for _, v := range caps {
+		if v == "tools" {
+			hasTools = true
+		}
+	}
+	if !hasTools {
+		t.Fatalf("glm capabilities = %v, want tools merged in", caps)
 	}
 }
 

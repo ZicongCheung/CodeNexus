@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ZicongCheung/CodeNexus/internal/pool"
 	"github.com/ZicongCheung/CodeNexus/internal/upstream"
 )
 
@@ -34,7 +33,7 @@ type creditRow struct {
 	Failed bool   `json:"failed,omitempty"`
 	Error  string `json:"error,omitempty"`
 
-	Unlimited bool `json:"unlimited,omitempty"`
+	Unlimited bool  `json:"unlimited,omitempty"`
 	Remain    int64 `json:"remain"`
 	Total     int64 `json:"total"`
 	Used      int64 `json:"used"`
@@ -116,98 +115,5 @@ func (c *Console) handleCredits(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"accounts":          rows,
 		"expiring_soon_hrs": c.cfg.Schedule.ExpiringSoonHours,
-	})
-}
-
-// modelRow is one model as one account sees it. Capability bits are whatever
-// the account's own catalogue states; a field the catalogue does not carry is
-// left empty rather than guessed.
-type modelRow struct {
-	UID    string `json:"uid"`
-	Key    string `json:"key"`
-	Source string `json:"source"`
-	Label  string `json:"label,omitempty"`
-
-	ID      string   `json:"id"`
-	Context int      `json:"context_length,omitempty"`
-	Caps    []string `json:"capabilities,omitempty"`
-	// Efforts lists the thinking strengths the catalogue advertises, weakest
-	// first. Empty means not adjustable, which is a different claim from
-	// "default".
-	Efforts []string `json:"thinking_efforts,omitempty"`
-}
-
-// handleModels projects each account's own live catalogue.
-//
-// /v1/models flattens the pool into one deduplicated list, which is right for
-// a client picking a model name but hides the thing the console has to show:
-// which account carries which tier. Reading per account is safe here because
-// ListModels never blocks — it answers from the cached catalogue and refreshes
-// in the background, so the page does not multiply upstream load.
-func (c *Console) handleModels(w http.ResponseWriter, r *http.Request) {
-	statuses := c.pool.Describe()
-	rows := make([]modelRow, 0, len(statuses)*8)
-	failed := map[string]string{}
-
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, creditProbeLimit)
-	for _, st := range statuses {
-		if st.Local {
-			continue
-		}
-		wg.Add(1)
-		go func(st pool.AccountStatus) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			acc, ok := c.pool.Get(st.Key)
-			if !ok || acc == nil {
-				failed[st.UID] = "account left the pool"
-				return
-			}
-			u, ok := upstream.Get(st.Source)
-			if !ok {
-				failed[st.UID] = "source not registered: " + string(st.Source)
-				return
-			}
-			ctx, cancel := context.WithTimeout(r.Context(), creditProbeTimeout)
-			defer cancel()
-			models, err := u.ListModels(ctx, acc)
-			if err != nil {
-				failed[st.UID] = err.Error()
-				return
-			}
-			for _, m := range models {
-				if m.ID == "" {
-					continue
-				}
-				rows = append(rows, modelRow{
-					UID:     st.UID,
-					Key:     st.Key,
-					Source:  string(st.Source),
-					Label:   st.Label,
-					ID:      m.ID,
-					Context: m.ContextLength,
-					Caps:    m.Capabilities,
-					Efforts: m.ThinkingEfforts,
-				})
-			}
-		}(st)
-	}
-	wg.Wait()
-
-	sort.SliceStable(rows, func(a, b int) bool {
-		if rows[a].Source != rows[b].Source {
-			return rows[a].Source < rows[b].Source
-		}
-		if rows[a].UID != rows[b].UID {
-			return rows[a].UID < rows[b].UID
-		}
-		return rows[a].ID < rows[b].ID
-	})
-	writeJSON(w, http.StatusOK, map[string]any{
-		"models": rows,
-		"failed": failed,
 	})
 }

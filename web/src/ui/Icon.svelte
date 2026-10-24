@@ -6,11 +6,16 @@
   const paths = {
     overview: ['M4 13h6V4H4z', 'M14 20h6v-9h-6z', 'M14 9h6V4h-6z', 'M4 20h6v-4H4z'],
     accounts: ['M16 19v-1.5a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4V19', 'M9 10.5a3.25 3.25 0 1 0 0-6.5 3.25 3.25 0 0 0 0 6.5Z', 'M17 4.3a3.25 3.25 0 0 1 0 6.2', 'M18.5 19v-1.5a4 4 0 0 0-2.6-3.75'],
+    // One person, not two: the empty pool is a room with nobody in it.
+    user: ['M18.5 20v-1.6a5 5 0 0 0-5-5h-3a5 5 0 0 0-5 5V20', 'M12 10.4a3.4 3.4 0 1 0 0-6.8 3.4 3.4 0 0 0 0 6.8Z'],
     tasks: ['M9 5.5h11', 'M9 12h11', 'M9 18.5h11', 'M3.5 5.5l1.2 1.2L7 4.6', 'M3.5 12l1.2 1.2L7 11.1', 'M3.5 18.5l1.2 1.2L7 17.6'],
     logs: ['M3 12h3.5l2.5-6 4 12 2.5-6H21'],
     usage: ['M4 20V10', 'M10 20V4', 'M16 20v-7', 'M22 20H2'],
-    models: ['M12 3 4 7.5v9L12 21l8-4.5v-9L12 3Z', 'M12 12v9', 'm4 7.5 8 4.5 8-4.5'],
-    credits: ['M12 3.5 21 8l-9 4.5L3 8l9-4.5Z', 'm3 12 9 4.5 9-4.5', 'M12 12.5V21', 'M12 21c-4.5-1-9-3.5-9-3.5'],
+    // Layers, not a box: a model catalogue is a stack of things you pick from.
+    models: ['m12 3.5 8.5 4.6-8.5 4.6L3.5 8.1 12 3.5Z', 'm3.5 12.2 8.5 4.6 8.5-4.6', 'm3.5 16.4 8.5 4.6 8.5-4.6'],
+    // A stack of discs. Balances are quantities you top up, not a card you
+    // swipe, and the shape has to survive being drawn at 15px in a rail.
+    credits: ['M12 3.6c4.3 0 7.8 1.4 7.8 3.2s-3.5 3.2-7.8 3.2S4.2 8.6 4.2 6.8 7.7 3.6 12 3.6Z', 'M4.2 6.8v4.3c0 1.8 3.5 3.2 7.8 3.2s7.8-1.4 7.8-3.2V6.8', 'M4.2 11.1v4.3c0 1.8 3.5 3.2 7.8 3.2s7.8-1.4 7.8-3.2v-4.3'],
     add: ['M12 5v14', 'M5 12h14'],
     importAcc: ['M12 3v11', 'm7.5 9.5 4.5 4.5 4.5-4.5', 'M4 20h16'],
     settings: ['M4 7h10', 'M18 7h2', 'M4 17h6', 'M14 17h6', 'M16 7a2 2 0 1 0-4 0 2 2 0 0 0 4 0Z', 'M12 17a2 2 0 1 0-4 0 2 2 0 0 0 4 0Z'],
@@ -19,7 +24,11 @@
     monitor: ['M3 5h18v11H3z', 'M8 20h8', 'M12 16v4'],
     close: ['M6 6l12 12', 'M18 6 6 18'],
     chevron: ['m6 9 6 6 6-6'],
+    chevronRight: ['m9 6 6 6-6 6'],
     check: ['m5 12.5 4.5 4.5L19 7'],
+    // Two offset frames: the front sheet plus the edge of the one behind it.
+    // At 12px a third line turns into a smudge, so the back sheet is a hint.
+    copy: ['M9 9h11v12H9z', 'M15 6H4v12'],
     alert: ['M12 8v5', 'M12 16.5h.01', 'M12 3.5 1.8 20.5h20.4L12 3.5Z'],
     info: ['M12 16v-5', 'M12 8h.01', 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z'],
     refresh: ['M20 11a8 8 0 1 0-1.6 5.6', 'M20 4v7h-7'],
@@ -30,6 +39,15 @@
     search: ['M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16Z', 'm21 21-4.3-4.3'],
     key: ['M15.5 8.5a3.5 3.5 0 1 0 0 .01', 'm13 11-9 9v3h3l1-1v-2h2v-2h2l1-1'],
     bolt: ['M13 2 4 14h6l-1 8 9-12h-6l1-8Z'],
+    calendar: ['M4 6h16v14H4z', 'M8 3v4', 'M16 3v4', 'M4 10.5h16'],
+    // The row menu. Three 1.75px dots at this size read as an ellipsis, not as
+    // a list of items, which is what a compact row action needs.
+    more: ['M5 12h.01', 'M12 12h.01', 'M19 12h.01'],
+    pause: ['M9 5v14', 'M15 5v14'],
+    play: ['M7 4.5v15l12-7.5-12-7.5Z'],
+    arrowUp: ['M12 19V5', 'm5 12 7-7 7 7'],
+    arrowDown: ['M12 5v14', 'm5 12 7 7 7-7'],
+    filter: ['M4 5h16', 'M7 12h10', 'M10 19h4'],
   }
 </script>
 

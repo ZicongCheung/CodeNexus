@@ -124,15 +124,12 @@ func do(c *Console, method, target, body string) httptestResponse {
 	return httptestResponse{code: rec.Code, body: rec.Body.Bytes()}
 }
 
-func TestTaskCatalogListsEveryExecutor(t *testing.T) {
-	c, _ := newTaskConsole(t, &taskAdapter{}, nil)
-	res := do(c, http.MethodGet, "/panel/api/tasks/catalog", "")
-	if res.code != 200 {
-		t.Fatalf("code = %d (%s)", res.code, res.body)
-	}
-	out := decode(t, &res)
-	if out["count"].(float64) != 25 {
-		t.Fatalf("count = %v, want 25", out["count"])
+// 25 is the full reference alignment agreed in ADR-33. The catalogue view that
+// displayed it is gone, but the count is still a contract: an executor dropped
+// by accident would leave a growth task that never runs.
+func TestGrowthExecutorsMatchTheAlignedSet(t *testing.T) {
+	if got := len(growth.Actions()); got != 25 {
+		t.Fatalf("executor count = %d, want 25", got)
 	}
 }
 
@@ -347,14 +344,11 @@ func TestObservabilityDisabledWithoutRecorder(t *testing.T) {
 	}
 }
 
-func TestGrowthExecutorDoesNotBlockTheConsole(t *testing.T) {
-	adapter := &taskAdapter{}
-	c, _ := newTaskConsole(t, adapter, nil)
-	// The catalogue is a pure read and must never require an account.
-	if res := do(c, http.MethodGet, "/panel/api/tasks/catalog", ""); res.code != 200 {
-		t.Fatalf("catalog code = %d", res.code)
-	}
-	// The executor table is the same one the scheduler runs.
+// The executor table is the same one the scheduler runs. Its catalogue
+// endpoint is gone from the console (it was a debugging view), but the table
+// itself still has to be complete: a half-registered action would fail
+// silently at sweep time, which is the one place nobody is watching.
+func TestGrowthExecutorTableIsComplete(t *testing.T) {
 	for _, a := range growth.Actions() {
 		if a.Code == "" || a.Run == nil {
 			t.Fatalf("incomplete action %+v", a)

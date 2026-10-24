@@ -8,7 +8,9 @@
 package panel
 
 import (
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"io/fs"
 	"net"
 	"net/http"
@@ -18,6 +20,7 @@ import (
 	"time"
 
 	"github.com/ZicongCheung/CodeNexus/internal/account"
+	"github.com/ZicongCheung/CodeNexus/internal/assets"
 	"github.com/ZicongCheung/CodeNexus/internal/authstore"
 	"github.com/ZicongCheung/CodeNexus/internal/config"
 	"github.com/ZicongCheung/CodeNexus/internal/httpauth"
@@ -61,6 +64,13 @@ type Console struct {
 	applyHot func(next *config.Config, diff []string) (applied, restart []string)
 	restart  func() error
 
+	// version, startedAt and listen describe this process to the console's
+	// service panel. They are injected rather than read from a package global
+	// so the panel never reaches back into the command that built it.
+	version   string
+	startedAt time.Time
+	listen    string
+
 	mux *http.ServeMux
 
 	mu     sync.Mutex
@@ -102,6 +112,17 @@ func WithHotApply(fn func(next *config.Config, diff []string) (applied, restart 
 // place. Without it the console tells the user to restart by hand.
 func WithRestart(fn func() error) Option { return func(c *Console) { c.restart = fn } }
 
+// WithProcessInfo supplies what the service panel shows about this process.
+// All three are optional; anything left unset is reported as null so the
+// console can show a placeholder instead of guessing.
+func WithProcessInfo(version, listen string, startedAt time.Time) Option {
+	return func(c *Console) {
+		c.version = version
+		c.listen = listen
+		c.startedAt = startedAt
+	}
+}
+
 // SetUsage swaps the persisted usage history at runtime.
 func (c *Console) SetUsage(s *usagestore.Store) { c.usage.Store(s) }
 
@@ -141,6 +162,13 @@ func (c *Console) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		c.serveAPI(w, r, p)
 		return
 	}
+	// The rail's mark ships inside the binary next to the shell itself: the
+	// console renders it before any session exists, so it cannot live behind
+	// the API's key. See handleLogo.
+	if p == "/logo.png" {
+		c.handleLogo(w, r)
+		return
+	}
 	r2 := r.Clone(r.Context())
 	r2.URL.Path = p
 	c.static.ServeHTTP(w, r2)
@@ -163,7 +191,6 @@ func (c *Console) buildMux() *http.ServeMux {
 	mux.HandleFunc("POST /api/auth/import", c.handleImport)
 
 	// Task center: catalogue and per-account operations.
-	mux.HandleFunc("GET /api/tasks/catalog", c.handleTaskCatalog)
 	mux.HandleFunc("GET /api/accounts/{uid}/tasks", c.handleAccountTasks)
 	mux.HandleFunc("POST /api/accounts/{uid}/tasks/accept", c.handleTaskAccept)
 	mux.HandleFunc("POST /api/accounts/{uid}/tasks/claim", c.handleTaskClaim)
@@ -172,6 +199,7 @@ func (c *Console) buildMux() *http.ServeMux {
 	mux.HandleFunc("GET /api/accounts/{uid}/packages", c.handleAccountPackages)
 	mux.HandleFunc("GET /api/credits", c.handleCredits)
 	mux.HandleFunc("GET /api/models", c.handleModels)
+	mux.HandleFunc("POST /api/models/test", c.handleModelTest)
 	mux.HandleFunc("POST /api/accounts/{uid}/{op}", c.handleAccountOp)
 
 	// Task center: whole-pool operations.
@@ -191,11 +219,49 @@ func (c *Console) buildMux() *http.ServeMux {
 	// Observability.
 	mux.HandleFunc("GET /api/observability/metrics", c.handleMetrics)
 	mux.HandleFunc("GET /api/observability/logs", c.handleLogs)
+	// The process log is streamed, not polled: see handleLogStream.
+	mux.HandleFunc("GET /api/logs/stream", c.handleLogStream)
 
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) {
 		writeErr(w, http.StatusNotFound, "unknown console endpoint")
 	})
 	return mux
+}
+
+// The logo's validator is derived from the embedded bytes, so a build that
+// ships new artwork changes the ETag and the browser refetches — a fixed
+// constant would either go stale forever or refetch on every reload.
+var (
+	logoOnce sync.Once
+	logoTag  string
+)
+
+func logoETag() string {
+	logoOnce.Do(func() {
+		sum := sha256.Sum256(assets.IconPNG)
+		logoTag = `"` + hex.EncodeToString(sum[:8]) + `"`
+	})
+	return logoTag
+}
+
+// handleLogo serves the brand artwork. It is public like the shell itself —
+// the rail renders the mark before any session exists — and it answers
+// If-None-Match so a cached copy costs one 304 instead of the full PNG.
+func (c *Console) handleLogo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		writeErr(w, http.StatusMethodNotAllowed, "logo is read-only")
+		return
+	}
+	etag := logoETag()
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("ETag", etag)
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	_, _ = w.Write(assets.IconPNG)
 }
 
 // handleAccountOp separates the single-account state toggles from the
@@ -268,6 +334,10 @@ func (c *Console) warn(format string, args ...any) {
 	}
 }
 
+// handleSession describes the running gateway to the console. It carries no
+// credentials and no upstream calls: everything here is either a constant of
+// this process or a counter it already keeps, so the overview can render
+// without touching either vendor.
 func (c *Console) handleSession(w http.ResponseWriter, _ *http.Request) {
 	accounts := 0
 	if c.pool != nil {
@@ -283,7 +353,70 @@ func (c *Console) handleSession(w http.ResponseWriter, _ *http.Request) {
 		"local_sources":  localSources(),
 		"tasks":          c.sched != nil,
 		"reqlog":         c.reqlog != nil,
+		// The overview's service panel reads these. Absent fields stay null so
+		// the console can show a placeholder rather than inventing a value.
+		"version": c.sessionVersion(),
+		"uptime":  c.sessionUptime(),
+		"listen":  c.sessionListen(),
+		"capabilities": map[string]any{
+			"sticky_sessions": c.sessionBool(c.sessionSticky),
+			"checkin_enabled": c.sessionBool(c.sessionCheckin),
+			"max_mode":        c.sessionBool(c.sessionMaxMode),
+		},
 	})
+}
+
+// The service panel's values are read from the live config and from constants
+// of this process. Every accessor tolerates a missing config so a console
+// opened before the gateway is fully wired still renders.
+
+func (c *Console) sessionVersion() any {
+	if c.version == "" {
+		return nil
+	}
+	return c.version
+}
+
+func (c *Console) sessionUptime() any {
+	if c.startedAt.IsZero() {
+		return nil
+	}
+	return int64(time.Since(c.startedAt).Seconds())
+}
+
+func (c *Console) sessionListen() any {
+	if c.listen != "" {
+		return c.listen
+	}
+	if c.cfg != nil && c.cfg.Listen != "" {
+		return c.cfg.Listen
+	}
+	return nil
+}
+
+func (c *Console) sessionBool(get func(*config.Config) (bool, bool)) any {
+	if c.cfg == nil {
+		return nil
+	}
+	if v, ok := get(c.cfg); ok {
+		return v
+	}
+	return nil
+}
+
+func (c *Console) sessionSticky(cfg *config.Config) (bool, bool) {
+	return cfg.SessionSticky.Enabled, true
+}
+
+func (c *Console) sessionCheckin(cfg *config.Config) (bool, bool) {
+	return cfg.Schedule.CheckinEnabled, true
+}
+
+// sessionMaxMode reports the 1M profile switch. It lives on the Trae upstream
+// because that is the surface the profile applies to, so the panel reads it
+// there rather than from a generic feature flag.
+func (c *Console) sessionMaxMode(cfg *config.Config) (bool, bool) {
+	return cfg.Upstreams.TraeCN.MaxMode.Enabled, true
 }
 
 func setSecurityHeaders(w http.ResponseWriter) {
