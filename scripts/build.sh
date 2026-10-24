@@ -15,7 +15,7 @@
 #   ./scripts/build.sh clean
 #
 # Environment:
-#   VERSION        overrides the version (default: git tag, else 0.1.0-dev)
+#   VERSION        overrides the version (default: git tag, else 0.1.0)
 #   SKIP_WEB=1     do not rebuild the console bundle first
 #   ICON_SRC       directory holding the source PNGs for `icons`
 set -euo pipefail
@@ -59,7 +59,7 @@ version() {
 	if [ -n "$tag" ]; then
 		echo "${tag#v}"
 	else
-		echo "0.1.0-dev"
+		echo "0.1.0"
 	fi
 }
 

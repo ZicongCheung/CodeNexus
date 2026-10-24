@@ -54,12 +54,29 @@ jobs:
       - name: Build every platform and package
         run: bash scripts/build.sh release
 
+      # A hand-written summary is what a visitor reads first; the commit-level
+      # changelog GitHub generates is appended to it. Keeping the summary in a
+      # per-tag file means a release without one still works: the step finds no
+      # file, the output stays empty, and only the generated notes are shown.
+      - name: Pick the hand-written release notes for this tag
+        id: notes
+        run: |
+          f=".github/release-notes/${GITHUB_REF_NAME}.md"
+          if [ -f "$f" ]; then
+            {
+              echo 'body<<__NOTES__'
+              cat "$f"
+              echo '__NOTES__'
+            } >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish the GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/codenexus_*
             dist/SHA256SUMS
+          body: ${{ steps.notes.outputs.body }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           # A tag carrying a pre-release marker (v0.0.1-dev, v0.2.0-rc.1) is

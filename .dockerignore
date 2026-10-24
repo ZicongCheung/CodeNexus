@@ -16,6 +16,9 @@ web/node_modules/
 
 # 本地工具 / AI 记忆
 .workbuddy/
+start.bat
+test.bat
+scripts/dev.mjs
 
 # 文档与杂项
 docs/

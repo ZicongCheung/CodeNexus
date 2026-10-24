@@ -12,13 +12,13 @@ COPY web/ ./
 RUN npm run build -- --outDir /dist-panel
 
 # --- stage 2: build the binary ---
-FROM golang:1.24-alpine AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY go.mod ./
 RUN go mod download
 COPY . .
 COPY --from=web /dist-panel ./internal/panel/dist
-ARG VERSION=dev
+ARG VERSION=0.1.0
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/codenexus ./cmd/codenexus
 
 # --- stage 3: runtime ---

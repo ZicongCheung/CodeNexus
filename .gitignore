@@ -19,7 +19,21 @@ vendor/
 # ---- 前端 ----
 web/node_modules/
 web/.vite/
+# Vite 读取配置时写出的临时模块（每次改 vite.config.js 都会重新生成）
+web/vite.config.js.timestamp-*.mjs
+*.timestamp-*.mjs
 # 注意：internal/panel/dist 是 embed 源，必须提交
+
+# ---- 本地开发入口（只服务本机，不随仓库分发）----
+# 热更新预览与 Windows 一键门禁依赖本机环境和固定端口，
+# 跨平台的构建/测试入口是 scripts/build.sh。
+/start.bat
+/test.bat
+/scripts/dev.mjs
+
+# ---- 本地归档（过程文档、设计画布等，只留在本机）----
+docs/archive/
+*.pptx
 
 # ---- 编辑器 / 系统 ----
 .idea/
