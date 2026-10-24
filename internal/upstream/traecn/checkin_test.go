@@ -449,6 +449,25 @@ func TestScopeGatesCheckinByMode(t *testing.T) {
 	}
 }
 
+func TestScopeHonoursCheckinSwitch(t *testing.T) {
+	acc := checkinAccount("u1")
+	off := false
+	c := New(Config{Checkin: CheckinConfig{Enabled: &off}})
+	scope := c.Scope(acc)
+	if scope.Checkin {
+		t.Fatalf("check-in must be off when the source opts out: %+v", scope)
+	}
+	// The credits page reads the balance, and it is not part of the daily
+	// sweep, so opting out of the check-in must not starve it.
+	if !scope.Balance {
+		t.Fatalf("opting out of check-in must keep the balance refresh: %+v", scope)
+	}
+	on := true
+	if scope := New(Config{Checkin: CheckinConfig{Enabled: &on}}).Scope(acc); !scope.Checkin {
+		t.Fatalf("check-in must be on when the source opts in: %+v", scope)
+	}
+}
+
 func TestCheckinRejectsCLIMode(t *testing.T) {
 	c := New(Config{UpstreamMode: CLIMode})
 	if _, err := c.Checkin(context.Background(), checkinAccount("u1")); err == nil {

@@ -309,3 +309,86 @@ func TestWorkTierBorrowsTheAgentTierEffortConfig(t *testing.T) {
 		t.Fatalf("custom_model = %v, want a high strength clamped from the agent tier", model)
 	}
 }
+
+// ── commercial block ────────────────────────────────────────────────────────
+
+// Trae states its price in the cached model list, not in usage records: the
+// multiplier the IDE prints as "积分消耗速度 x 倍" lives under
+// features.consumption_rate, and the offer in force under activity_discount.
+func TestApplyFeaturesReadsCommercialBlock(t *testing.T) {
+	entry := map[string]any{
+		"features": map[string]any{
+			"consumption_rate": map[string]any{"enable": true, "data": map[string]any{"rate": 1.83}},
+			"activity_discount": map[string]any{"data": map[string]any{"current": map[string]any{
+				"discount_type":           "off_peak",
+				"before_consumption_rate": 2.0,
+				"consumption_rate":        1.5,
+				"discount":                25,
+			}}},
+			"context_windows": map[string]any{"data": map[string]any{
+				"dev_context": 200000, "max_context": 1000000,
+			}},
+		},
+	}
+	var spec upstream.ModelSpec
+	applyFeatures(&spec, entry)
+
+	if spec.Credits != "x2" {
+		t.Fatalf("credits = %q, want the listed rate the discount applies to", spec.Credits)
+	}
+	if spec.PromoLabel != "闲时折扣" || spec.PromoCredits != "x1.5" {
+		t.Fatalf("promo = %q/%q, want 闲时折扣 x1.5", spec.PromoLabel, spec.PromoCredits)
+	}
+	if spec.PromoFactor == nil || *spec.PromoFactor != 0.75 {
+		t.Fatalf("promo factor = %v, want 0.75", spec.PromoFactor)
+	}
+	// The window a request actually gets is the dev one, not the ceiling.
+	if got := contextLength(entry); got != 200000 {
+		t.Fatalf("context = %d, want 200000", got)
+	}
+}
+
+// A zero rate is a real offer and must not read as "no data".
+func TestApplyFeaturesMarksFreePromotion(t *testing.T) {
+	entry := map[string]any{"features": map[string]any{
+		"consumption_rate":  map[string]any{"data": map[string]any{"rate": 0.0}},
+		"activity_discount": map[string]any{"data": map[string]any{"current": map[string]any{"discount_type": "limited", "before_consumption_rate": 0.5, "consumption_rate": 0.0}}},
+	}}
+	var spec upstream.ModelSpec
+	applyFeatures(&spec, entry)
+	if spec.PromoLabel != "限时特惠" || spec.PromoCredits != "0x" {
+		t.Fatalf("promo = %q/%q, want 限时特惠 0x", spec.PromoLabel, spec.PromoCredits)
+	}
+	if spec.PromoFactor == nil || *spec.PromoFactor != 0 {
+		t.Fatalf("promo factor = %v, want 0", spec.PromoFactor)
+	}
+}
+
+// No offer in force means no promo fields at all — the listed rate stands.
+func TestApplyFeaturesLeavesPlainRatesAlone(t *testing.T) {
+	entry := map[string]any{"features": map[string]any{
+		"consumption_rate":  map[string]any{"data": map[string]any{"rate": 0.06}},
+		"activity_discount": map[string]any{"data": map[string]any{"current": map[string]any{"discount_type": "none"}}},
+	}}
+	var spec upstream.ModelSpec
+	applyFeatures(&spec, entry)
+	if spec.Credits != "x0.06" {
+		t.Fatalf("credits = %q", spec.Credits)
+	}
+	if spec.PromoLabel != "" || spec.PromoCredits != "" || spec.PromoFactor != nil {
+		t.Fatalf("promo leaked for a plain rate: %q/%q/%v", spec.PromoLabel, spec.PromoCredits, spec.PromoFactor)
+	}
+}
+
+func TestFormatRateTrimsTrailingZeros(t *testing.T) {
+	for _, tc := range []struct {
+		in   float64
+		want string
+	}{
+		{1.83, "x1.83"}, {0.2, "x0.2"}, {0.06, "x0.06"}, {2, "x2"}, {0, "x0"},
+	} {
+		if got := formatRate(tc.in); got != tc.want {
+			t.Errorf("formatRate(%v) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

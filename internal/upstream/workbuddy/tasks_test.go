@@ -199,6 +199,80 @@ func TestCreditsAggregatesAndBuckets(t *testing.T) {
 	}
 }
 
+// A single balance hides when the credits actually lapse — the whole question
+// a credit view has to answer. The upstream itemises the grant and the client
+// must carry the packs through, not sum them away: "not itemised" is a claim
+// about the upstream, and printing it while holding the itemisation would lie.
+func TestCreditsCarriesPerPackDetail(t *testing.T) {
+	c := newTaskClient(t, &taskStub{})
+	got, err := c.Credits(context.Background(), cnAccount(), 48*time.Hour)
+	if err != nil {
+		t.Fatalf("Credits: %v", err)
+	}
+	if len(got.Packs) != 2 {
+		t.Fatalf("packs = %d, want 2", len(got.Packs))
+	}
+	first := got.Packs[0]
+	if first.Remain != 600 || first.Used != 400 || first.Size != 1000 {
+		t.Fatalf("pack[0] = %+v, want 600/400/1000", first)
+	}
+	second := got.Packs[1]
+	if second.Remain != 50 || second.Used != 0 || second.Size != 50 {
+		t.Fatalf("pack[1] = %+v, want 50/0/50", second)
+	}
+	if first.ExpiresAt == 0 || second.ExpiresAt == 0 {
+		t.Fatalf("packs lost their expiry: %+v / %+v", first, second)
+	}
+	// The summary and the itemisation must agree on the earliest lapse.
+	if !got.EarliestAt.Equal(time.Unix(first.ExpiresAt, 0)) {
+		t.Fatalf("earliest %v disagrees with pack expiry %v", got.EarliestAt, time.Unix(first.ExpiresAt, 0))
+	}
+}
+
+// DeductionEndTime — the end of the spend window — outranks CycleEndTime,
+// which is the period boundary where a periodic grant resets, not an expiry.
+// Using the boundary instead of the window reports credits as expiring that
+// are merely resetting.
+func TestCreditsExpiryPrefersSpendWindow(t *testing.T) {
+	window := time.Now().Add(10 * 24 * time.Hour)
+	boundary := time.Now().Add(24 * time.Hour)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeOK(w, map[string]any{"Response": map[string]any{"Data": map[string]any{"Accounts": []map[string]any{
+			{
+				"CycleCapacitySize": 1000, "CycleCapacityRemain": 600, "CycleCapacityUsed": 400,
+				"CycleEndTime":     boundary.In(cstZone).Format(packageEndLayout),
+				"DeductionEndTime": window.UnixMilli(),
+				"PackageName":      "国内运营裂变包",
+				"PackageCode":      "TCACA_code_007",
+				"CreateTime":       window.Add(-48 * time.Hour).UnixMilli(),
+			},
+		}}}})
+	}))
+	t.Cleanup(srv.Close)
+	c := New(Config{BaseURL: srv.URL, BillingBaseURL: srv.URL, WebBaseURL: srv.URL, TimeoutSeconds: 5})
+
+	got, err := c.Credits(context.Background(), cnAccount(), 48*time.Hour)
+	if err != nil {
+		t.Fatalf("Credits: %v", err)
+	}
+	if len(got.Packs) != 1 {
+		t.Fatalf("packs = %d, want 1", len(got.Packs))
+	}
+	pack := got.Packs[0]
+	if pack.Name != "国内运营裂变包" {
+		t.Fatalf("pack name = %q", pack.Name)
+	}
+	if got.EarliestAt.Unix() != window.Unix() {
+		t.Fatalf("earliest = %v, want the spend window %v (not the cycle boundary)", got.EarliestAt, window)
+	}
+	if got.Expiring != 0 {
+		t.Fatalf("expiring = %d, want 0: the spend window is outside the 48h request", got.Expiring)
+	}
+	if pack.CreatedAt == 0 {
+		t.Fatal("pack lost its grant time")
+	}
+}
+
 func TestEnterpriseCredits(t *testing.T) {
 	c := newTaskClient(t, &taskStub{})
 	acc := cnAccount()

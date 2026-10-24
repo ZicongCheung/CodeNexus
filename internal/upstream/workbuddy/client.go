@@ -64,8 +64,14 @@ func New(cfg Config) *Client {
 		cfg.TimeoutSeconds = 120
 	}
 	return &Client{
-		cfg:  cfg,
-		http: &http.Client{Timeout: time.Duration(cfg.TimeoutSeconds) * time.Second},
+		cfg: cfg,
+		// Upstream calls go direct: a stale HTTP_PROXY / HTTPS_PROXY in the
+		// launching shell (common in tool sandboxes) must not silently black-hole
+		// device-login and billing traffic.
+		http: &http.Client{
+			Timeout:   time.Duration(cfg.TimeoutSeconds) * time.Second,
+			Transport: &http.Transport{Proxy: nil},
+		},
 	}
 }
 
@@ -97,38 +103,13 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body io.Re
 	return req, nil
 }
 
-type modelList struct {
-	Data []struct {
-		ID string `json:"id"`
-	} `json:"data"`
-}
-
 // ListModels implements upstream.Upstream.
+//
+// Two probes run concurrently — the IDE catalogue (/v3/config) and the
+// console-web cli roster (/console/enterprises/personal/models) — and their
+// results merge, because each holds models the other lacks. See catalog.go.
 func (c *Client) ListModels(ctx context.Context, acc *account.Account) ([]upstream.ModelSpec, error) {
-	req, err := c.newRequest(ctx, http.MethodGet, "/v1/models", nil, acc)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, upstream.Classify(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		return nil, statusError("models", resp)
-	}
-	var ml modelList
-	if err := json.NewDecoder(resp.Body).Decode(&ml); err != nil {
-		return nil, err
-	}
-	out := make([]upstream.ModelSpec, 0, len(ml.Data))
-	for _, m := range ml.Data {
-		if m.ID == "" {
-			continue
-		}
-		out = append(out, upstream.ModelSpec{ID: m.ID, Source: upstream.SourceWorkBuddy})
-	}
-	return out, nil
+	return c.listModels(ctx, acc)
 }
 
 // buildBody assembles the outbound body and runs it through the shared rewrite
@@ -166,58 +147,55 @@ func (c *Client) buildBody(req *upstream.ChatRequest, stream bool) ([]byte, erro
 	return json.Marshal(body)
 }
 
-type chatCompletion struct {
-	ID      string `json:"id"`
-	Model   string `json:"model"`
-	Choices []struct {
-		Message struct {
-			Content          string              `json:"content"`
-			ReasoningContent string              `json:"reasoning_content"`
-			ToolCalls        []upstream.ToolCall `json:"tool_calls"`
-		} `json:"message"`
-		FinishReason string `json:"finish_reason"`
-	} `json:"choices"`
-	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
-	} `json:"usage"`
-}
-
-// Chat implements upstream.Upstream (non-streaming).
+// Chat implements upstream.Upstream (blocking).
+//
+// The upstream refuses non-streaming turns outright — it answers
+// {"code":11101,"msg":"Non-stream chat request is currently not supported"} —
+// so the blocking answer is assembled from the streaming call, which is the
+// only request shape the server accepts. Sending a separate stream:false body
+// would be a request the server never serves.
 func (c *Client) Chat(ctx context.Context, acc *account.Account, req *upstream.ChatRequest) (*upstream.ChatResponse, error) {
-	body, err := c.buildBody(req, false)
+	var (
+		content   strings.Builder
+		reasoning strings.Builder
+		finish    string
+		usage     upstream.Usage
+		turnID    string
+	)
+	tools := &upstream.ToolCallTracker{}
+	err := c.ChatStream(ctx, acc, req, func(d upstream.StreamDelta) error {
+		content.WriteString(d.Content)
+		reasoning.WriteString(d.ReasoningContent)
+		if len(d.ToolCalls) > 0 {
+			tools.Feed(d.ToolCalls)
+		}
+		if d.FinishReason != "" {
+			finish = d.FinishReason
+		}
+		if d.Usage != nil {
+			usage = *d.Usage
+		}
+		if d.TurnID != "" {
+			turnID = d.TurnID
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	httpReq, err := c.newRequest(ctx, http.MethodPost, "/v1/chat/completions", bytes.NewReader(body), acc)
-	if err != nil {
-		return nil, err
+	out := &upstream.ChatResponse{
+		ID:               fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+		Model:            req.Model,
+		Content:          content.String(),
+		ReasoningContent: reasoning.String(),
+		ToolCalls:        tools.Calls(),
+		FinishReason:     finish,
+		Usage:            usage,
+		TurnID:           turnID,
+		Surface:          "cloud",
 	}
-	resp, err := c.http.Do(httpReq)
-	if err != nil {
-		return nil, upstream.Classify(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		return nil, statusError("chat", resp)
-	}
-	var cc chatCompletion
-	if err := json.NewDecoder(resp.Body).Decode(&cc); err != nil {
-		return nil, err
-	}
-	out := &upstream.ChatResponse{ID: cc.ID, Model: cc.Model, Surface: "cloud"}
-	if len(cc.Choices) > 0 {
-		out.Content = cc.Choices[0].Message.Content
-		out.ReasoningContent = cc.Choices[0].Message.ReasoningContent
-		out.ToolCalls = cc.Choices[0].Message.ToolCalls
-		out.FinishReason = cc.Choices[0].FinishReason
-	}
-	out.Usage = upstream.Usage{
-		PromptTokens:     cc.Usage.PromptTokens,
-		CompletionTokens: cc.Usage.CompletionTokens,
-		TotalTokens:      cc.Usage.TotalTokens,
-	}
+	// ChatStream already repairs markup on the way out; the call is idempotent
+	// and covers the DisableMarkupRepair path, where text still carries it.
 	c.repairMarkup(out, req)
 	return out, nil
 }
@@ -253,7 +231,26 @@ type streamChunk struct {
 		PromptTokens     int `json:"prompt_tokens"`
 		CompletionTokens int `json:"completion_tokens"`
 		TotalTokens      int `json:"total_tokens"`
+		PromptDetails    *struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
 	} `json:"usage"`
+}
+
+// cachedTokens mirrors the non-streaming clamp: a cache reading is only
+// meaningful up to the size of the prompt it was measured against.
+func (u *streamChunk) cachedTokens() int {
+	if u.Usage == nil || u.Usage.PromptDetails == nil {
+		return 0
+	}
+	n := u.Usage.PromptDetails.CachedTokens
+	if n < 0 {
+		return 0
+	}
+	if u.Usage.PromptTokens > 0 && n > u.Usage.PromptTokens {
+		return u.Usage.PromptTokens
+	}
+	return n
 }
 
 // ChatStream implements upstream.Upstream (streaming SSE).
@@ -262,7 +259,7 @@ func (c *Client) ChatStream(ctx context.Context, acc *account.Account, req *upst
 	if err != nil {
 		return err
 	}
-	httpReq, err := c.newRequest(ctx, http.MethodPost, "/v1/chat/completions", bytes.NewReader(body), acc)
+	httpReq, err := c.newRequest(ctx, http.MethodPost, "/v2/chat/completions", bytes.NewReader(body), acc)
 	if err != nil {
 		return err
 	}
@@ -343,6 +340,7 @@ func (c *Client) ChatStream(ctx context.Context, acc *account.Account, req *upst
 				PromptTokens:     ch.Usage.PromptTokens,
 				CompletionTokens: ch.Usage.CompletionTokens,
 				TotalTokens:      ch.Usage.TotalTokens,
+				CachedTokens:     ch.cachedTokens(),
 			}
 		}
 		if err := emit(delta); err != nil {

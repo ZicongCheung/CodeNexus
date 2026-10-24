@@ -32,16 +32,24 @@ func execTool() []any {
 }
 
 func TestChatRepairsNativeToolMarkup(t *testing.T) {
-	payload, _ := json.Marshal(map[string]any{
-		"id":    "1",
-		"model": "m",
+	// Chat aggregates ChatStream now, so the stub speaks SSE. The markup is
+	// split over two frames on purpose: the rewriter has to buffer across
+	// frames before it can recognise a complete DSML block.
+	full := nativeMarkup()
+	first, _ := json.Marshal(map[string]any{
+		"choices": []any{map[string]any{"delta": map[string]any{"content": full[:20]}}},
+	})
+	second, _ := json.Marshal(map[string]any{
 		"choices": []any{map[string]any{
-			"message":       map[string]any{"content": nativeMarkup()},
+			"delta":         map[string]any{"content": full[20:]},
 			"finish_reason": "stop",
 		}},
 	})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(payload)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: "+string(first)+"\n\n")
+		_, _ = io.WriteString(w, "data: "+string(second)+"\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
 	}))
 	defer srv.Close()
 

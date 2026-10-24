@@ -316,6 +316,7 @@ func defaultModelSpecs() []upstream.ModelSpec {
 			Source:        upstream.SourceTraeCN,
 			ContextLength: m.ContextLen,
 			Capabilities:  m.Capabilities,
+			MaxOutput:     m.MaxOutput,
 		})
 	}
 	return out

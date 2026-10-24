@@ -33,6 +33,30 @@ type ModelSpec struct {
 	// as "not adjustable" rather than as "default", because the two are
 	// different offers and only the catalogue can tell them apart.
 	ThinkingEfforts []string `json:"thinking_efforts,omitempty"`
+	// MaxOutput is the largest answer the model will produce, in tokens. The
+	// catalogue states it, and it is the number that decides whether a long
+	// generation gets truncated.
+	MaxOutput int `json:"max_output_tokens,omitempty"`
+	// Credits is the catalogue's own price wording for one turn of this model
+	// (for example "x0.79"). It stays a string on purpose: a model with no
+	// published price must read as "not stated", which a zero cannot express.
+	Credits string `json:"credits,omitempty"`
+	// PromoCredits is the discounted rate currently in force, when the
+	// catalogue marks one. Empty means the listed rate is what is charged.
+	PromoCredits string `json:"promo_credits,omitempty"`
+	PromoLabel   string `json:"promo_label,omitempty"`
+	// PromoNote is the upstream's own sentence about when the offer applies
+	// ("工作日 00:00-09:00 …"). Off-peak offers carry no machine-readable
+	// discount, so this sentence is the only thing that can be shown; it also
+	// rides along as a tooltip for offers that do state a rate.
+	PromoNote string `json:"promo_note,omitempty"`
+	// PromoFactor is the discount as a fraction of the listed rate (0 = free,
+	// 0.5 = half price). It is a pointer because "no discount object" and
+	// "a discount of zero" are different offers: off-peak promotions carry a
+	// label but no factor, and only the upstream knows the rate then.
+	PromoFactor *float64 `json:"promo_factor,omitempty"`
+	// Default marks the model the account's own catalogue offers first.
+	Default bool `json:"default,omitempty"`
 }
 
 // Usage is token accounting for a single request.
@@ -40,6 +64,12 @@ type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	// CachedTokens is the part of the prompt the upstream served from its own
+	// cache instead of reading again. It is billed cheaper than fresh input, so
+	// a turn's cost cannot be read off its token count alone: without this the
+	// console can only say how many tokens moved, never how many were paid for
+	// at full price.
+	CachedTokens int `json:"cached_tokens"`
 }
 
 // Message is one chat message in the normalized form. Tool calls and their

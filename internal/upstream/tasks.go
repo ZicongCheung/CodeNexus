@@ -54,6 +54,10 @@ type CreditPack struct {
 	// ExpiresText keeps the upstream's own spelling of the lapse time, since a
 	// wall-clock string is what a human can check against the client.
 	ExpiresText string `json:"expires_text,omitempty"`
+	// CreatedAt is when the pack was granted, in Unix seconds. It is the only
+	// reliable way to tell a first-login grant from a campaign reward: the
+	// upstream gives both the same package name and code.
+	CreatedAt int64 `json:"created_at,omitempty"`
 }
 
 // CheckinResult reports the outcome of a daily check-in. A repeated check-in

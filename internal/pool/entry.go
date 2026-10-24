@@ -51,6 +51,17 @@ type entry struct {
 	errors      int64
 	lastUsed    time.Time
 	lastSuccess time.Time
+
+	// Token throughput is a running total for this process, exactly like
+	// success and errors: the console shows it in the same row, and it starts
+	// over when the process does. Persisting it would make one column of the
+	// row describe all history while the two beside it describe this run.
+	promptTokens     int64
+	completionTokens int64
+	totalTokens      int64
+	// lastTPS is the throughput of the most recent finished turn, shown under
+	// the total so a slow account is visible without a separate column.
+	lastTPS float64
 }
 
 func newEntry(acc *account.Account) *entry {

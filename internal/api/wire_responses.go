@@ -46,7 +46,7 @@ func (s *Server) parseResponsesTurn(r *http.Request, body map[string]any) (*turn
 	stream, _ := body["stream"].(bool)
 	msgs, repairs := upstream.RepairToolPairing(parseMessages(oai["messages"]))
 	for _, rep := range repairs {
-		logx.Warnf("responses inbound %s dropped (tool call id=%q)", rep.Reason, rep.ID)
+		logx.Dialog.Warnf("responses inbound %s dropped (tool call id=%q)", rep.Reason, rep.ID)
 	}
 	return &turn{
 		Name:      responsesWireName,

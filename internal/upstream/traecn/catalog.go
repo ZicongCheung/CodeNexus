@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -340,13 +341,16 @@ func (c *Client) fetchSoloCatalogue(ctx context.Context, acc *account.Account) (
 
 // catalogueList turns the live catalogues into the client-facing model list.
 //
-// Remote goes first so its entries win, and Solo only fills the gaps. Entries
-// the upstream marks invisible to the user are dropped: they are internal
-// runners (sub-agent and tool profiles) that the upstream itself keeps out of
-// its own picker, so advertising them would offer a choice the desktop client
-// never shows.
+// Remote goes first, and Solo fills the gaps — but a name seen twice is merged
+// rather than ignored: the two surfaces state different things about the same
+// model (Remote states the window pair, Solo states a flat token count), and
+// keeping only the first meant the console printed no window for most models.
+// Entries the upstream marks invisible to the user are dropped: they are
+// internal runners (sub-agent and tool profiles) that the upstream itself keeps
+// out of its own picker, so advertising them would offer a choice the desktop
+// client never shows.
 func (c *Client) catalogueList(ctx context.Context, acc *account.Account, tiers map[string]map[string]map[string]any) []upstream.ModelSpec {
-	seen := make(map[string]bool, 64)
+	seen := make(map[string]int, 64)
 	out := make([]upstream.ModelSpec, 0, 64)
 
 	add := func(name string, entry map[string]any) {
@@ -354,18 +358,29 @@ func (c *Client) catalogueList(ctx context.Context, acc *account.Account, tiers 
 			return
 		}
 		id := strings.ToLower(strings.TrimSpace(name))
-		if seen[id] {
+		if at, ok := seen[id]; ok {
+			// Widen rather than replace: whichever surface states a longer
+			// window is telling the truth about what can be requested.
+			if window := contextLength(entry); window > out[at].ContextLength {
+				out[at].ContextLength = window
+			}
 			return
 		}
-		seen[id] = true
+		seen[id] = len(out)
 		rememberLiveName(name)
-		out = append(out, upstream.ModelSpec{
+		spec := upstream.ModelSpec{
 			ID:              id,
 			Source:          upstream.SourceTraeCN,
 			ContextLength:   contextLength(entry),
 			Capabilities:    capabilitiesOf(entry),
 			ThinkingEfforts: supportedEfforts(entry),
-		})
+			// The live entries state the window but not the answer cap, so the
+			// built-in table supplies it. A model released after that table was
+			// written simply reports no cap rather than a guessed one.
+			MaxOutput: outputCap(id),
+		}
+		applyFeatures(&spec, entry)
+		out = append(out, spec)
 	}
 
 	tierNames := make([]string, 0, len(tiers))
@@ -387,31 +402,241 @@ func (c *Client) catalogueList(ctx context.Context, acc *account.Account, tiers 
 		add(name, solo[name])
 	}
 
+	// The client's own list is the only surface that states a price, so it is
+	// read last as an enrichment pass rather than as another model source.
+	if live := c.fetchClientModels(ctx, acc); len(live) > 0 {
+		for i := range out {
+			entry, ok := live[out[i].ID]
+			if !ok {
+				continue
+			}
+			applyFeatures(&out[i], entry)
+			if window := contextLength(entry); window > out[i].ContextLength {
+				out[i].ContextLength = window
+			}
+		}
+	}
+
 	for _, id := range routingModelIDs {
-		if seen[id] {
+		if _, ok := seen[id]; ok {
 			continue
 		}
-		seen[id] = true
+		seen[id] = len(out)
 		out = append(out, upstream.ModelSpec{ID: id, Source: upstream.SourceTraeCN, Capabilities: []string{capChat}})
+	}
+	return out
+}
+
+// applyFeatures reads the commercial block the desktop client caches per model.
+//
+// This is the only place Trae states a price: `features.consumption_rate.rate`
+// is the multiplier the IDE prints as "积分消耗速度 x 倍", and
+// `features.activity_discount.data.current` is the offer in force right now
+// (before/after rates plus a discount kind). Neither is derivable from usage
+// records, which only report what was already spent.
+func applyFeatures(spec *upstream.ModelSpec, entry map[string]any) {
+	features, _ := entry["features"].(map[string]any)
+	if features == nil {
+		return
+	}
+	listed := numericField(nestedMap(features, "consumption_rate", "data"), "rate")
+	current := nestedMap(features, "activity_discount", "data", "current")
+	if current != nil {
+		kind := strings.TrimSpace(textField(current, "discount_type"))
+		if label, ok := discountLabels[kind]; ok {
+			spec.PromoLabel = label
+		}
+		before := numericField(current, "before_consumption_rate")
+		after := numericField(current, "consumption_rate")
+		switch {
+		case before > 0 && after > 0 && after < before:
+			factor := after / before
+			// The discount is applied to `before`, so that is the listed rate.
+			// `consumption_rate` is what the IDE prints as the current price.
+			spec.Credits = formatRate(before)
+			spec.PromoCredits = formatRate(after)
+			spec.PromoFactor = &factor
+			return
+		case before > 0 && after == 0:
+			// A zero rate is a real offer ("限时免费"), not missing data.
+			factor := 0.0
+			spec.Credits = formatRate(before)
+			spec.PromoCredits = "0x"
+			spec.PromoFactor = &factor
+			return
+		}
+	}
+	if listed > 0 {
+		spec.Credits = formatRate(listed)
+	}
+}
+
+// nestedMap walks a chain of object keys, tolerating missing links.
+func nestedMap(root map[string]any, keys ...string) map[string]any {
+	cur := root
+	for _, key := range keys {
+		next, ok := cur[key].(map[string]any)
+		if !ok {
+			return nil
+		}
+		cur = next
+	}
+	return cur
+}
+
+// numericField reads a numeric field, insisting on a real value: a missing or
+// non-numeric key returns zero rather than a plausible-looking default.
+func numericField(m map[string]any, key string) float64 {
+	switch v := m[key].(type) {
+	case float64:
+		return v
+	case int:
+		return float64(v)
+	case json.Number:
+		f, err := v.Float64()
+		if err == nil {
+			return f
+		}
+	}
+	return 0
+}
+
+// textField reads a string field, tolerating absence.
+func textField(m map[string]any, key string) string {
+	s, _ := m[key].(string)
+	return s
+}
+
+// discountLabels maps the upstream's discount kinds onto the console's words.
+// The names come from the desktop client's own i18n table, so the console and
+// the IDE call the same offer the same thing.
+var discountLabels = map[string]string{
+	"subsidy":        "专属补贴",
+	"member":         "会员折扣",
+	"member_all_day": "会员全天折扣",
+	"off_peak":       "闲时折扣",
+	"limited":        "限时特惠",
+}
+
+// formatRate prints a multiplier the way the catalogue does ("x0.2", "x1.83").
+func formatRate(v float64) string {
+	text := strconv.FormatFloat(v, 'f', 2, 64)
+	text = strings.TrimRight(text, "0")
+	text = strings.TrimSuffix(text, ".")
+	return "x" + text
+}
+
+// clientModelPath is the desktop client's own model list. It is the only
+// surface that states a price: `features.consumption_rate` (the multiplier the
+// IDE prints as "积分消耗速度 x 倍") and `features.activity_discount` (the offer
+// in force) live here and nowhere else — usage records only report what was
+// already spent.
+const clientModelPath = "/api/ide/v1/model_list"
+
+// fetchClientModels reads that list and flattens its per-tier groups into one
+// entry per model name.
+//
+// Failure is not fatal: the page still lists every model with its window and
+// efforts, it just has no rate to show. That is the same state as before this
+// probe existed, so a moved endpoint degrades instead of breaking the page.
+func (c *Client) fetchClientModels(ctx context.Context, acc *account.Account) map[string]map[string]any {
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+	defer cancel()
+
+	url := strings.TrimRight(c.cfg.BaseURL, "/") + clientModelPath
+	req, err := http.NewRequestWithContext(fctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil
+	}
+	c.setAgentHeaders(req, acc)
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		logx.Debugf("trae: client model list unavailable for %s: %v", shortUID(acc.UID), err)
+		return nil
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if resp.StatusCode/100 != 2 {
+		logx.Debugf("trae: client model list returned HTTP %d", resp.StatusCode)
+		return nil
+	}
+
+	var groups map[string]json.RawMessage
+	if err := json.Unmarshal(body, &groups); err != nil {
+		return nil
+	}
+	// The listing may arrive bare or wrapped in a data envelope.
+	if raw, ok := groups["data"]; ok {
+		var inner map[string]json.RawMessage
+		if json.Unmarshal(raw, &inner) == nil {
+			groups = inner
+		}
+	}
+	out := make(map[string]map[string]any, 32)
+	for key, raw := range groups {
+		if key == "code" || key == "msg" {
+			continue
+		}
+		var items []map[string]any
+		if json.Unmarshal(raw, &items) != nil {
+			continue
+		}
+		for _, entry := range items {
+			if entry == nil {
+				continue
+			}
+			name := firstString(entry, "name", "config_name", "display_name")
+			id := strings.ToLower(strings.TrimSpace(name))
+			if id == "" {
+				continue
+			}
+			// The same model appears once per tier; the first copy is enough.
+			if _, seen := out[id]; seen {
+				continue
+			}
+			out[id] = entry
+		}
 	}
 	return out
 }
 
 // contextLength reads the window the entry advertises. Remote states a pair —
 // the default the desktop client uses and the largest the account may ask for —
-// while Solo states a flat token count.
+// while Solo states a flat token count, and the cached model list states it
+// again under features.context_windows. The first two spell the default
+// differently ("default" vs "dev"), so both are read before falling back to the
+// maximum: a model that states only a ceiling still has a usable window.
 func contextLength(entry map[string]any) int {
 	for _, key := range []string{"context_window_tokens", "context_window_size"} {
-		switch v := entry[key].(type) {
-		case map[string]any:
-			if n := numeric(v["default"]); n > 0 {
-				return n
+		if m, ok := entry[key].(map[string]any); ok {
+			for _, field := range []string{"default", "dev"} {
+				if n := numeric(m[field]); n > 0 {
+					return n
+				}
 			}
-		default:
-			if n := numeric(v); n > 0 {
+			continue
+		}
+		if n := numeric(entry[key]); n > 0 {
+			return n
+		}
+	}
+	if windows := nestedMap(entry, "features", "context_windows", "data"); windows != nil {
+		for _, field := range []string{"dev_context", "max_context"} {
+			if n := numeric(windows[field]); n > 0 {
 				return n
 			}
 		}
+	}
+	return 0
+}
+
+// outputCap reports the answer-token ceiling the built-in table knows for a
+// model id or alias. The live catalogue does not state one, so this is the only
+// source; an unknown id returns zero, which the console renders as "-".
+func outputCap(id string) int {
+	if m, ok := LookupModel(id); ok {
+		return m.MaxOutput
 	}
 	return 0
 }

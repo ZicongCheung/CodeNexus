@@ -114,6 +114,14 @@ func (c *Client) Credits(ctx context.Context, acc *account.Account, expiringWith
 		Response struct {
 			Data struct {
 				Accounts []struct {
+					PackageName         string `json:"PackageName"`
+					PackageCode         string `json:"PackageCode"`
+					SubProductCode      string `json:"SubProductCode"`
+					SubProductName      string `json:"SubProductName"`
+					CreateTime          int64  `json:"CreateTime"`
+					DeductionEndTime    int64  `json:"DeductionEndTime"`
+					ExpiredTime         string `json:"ExpiredTime"`
+					PackageEndTime      string `json:"PackageEndTime"`
 					CycleEndTime        string `json:"CycleEndTime"`
 					CapacitySize        int64  `json:"CapacitySize"`
 					CapacityRemain      int64  `json:"CapacityRemain"`
@@ -129,17 +137,34 @@ func (c *Client) Credits(ctx context.Context, acc *account.Account, expiringWith
 		return nil, fmt.Errorf("workbuddy: credit response: %w", err)
 	}
 
-	out := &upstream.Credits{}
+	out := &upstream.Credits{Packs: make([]upstream.CreditPack, 0, len(resp.Response.Data.Accounts))}
 	for _, a := range resp.Response.Data.Accounts {
-		remain, size := packageRemainSize(a.CycleCapacityRemain, a.CycleCapacityUsed, a.CycleCapacitySize,
+		remain, used, size := packageRemainSize(a.CycleCapacityRemain, a.CycleCapacityUsed, a.CycleCapacitySize,
 			a.CapacityRemain, a.CapacityUsed, a.CapacitySize)
 		out.Remain += remain
 		out.Total += size
+		end, hasEnd := effectivePackEnd(a.DeductionEndTime, a.ExpiredTime, a.PackageEndTime, a.CycleEndTime)
+		pack := upstream.CreditPack{
+			Name:   a.PackageName,
+			Size:   size,
+			Used:   used,
+			Remain: remain,
+		}
+		if hasEnd {
+			pack.ExpiresAt = end.Unix()
+			pack.ExpiresText = end.In(cstZone).Format(packageEndLayout)
+		}
+		// CreateTime arrives as epoch milliseconds; zero means the upstream
+		// omitted it, which stays omitted rather than becoming 1970.
+		if a.CreateTime > 0 {
+			pack.CreatedAt = a.CreateTime / 1000
+		}
+		out.Packs = append(out.Packs, pack)
+
 		if remain <= 0 {
 			continue
 		}
-		end, ok := parseGrantEnd(a.CycleEndTime)
-		if !ok || !end.After(now) {
+		if !hasEnd || !end.After(now) {
 			continue
 		}
 		if out.EarliestAt.IsZero() || end.Before(out.EarliestAt) {
@@ -619,7 +644,7 @@ func (c *Client) drainChat(ctx context.Context, acc *account.Account, body map[s
 	if err != nil {
 		return err
 	}
-	req, err := c.newRequest(ctx, http.MethodPost, "/v1/chat/completions", strings.NewReader(string(raw)), acc)
+	req, err := c.newRequest(ctx, http.MethodPost, "/v2/chat/completions", strings.NewReader(string(raw)), acc)
 	if err != nil {
 		return err
 	}
@@ -736,9 +761,9 @@ func parseClaim(data json.RawMessage) (int64, int64, error) {
 	return resp.Credit, resp.Energy, nil
 }
 
-// packageRemainSize normalises one credit grant to (remain, size). Periodic
-// grants take precedence because the non-periodic counters can lag.
-func packageRemainSize(cycleRemain, cycleUsed, cycleSize, remain, used, size int64) (int64, int64) {
+// packageRemainSize normalises one credit grant to (remain, used, size).
+// Periodic grants take precedence because the non-periodic counters can lag.
+func packageRemainSize(cycleRemain, cycleUsed, cycleSize, remain, used, size int64) (int64, int64, int64) {
 	if cycleSize > 0 {
 		r := cycleRemain
 		if r < 0 {
@@ -754,7 +779,7 @@ func packageRemainSize(cycleRemain, cycleUsed, cycleSize, remain, used, size int
 		if u > cycleSize {
 			u = cycleSize
 		}
-		return r, cycleSize
+		return r, u, cycleSize
 	}
 	r := remain
 	if r < 0 {
@@ -766,7 +791,26 @@ func packageRemainSize(cycleRemain, cycleUsed, cycleSize, remain, used, size int
 	if size < r {
 		size = r
 	}
-	return r, size
+	return r, used, size
+}
+
+// effectivePackEnd reports when a pack truly runs out. DeductionEndTime — the
+// end of the spend window — is the honest answer to "when is this credit
+// gone"; the grant wall-clocks are fallbacks, and CycleEndTime comes last
+// because it marks the period boundary where a periodic grant resets, not an
+// expiry. The expiry picture and the per-pack display must share this rule —
+// they once disagreed, and a summary that says "gone Friday" above a pack
+// table that says "gone next month" is worse than either alone.
+func effectivePackEnd(deductionEndMS int64, expired, packageEnd, cycleEnd string) (time.Time, bool) {
+	if deductionEndMS > 0 {
+		return time.UnixMilli(deductionEndMS), true
+	}
+	for _, raw := range []string{expired, packageEnd, cycleEnd} {
+		if t, ok := parseGrantEnd(raw); ok {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }
 
 func parseGrantEnd(s string) (time.Time, bool) {

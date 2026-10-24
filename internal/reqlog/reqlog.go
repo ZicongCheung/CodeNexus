@@ -38,7 +38,14 @@ type Event struct {
 	Time      time.Time `json:"time"`
 	RequestID string    `json:"request_id"`
 	Path      string    `json:"path"`
-	Source    string    `json:"source,omitempty"`
+	// Source is the wire the client spoke: chat, anthropic, responses or
+	// traework. It says nothing about which upstream served the turn.
+	Source string `json:"source,omitempty"`
+	// Platform is the upstream family that actually served the turn, taken
+	// from the account that was leased. A wire is a protocol and a platform is
+	// a vendor, and a single wire can be served by either platform, so the two
+	// are separate fields rather than one field guessing the other.
+	Platform string `json:"platform,omitempty"`
 	// Account is a display label. It never carries a full credential or token.
 	Account string `json:"account,omitempty"`
 	Model   string `json:"model,omitempty"`
@@ -55,6 +62,10 @@ type Event struct {
 	PromptTokens     int64 `json:"prompt_tokens,omitempty"`
 	CompletionTokens int64 `json:"completion_tokens,omitempty"`
 	TotalTokens      int64 `json:"total_tokens,omitempty"`
+	// CachedTokens is the share of the prompt served from the upstream's cache.
+	// It is billed below fresh input, so the stack of "what a turn cost" is
+	// incomplete without it.
+	CachedTokens int64 `json:"cached_tokens,omitempty"`
 	// TokensPerSecond is the generation rate after the first byte.
 	TokensPerSecond float64 `json:"tokens_per_second,omitempty"`
 

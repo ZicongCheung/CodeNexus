@@ -122,6 +122,11 @@ func (s *Server) runChat(w http.ResponseWriter, r *http.Request, t *turn) {
 		}
 		hint.Attempts = i + 1
 		hint.Account = accountLabel(lease.Account)
+		hint.PoolKey = lease.Account.Key()
+		// The platform is read off the lease, not off the request path: the
+		// same endpoint is served by either vendor depending on routing, so a
+		// path can never say which one it was.
+		hint.Platform = string(lease.Account.Source)
 		// Open the credit window before the attempt so the reading that opens
 		// it is taken from the account that is about to serve the turn.
 		s.beginSettlement(hint, u, lease.Account)
@@ -144,7 +149,7 @@ func (s *Server) runChat(w http.ResponseWriter, r *http.Request, t *turn) {
 				}
 			}
 			ue := lease.Fail(serr)
-			logx.Warnf("chat stream attempt %d/%d failed: %v", i+1, attempts, serr)
+			logx.Dialog.Warnf("chat stream attempt %d/%d failed: %v", i+1, attempts, serr)
 			if emitted {
 				// The stream already concluded in-band; the client saw the error.
 				return
@@ -176,7 +181,7 @@ func (s *Server) runChat(w http.ResponseWriter, r *http.Request, t *turn) {
 			}
 		}
 		ue := lease.Fail(cerr)
-		logx.Warnf("chat attempt %d/%d failed: %v", i+1, attempts, cerr)
+		logx.Dialog.Warnf("chat attempt %d/%d failed: %v", i+1, attempts, cerr)
 		if !ue.Retryable() || i == attempts-1 {
 			t.fail(w, ue, false)
 			return
@@ -189,10 +194,11 @@ func (s *Server) runChat(w http.ResponseWriter, r *http.Request, t *turn) {
 
 // finishNonStream records the answer's accounting and renders it.
 func finishNonStream(hint *recHint, t *turn, w http.ResponseWriter, resp *upstream.ChatResponse) {
-	hint.Usage = &struct{ Prompt, Completion, Total int64 }{
+	hint.Usage = &struct{ Prompt, Completion, Total, Cached int64 }{
 		Prompt:     int64(resp.Usage.PromptTokens),
 		Completion: int64(resp.Usage.CompletionTokens),
 		Total:      int64(resp.Usage.TotalTokens),
+		Cached:     int64(resp.Usage.CachedTokens),
 	}
 	hint.TurnID = resp.TurnID
 	hint.Credits = resp.CreditsConsumed
@@ -230,7 +236,7 @@ func (s *Server) continueNonStream(ctx context.Context, u upstream.Upstream, acc
 		roundText := strings.TrimSpace(resp.Content)
 		if len([]rune(roundText)) < cfg.TextThreshold && lastShort != "" &&
 			continuationSimilarity(lastShort, roundText) > cfg.SimilarityThreshold {
-			logx.Warnf("auto-continue stopped on a repeated short answer")
+			logx.Dialog.Warnf("auto-continue stopped on a repeated short answer")
 			break
 		}
 		if len([]rune(roundText)) < cfg.TextThreshold {
@@ -240,15 +246,15 @@ func (s *Server) continueNonStream(ctx context.Context, u upstream.Upstream, acc
 		next.Messages = continuedMessages(req.Messages, total, reasoningOnly)
 		extra, err := u.Chat(ctx, acc, &next)
 		if err != nil || extra == nil {
-			logx.Warnf("auto-continue round %d failed: %v", round, err)
+			logx.Dialog.Warnf("auto-continue round %d failed: %v", round, err)
 			break
 		}
 		joined, advanced := joinContinuation(total, extra.Content)
 		if !advanced {
-			logx.Warnf("auto-continue stopped on a round that repeated the previous answer")
+			logx.Dialog.Warnf("auto-continue stopped on a round that repeated the previous answer")
 			break
 		}
-		logx.Infof("auto-continue round=%d reason=%s finish=%s chars=%d",
+		logx.Dialog.Infof("auto-continue round=%d reason=%s finish=%s chars=%d",
 			round, continueReason(reasoningOnly), extra.FinishReason, len(extra.Content))
 		total = joined
 		resp.Content = total
@@ -364,6 +370,7 @@ func (s *Server) runStream(w http.ResponseWriter, r *http.Request, hint *recHint
 			usage.PromptTokens += d.Usage.PromptTokens
 			usage.CompletionTokens += d.Usage.CompletionTokens
 			usage.TotalTokens += d.Usage.TotalTokens
+			usage.CachedTokens += d.Usage.CachedTokens
 			sawUsage = true
 		}
 		if len(d.ToolCalls) > 0 {
@@ -437,7 +444,7 @@ func (s *Server) runStream(w http.ResponseWriter, r *http.Request, hint *recHint
 			}
 		}
 		if hold.repeated() {
-			logx.Warnf("auto-continue stopped on a round that repeated the previous answer")
+			logx.Dialog.Warnf("auto-continue stopped on a round that repeated the previous answer")
 			break
 		}
 		if !cfg.Enabled || round > cfg.MaxRounds {
@@ -451,13 +458,13 @@ func (s *Server) runStream(w http.ResponseWriter, r *http.Request, hint *recHint
 		current := strings.TrimSpace(roundText.String())
 		if len([]rune(current)) < cfg.TextThreshold && lastShort != "" &&
 			continuationSimilarity(lastShort, current) > cfg.SimilarityThreshold {
-			logx.Warnf("auto-continue stopped on a repeated short answer")
+			logx.Dialog.Warnf("auto-continue stopped on a repeated short answer")
 			break
 		}
 		if len([]rune(current)) < cfg.TextThreshold {
 			lastShort = current
 		}
-		logx.Infof("auto-continue round=%d reason=%s finish=%s chars=%d",
+		logx.Dialog.Infof("auto-continue round=%d reason=%s finish=%s chars=%d",
 			round, continueReason(reasoningOnly), finish, roundText.Len())
 		next := *t.Request
 		next.Messages = continuedMessages(t.Request.Messages, answer.String(), reasoningOnly)
@@ -535,7 +542,7 @@ func (o *streamOpener) Keepalive() {
 		return
 	}
 	if err := o.openLocked(); err != nil {
-		logx.Warnf("keepalive could not open the stream: %v", err)
+		logx.Dialog.Warnf("keepalive could not open the stream: %v", err)
 	}
 }
 
@@ -601,7 +608,7 @@ func watchStreamStall(ctx context.Context, stall time.Duration, progress <-chan 
 			}
 			timer.Reset(stall)
 		case <-timer.C:
-			logx.Warnf("stream stalled: no output for %s, abandoning the attempt", stall)
+			logx.Dialog.Warnf("stream stalled: no output for %s, abandoning the attempt", stall)
 			cancel()
 			return
 		case <-ctx.Done():
@@ -628,9 +635,9 @@ func (s *Server) tryRefresh(ctx context.Context, acc *account.Account, err error
 	}
 	done[key] = true
 	if rerr := s.refresher.RefreshNow(ctx, acc); rerr != nil {
-		logx.Warnf("refresh %s after auth error: %v", key, rerr)
+		logx.Dialog.Warnf("refresh %s after auth error: %v", key, rerr)
 		return false
 	}
-	logx.Infof("refreshed %s after auth error, retrying", key)
+	logx.Dialog.Infof("refreshed %s after auth error, retrying", key)
 	return true
 }

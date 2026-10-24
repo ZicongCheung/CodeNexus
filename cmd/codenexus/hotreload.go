@@ -32,7 +32,24 @@ var upstreamPaths = []string{
 	"upstreams.trae-cn.max_tokens", "upstreams.trae-cn.debug_upstream",
 	"upstreams.trae-cn.base_url", "upstreams.trae-cn.remote_base_url",
 	"upstreams.trae-cn.max_mode.enabled", "upstreams.trae-cn.max_mode.models",
+	// The remaining protocol endpoints and the device identity the adapter
+	// presents. They are advanced settings, but "advanced" is not "inert": a
+	// self-hosted relay is exactly the case where they change.
+	"upstreams.trae-cn.auth_base_url", "upstreams.trae-cn.ug_base_url",
+	"upstreams.trae-cn.pay_base_url", "upstreams.trae-cn.usage_base_url",
+	"upstreams.trae-cn.authorize_url", "upstreams.trae-cn.client_id",
+	"upstreams.trae-cn.web_login_port",
+	"upstreams.trae-cn.device_brand", "upstreams.trae-cn.device_type",
+	"upstreams.trae-cn.os_version", "upstreams.trae-cn.app_version",
+	"upstreams.trae-cn.ide_version", "upstreams.trae-cn.app_id",
+	"upstreams.trae-cn.cli.command",
+	// The check-in tuning lives inside the client (its spacing gate and 9074
+	// backoff are constructed with it), so it needs the same rebuild.
+	"upstreams.trae-cn.checkin.enabled", "upstreams.trae-cn.checkin.interval_seconds",
+	"upstreams.trae-cn.checkin.retry_after_seconds", "upstreams.trae-cn.checkin.max_backoff_seconds",
+	"upstreams.trae-cn.checkin.backoff_exponent_cap", "upstreams.trae-cn.checkin.rotate_device_id",
 	"upstreams.workbuddy.enabled", "upstreams.workbuddy.timeout_seconds",
+	"upstreams.workbuddy.base_url", "upstreams.workbuddy.user_agent",
 	"features.sanitize_fingerprints", "features.repair_tool_markup",
 }
 

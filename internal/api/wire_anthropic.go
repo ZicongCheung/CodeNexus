@@ -71,7 +71,7 @@ func parseAnthropicTurn(r *http.Request, body map[string]any) (*turn, error) {
 	stream, _ := body["stream"].(bool)
 	msgs, repairs := upstream.RepairToolPairing(parseMessages(oai["messages"]))
 	for _, rep := range repairs {
-		logx.Warnf("anthropic inbound %s dropped (tool call id=%q)", rep.Reason, rep.ID)
+		logx.Dialog.Warnf("anthropic inbound %s dropped (tool call id=%q)", rep.Reason, rep.ID)
 	}
 	inputTokens := anthropicInputEstimate(body)
 

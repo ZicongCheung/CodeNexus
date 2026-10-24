@@ -26,7 +26,14 @@ type recHint struct {
 	Model     string
 	Stream    bool
 	Attempts  int
-	Usage     *struct{ Prompt, Completion, Total int64 }
+	// PoolKey identifies the pool entry that served the turn, so the account's
+	// running token totals can be credited when the turn finishes.
+	PoolKey string
+	// Platform is the upstream family the account belongs to. It is recorded
+	// where the lease happens, because that is the only place that knows which
+	// account served the turn; nothing downstream can infer it from the path.
+	Platform string
+	Usage    *struct{ Prompt, Completion, Total, Cached int64 }
 	// TurnID is the upstream turn identifier the billing lookup is keyed on.
 	TurnID string
 	// Credits and CreditsSource are a charge the response already reported.
@@ -109,6 +116,7 @@ func (s *Server) record(source string, h http.HandlerFunc) http.HandlerFunc {
 			RequestID:  hint.RequestID,
 			Path:       r.URL.Path,
 			Source:     source,
+			Platform:   hint.Platform,
 			Account:    hint.Account,
 			Model:      hint.Model,
 			Stream:     hint.Stream,
@@ -127,6 +135,7 @@ func (s *Server) record(source string, h http.HandlerFunc) http.HandlerFunc {
 			ev.PromptTokens = hint.Usage.Prompt
 			ev.CompletionTokens = hint.Usage.Completion
 			ev.TotalTokens = hint.Usage.Total
+			ev.CachedTokens = hint.Usage.Cached
 			ev.TokensPerSecond = reqlog.Rate(hint.Usage.Completion, dur, 0)
 		}
 		// Tier one: a charge the response already carried.
@@ -138,6 +147,12 @@ func (s *Server) record(source string, h http.HandlerFunc) http.HandlerFunc {
 			}
 		}
 		s.recorder.Record(ev)
+		// Credit the account's running totals from the very numbers that just
+		// went into the request log, so the row in the console and the entry in
+		// the log can never disagree about what a turn cost.
+		if s.pool != nil && hint.PoolKey != "" && ev.TotalTokens > 0 {
+			s.pool.AddUsage(hint.PoolKey, ev.PromptTokens, ev.CompletionTokens, ev.TotalTokens, ev.TokensPerSecond)
+		}
 		// The persisted row is the console's history; the in-memory record is
 		// its live view. Neither waits on the other.
 		if st := s.usage.Load(); st != nil {
@@ -153,7 +168,7 @@ func usageRecord(ev reqlog.Event) usagestore.Record {
 		Time:             ev.Time,
 		RequestID:        ev.RequestID,
 		Wire:             ev.Source,
-		Source:           string(sourceOfPath(ev.Path)),
+		Source:           ev.Platform,
 		Account:          ev.Account,
 		Model:            ev.Model,
 		Stream:           ev.Stream,
@@ -164,19 +179,9 @@ func usageRecord(ev reqlog.Event) usagestore.Record {
 		PromptTokens:     ev.PromptTokens,
 		CompletionTokens: ev.CompletionTokens,
 		TotalTokens:      ev.TotalTokens,
+		CachedTokens:     ev.CachedTokens,
 		Credits:          ev.CreditsConsumed,
 		CreditsSource:    ev.CreditsSource,
-	}
-}
-
-// sourceOfPath names the upstream family a request was served by, when the
-// account label does not already say so.
-func sourceOfPath(path string) upstream.Source {
-	switch {
-	case strings.Contains(path, "responses"):
-		return "responses"
-	default:
-		return ""
 	}
 }
 

@@ -647,7 +647,48 @@ func usageOf(obj map[string]any) *upstream.Usage {
 	if prompt == 0 && completion == 0 && total == 0 {
 		return nil
 	}
-	return &upstream.Usage{PromptTokens: prompt, CompletionTokens: completion, TotalTokens: total}
+	return &upstream.Usage{
+		PromptTokens:     prompt,
+		CompletionTokens: completion,
+		TotalTokens:      total,
+		CachedTokens:     cachedOf(src),
+	}
+}
+
+// cachedOf reads the cache-hit share of the prompt. Every upstream spells it
+// differently and several send more than one spelling, so all known keys are
+// tried and the largest wins: a turn reported twice under different names
+// should still be counted once, and taking the maximum of near-duplicate
+// readings is closer to that than summing them.
+func cachedOf(src map[string]any) int {
+	best := 0
+	for _, key := range []string{"cached_tokens", "cache_read_input_tokens", "cacheReadInputTokens"} {
+		if v := intOf(src, key); v > best {
+			best = v
+		}
+	}
+	// Nested detail objects carry the same figure on the OpenAI and Anthropic
+	// spellings alike.
+	for _, holder := range []string{"prompt_tokens_details", "input_tokens_details"} {
+		if details, ok := src[holder].(map[string]any); ok {
+			for _, key := range []string{"cached_tokens", "cache_read_input_tokens"} {
+				if v := intOf(details, key); v > best {
+					best = v
+				}
+			}
+		}
+	}
+	if best < 0 {
+		return 0
+	}
+	// A cache reading can never exceed the prompt it was measured against.
+	// Upstreams occasionally report a total that includes cached tokens while
+	// the prompt figure is smaller, and clamping keeps the stacked chart's
+	// "input minus cache" segment from going negative.
+	if prompt := intOf(src, "prompt_tokens", "input_tokens", "promptTokens"); prompt > 0 && best > prompt {
+		return prompt
+	}
+	return best
 }
 
 func intOf(m map[string]any, keys ...string) int {

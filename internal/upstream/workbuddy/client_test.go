@@ -16,14 +16,17 @@ func testAccount() *account.Account {
 
 func TestChat(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/chat/completions" {
+		if r.URL.Path != "/v2/chat/completions" {
 			t.Errorf("path = %s", r.URL.Path)
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer tok" {
 			t.Errorf("authorization = %q", got)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"1","model":"m","choices":[{"message":{"content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`))
+		// The upstream only serves /v2 and only in streaming mode, so Chat has
+		// to answer from an SSE body even for a blocking call.
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
 	}))
 	defer srv.Close()
 
@@ -67,8 +70,23 @@ func TestChatStream(t *testing.T) {
 }
 
 func TestListModels(t *testing.T) {
+	// Both probes answer from the same stub, so the merge sees the same ids on
+	// both sides and the catalogue's richer shape wins — the contract the
+	// console's model table is built on.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"data":[{"id":"deepseek-v4-flash"},{"id":"glm-5"}]}`))
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case configPath:
+			_, _ = w.Write([]byte(`{"code":0,"data":{"models":[
+				{"id":"deepseek-v4-flash","credits":"x1"},
+				{"id":"glm-5","credits":"x1"}]}}`))
+		case enterpriseModelsPath:
+			_, _ = w.Write([]byte(`{"code":0,"data":{"models":[
+				{"id":"deepseek-v4-flash"},{"id":"glm-5"}],
+				"agents":[{"name":"cli","models":["deepseek-v4-flash","glm-5"]}]}}`))
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	defer srv.Close()
 

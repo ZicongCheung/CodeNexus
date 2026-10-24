@@ -94,10 +94,13 @@ var defaultDeniedTools = []string{
 var defaultCLICommands = []string{"traecli", "trae-cli", "traex", "trae"}
 
 // Environment overrides let an operator point at a non-standard build without
-// editing the config file.
+// editing the config file. The deny list is here rather than in the config for
+// the same reason the reference keeps it in the environment: it is a
+// machine-level safety net, not a per-run preference.
 const (
-	cliEnvCommand = "CODENEXUS_TRAE_CLI_COMMAND"
-	cliEnvArgs    = "CODENEXUS_TRAE_CLI_ARGS"
+	cliEnvCommand         = "CODENEXUS_TRAE_CLI_COMMAND"
+	cliEnvArgs            = "CODENEXUS_TRAE_CLI_ARGS"
+	cliEnvDisallowedTools = "CODENEXUS_TRAE_CLI_DISALLOWED_TOOLS"
 )
 
 // cliBaseArgs is the built-in argument prefix.
@@ -167,6 +170,9 @@ func (c CLIConfig) deniedTools(callerOwnsTools bool) []string {
 		out = append(out, name)
 	}
 	for _, name := range defaultDeniedTools {
+		add(name)
+	}
+	for _, name := range splitCLIArgs(os.Getenv(cliEnvDisallowedTools)) {
 		add(name)
 	}
 	for _, name := range c.DisallowedTools {

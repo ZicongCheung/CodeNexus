@@ -60,6 +60,10 @@ var _ upstream.Maintenance = (*Client)(nil)
 
 // CheckinConfig tunes the daily check-in and its risk-control handling.
 type CheckinConfig struct {
+	// Enabled decides whether this source takes part in the daily sweep. Nil
+	// means enabled, which is what a config written before the switch existed
+	// gets — otherwise upgrading would silently stop every check-in.
+	Enabled *bool
 	// IntervalSeconds is the minimum spacing between two claims. The upstream
 	// throttles a source by device, and every account here shares this machine,
 	// so the gate is process-wide rather than per account.
@@ -99,6 +103,11 @@ func (c CheckinConfig) normalize() CheckinConfig {
 		c.RotateDeviceID = boolPointer(true)
 	}
 	return c
+}
+
+// checkinEnabled reports whether this source joins the daily sweep.
+func (c CheckinConfig) checkinEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
 }
 
 func (c CheckinConfig) rotationEnabled() bool {
@@ -329,6 +338,10 @@ func (c CheckinConfig) backoffFor(count int, _ time.Time) time.Duration {
 
 // Scope implements upstream.Maintenance. Trae CN has a daily check-in and a
 // credit balance, and none of the WorkBuddy growth families.
+//
+// Checkin is switchable per source: an operator who keeps Trae strictly for
+// traffic can stop it from participating in the daily sweep without losing the
+// balance refresh that powers the credits page.
 func (c *Client) Scope(acc *account.Account) upstream.TaskScope {
 	if c.cfg.UpstreamMode == CLIMode || acc == nil {
 		return upstream.TaskScope{}
@@ -338,7 +351,7 @@ func (c *Client) Scope(acc *account.Account) upstream.TaskScope {
 	if acc.Local || strings.TrimSpace(acc.Token()) == "" {
 		return upstream.TaskScope{}
 	}
-	return upstream.TaskScope{Checkin: true, Balance: true}
+	return upstream.TaskScope{Checkin: c.cfg.Checkin.checkinEnabled(), Balance: true}
 }
 
 // Checkin performs the daily check-in. A repeated check-in is reported as

@@ -39,7 +39,8 @@ var _ upstream.DeviceAuth = (*workbuddy.Client)(nil)
 var _ upstream.DeviceAuth = (*traecn.Client)(nil)
 
 // version is overridable at build time via -ldflags "-X main.version=...".
-var version = "0.0.0-dev"
+// The literal is the development default; scripts/build.sh stamps the real one.
+var version = "0.1.0"
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "auth" {
@@ -170,7 +171,7 @@ func run(configPath string, opts runOptions) error {
 		Maintenance: upstream.MaintenanceFor,
 		Refresh:     refresher,
 		State:       scheduler.LoadState(statePath),
-		Logf:        func(format string, args ...any) { logx.Infof(format, args...) },
+		Logf:        func(format string, args ...any) { logx.Task.Infof(format, args...) },
 	})
 	go sched.Run(ctx)
 	sched.StartBalanceRefresh(ctx)
@@ -353,6 +354,7 @@ func run(configPath string, opts runOptions) error {
 		panel.WithUsage(usage),
 		panel.WithConfigPath(configPath),
 		panel.WithHotApply(applyHot),
+		panel.WithProcessInfo(version, cfg.Listen, startedAt),
 		panel.WithRestart(restartProcess(cfg.Listen, func() *http.Server { return httpSrv }, relisten)))
 	srv = api.NewServer(cfg, p, console,
 		api.WithRefresher(refresher),
@@ -614,20 +616,10 @@ func registerUpstreams(cfg *config.Config) {
 				Models:  cfg.Upstreams.TraeCN.MaxMode.Models,
 			},
 			CLI: traecn.CLIConfig{
-				Command:         cfg.Upstreams.TraeCN.CLI.Command,
-				Args:            cfg.Upstreams.TraeCN.CLI.Args,
-				WorkDir:         cfg.Upstreams.TraeCN.CLI.WorkDir,
-				ModelMode:       cfg.Upstreams.TraeCN.CLI.ModelMode,
-				OutputMode:      cfg.Upstreams.TraeCN.CLI.OutputMode,
-				PromptStdin:     cfg.Upstreams.TraeCN.CLI.PromptStdin,
-				MaxConcurrency:  cfg.Upstreams.TraeCN.CLI.MaxConcurrency,
-				TimeoutSeconds:  cfg.Upstreams.TraeCN.CLI.TimeoutSeconds,
-				DisableTools:    cfg.Upstreams.TraeCN.CLI.DisableTools,
-				DisallowedTools: cfg.Upstreams.TraeCN.CLI.DisallowedTools,
-				MaxMessages:     cfg.Upstreams.TraeCN.CLI.MaxMessages,
-				MaxPromptChars:  cfg.Upstreams.TraeCN.CLI.MaxPromptChars,
+				Command: cfg.Upstreams.TraeCN.CLI.Command,
 			},
 			Checkin: traecn.CheckinConfig{
+				Enabled:            &cfg.Upstreams.TraeCN.Checkin.Enabled,
 				IntervalSeconds:    cfg.Upstreams.TraeCN.Checkin.IntervalSeconds,
 				RetryAfterSeconds:  cfg.Upstreams.TraeCN.Checkin.RetryAfterSeconds,
 				MaxBackoffSeconds:  cfg.Upstreams.TraeCN.Checkin.MaxBackoffSeconds,

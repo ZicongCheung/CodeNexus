@@ -29,7 +29,7 @@ func parseChatTurn(r *http.Request, body map[string]any) (*turn, error) {
 	stream, _ := body["stream"].(bool)
 	msgs, repairs := upstream.RepairToolPairing(parseMessages(body["messages"]))
 	for _, rep := range repairs {
-		logx.Warnf("inbound %s dropped (tool call id=%q)", rep.Reason, rep.ID)
+		logx.Dialog.Warnf("inbound %s dropped (tool call id=%q)", rep.Reason, rep.ID)
 	}
 	user, _ := body["user"].(string)
 	return &turn{

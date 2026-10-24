@@ -572,3 +572,30 @@ func (p *Pool) chooseWeightedLocked(cands []*entry, now time.Time) *entry {
 	}
 	return top[len(top)-1].e
 }
+
+// AddUsage folds a finished turn's token counts into the account's running
+// totals. It is called once per completed request from the same place that
+// writes the request log, so streaming and non-streaming turns are both
+// counted and neither is counted twice.
+//
+// These are process-local on purpose. Persisting them would leave one column
+// of the account row describing all history while the success and failure
+// counts beside it describe only this run.
+func (p *Pool) AddUsage(key string, prompt, completion, total int64, tps float64) {
+	if key == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.entries[key]
+	if !ok {
+		return
+	}
+	e.promptTokens += prompt
+	e.completionTokens += completion
+	e.totalTokens += total
+	if tps > 0 {
+		e.lastTPS = tps
+	}
+	p.dirty = true
+}

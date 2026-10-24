@@ -310,41 +310,28 @@ type MaxModeConfig struct {
 	Models []string `json:"models,omitempty"`
 }
 
-// TraeCLIConfig configures the local-CLI executor. Zero values take the
-// built-in defaults the adapter ships.
+// TraeCLIConfig configures the local-CLI executor.
+//
+// Only the executable path is configurable. Everything else the CLI subprocess
+// needs — arguments, work directory, output mode, concurrency, timeouts, the
+// tool deny list, transcript bounds — is a built-in default inside the adapter,
+// which is also how the reference implementation treats it (one environment
+// variable, no console surface). Exposing twelve knobs for a mode most
+// installations never select made the settings page worse, not better.
 type TraeCLIConfig struct {
 	// Command overrides the executable. Empty searches the built-in names.
 	Command string `json:"command,omitempty"`
-	// Args replaces the built-in base arguments (default "-p").
-	Args []string `json:"args,omitempty"`
-	// WorkDir isolates the child process.
-	WorkDir string `json:"work_dir,omitempty"`
-	// ModelMode is how the model reaches the CLI: default, config, flag, none.
-	ModelMode string `json:"model_mode,omitempty"`
-	// OutputMode is "json" (structured, default) or "text".
-	OutputMode string `json:"output_mode,omitempty"`
-	// PromptStdin sends the prompt on stdin instead of as an argument.
-	PromptStdin bool `json:"prompt_stdin,omitempty"`
-	// MaxConcurrency caps simultaneous child processes.
-	MaxConcurrency int `json:"max_concurrency,omitempty"`
-	// TimeoutSeconds bounds the silence between two reads from the child.
-	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
-	// DisableTools denies the built-in tool set. Nil means enabled, which is the
-	// safe default for a proxy that would otherwise run commands on this host.
-	DisableTools *bool `json:"disable_tools,omitempty"`
-	// DisallowedTools adds to the built-in deny list.
-	DisallowedTools []string `json:"disallowed_tools,omitempty"`
-	// MaxMessages and MaxPromptChars bound the serialized transcript.
-	MaxMessages    int `json:"max_messages,omitempty"`
-	MaxPromptChars int `json:"max_prompt_chars,omitempty"`
 }
 
-// CheckinConfig configures the daily check-in and its risk-control handling.
+// CheckinConfig configures the daily check-in's risk-control handling.
+//
+// When the check-in runs is not here: the gateway's scheduler owns the slot
+// hours for every source at once, so a per-source "HH:MM" would be a second,
+// conflicting answer to the same question.
 type CheckinConfig struct {
-	// Enabled turns the daily sweep on.
+	// Enabled lets this source take part in the daily sweep. Off means its
+	// accounts are skipped but still get their balance refreshed.
 	Enabled bool `json:"enabled"`
-	// At is the local time of day the sweep runs, "HH:MM".
-	At string `json:"at"`
 	// IntervalSeconds spaces out the claims of one sweep. The upstream throttles
 	// a source by device, so back-to-back claims from one machine are unwise.
 	IntervalSeconds int `json:"interval_seconds"`
@@ -434,19 +421,9 @@ func Default() Config {
 				AppVersion:     "3.3.65",
 				IDEVersion:     "3.3.67",
 				AppID:          "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8",
-				CLI: TraeCLIConfig{
-					Args:           []string{"-p"},
-					ModelMode:      "default",
-					OutputMode:     "json",
-					MaxConcurrency: 2,
-					TimeoutSeconds: 300,
-					DisableTools:   boolPtr(true),
-					MaxMessages:    60,
-					MaxPromptChars: 20000,
-				},
+				CLI:            TraeCLIConfig{},
 				Checkin: CheckinConfig{
 					Enabled:            true,
-					At:                 "08:30",
 					IntervalSeconds:    60,
 					RetryAfterSeconds:  60,
 					MaxBackoffSeconds:  3600,
@@ -654,48 +631,14 @@ func (c *Config) normalizeTrae() {
 	if t.UpstreamMode == "auto-route" {
 		t.AutoRoute = true
 	}
-	c.normalizeTraeCLI()
 	c.normalizeTraeCheckin()
 }
 
-// normalizeTraeCLI fills the local-CLI executor defaults and clamps its bounds.
-func (c *Config) normalizeTraeCLI() {
-	cli := &c.Upstreams.TraeCN.CLI
-	d := Default().Upstreams.TraeCN.CLI
-	if len(cli.Args) == 0 {
-		cli.Args = d.Args
-	}
-	if strings.TrimSpace(cli.ModelMode) == "" {
-		cli.ModelMode = d.ModelMode
-	}
-	if strings.TrimSpace(cli.OutputMode) == "" {
-		cli.OutputMode = d.OutputMode
-	}
-	if cli.MaxConcurrency <= 0 {
-		cli.MaxConcurrency = d.MaxConcurrency
-	}
-	if cli.TimeoutSeconds <= 0 {
-		cli.TimeoutSeconds = d.TimeoutSeconds
-	}
-	if cli.DisableTools == nil {
-		cli.DisableTools = d.DisableTools
-	}
-	if cli.MaxMessages <= 0 {
-		cli.MaxMessages = d.MaxMessages
-	}
-	if cli.MaxPromptChars <= 0 {
-		cli.MaxPromptChars = d.MaxPromptChars
-	}
-}
-
-// normalizeTraeCheckin fills the check-in defaults, rejecting a malformed time
-// so the sweep cannot be scheduled at an undefined moment.
+// normalizeTraeCheckin fills the check-in defaults. The sweep's time is not
+// among them: the scheduler owns slot hours for every source.
 func (c *Config) normalizeTraeCheckin() {
 	ck := &c.Upstreams.TraeCN.Checkin
 	d := Default().Upstreams.TraeCN.Checkin
-	if _, err := parseClock(ck.At); err != nil {
-		ck.At = d.At
-	}
 	if ck.IntervalSeconds <= 0 {
 		ck.IntervalSeconds = d.IntervalSeconds
 	}
@@ -714,11 +657,6 @@ func (c *Config) normalizeTraeCheckin() {
 	if ck.RotateDeviceID == nil {
 		ck.RotateDeviceID = d.RotateDeviceID
 	}
-}
-
-// parseClock validates an "HH:MM" time of day.
-func parseClock(v string) (time.Time, error) {
-	return time.Parse("15:04", strings.TrimSpace(v))
 }
 
 // normalizeSchedule fills defaults and validates the scheduler section. Hours

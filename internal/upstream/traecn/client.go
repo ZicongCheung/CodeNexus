@@ -184,15 +184,18 @@ func New(cfg Config) *Client {
 
 	c := &Client{
 		cfg: cfg,
+		// Both callers dial upstream directly; a stale HTTP_PROXY in the
+		// environment must not black-hole API traffic.
 		http: &http.Client{
-			Timeout: time.Duration(cfg.TimeoutSeconds) * time.Second,
+			Timeout:   time.Duration(cfg.TimeoutSeconds) * time.Second,
+			Transport: &http.Transport{Proxy: nil},
 		},
 		// A streamed answer legitimately runs for minutes, so only a per-request
 		// context bounds it; a loopback first-byte timeout catches a hung
 		// connection instead of the whole-request timeout.
 		stream: &http.Client{
 			Transport: &http.Transport{
-				Proxy:                 http.ProxyFromEnvironment,
+				Proxy:                 nil,
 				ResponseHeaderTimeout: 60 * time.Second,
 				IdleConnTimeout:       90 * time.Second,
 			},
