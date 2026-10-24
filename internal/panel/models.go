@@ -46,7 +46,7 @@ type modelRow struct {
 	// PromoFactor is the discount fraction (0 = free); nil when the upstream
 	// only states a label, which is how off-peak offers arrive.
 	PromoFactor *float64 `json:"promo_factor,omitempty"`
-	Default      bool   `json:"default,omitempty"`
+	Default     bool     `json:"default,omitempty"`
 }
 
 // merge folds one account's view of a model into the row. Windows, output caps
@@ -240,8 +240,8 @@ type probeResult struct {
 	// ToolCalls lists the invocations the model made in tool mode.
 	ToolCalls []probeToolCall `json:"tool_calls,omitempty"`
 	// FinishReason is why the model stopped, straight from the upstream.
-	FinishReason string `json:"finish_reason,omitempty"`
-	TotalToken   int64  `json:"total_tokens,omitempty"`
+	FinishReason string  `json:"finish_reason,omitempty"`
+	TotalToken   int64   `json:"total_tokens,omitempty"`
 	Credits      float64 `json:"credits,omitempty"`
 }
 

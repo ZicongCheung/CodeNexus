@@ -44,16 +44,16 @@ const probeUA = "CodeBuddyIDE/4.12.0 CodeBuddy/4.12.0"
 // the console does not show is not parsed, so a shape change upstream cannot
 // break what is displayed.
 type catalogueEntry struct {
-	ID              string `json:"id"`
-	Name            string `json:"name"`
-	Credits         string `json:"credits"`
-	MaxInputTokens  int    `json:"maxInputTokens"`
-	MaxOutputTokens int    `json:"maxOutputTokens"`
-	SupportsImages  bool   `json:"supportsImages"`
-	SupportsTool    bool   `json:"supportsToolCall"`
-	SupportsReason  bool   `json:"supportsReasoning"`
-	IsDefault       bool   `json:"isDefault"`
-	Disabled        bool   `json:"disabled"`
+	ID              string   `json:"id"`
+	Name            string   `json:"name"`
+	Credits         string   `json:"credits"`
+	MaxInputTokens  int      `json:"maxInputTokens"`
+	MaxOutputTokens int      `json:"maxOutputTokens"`
+	SupportsImages  bool     `json:"supportsImages"`
+	SupportsTool    bool     `json:"supportsToolCall"`
+	SupportsReason  bool     `json:"supportsReasoning"`
+	IsDefault       bool     `json:"isDefault"`
+	Disabled        bool     `json:"disabled"`
 	Tags            []string `json:"tags"`
 	Reasoning       struct {
 		Effort           string   `json:"effort"`
@@ -79,7 +79,7 @@ type cataloguePromotion struct {
 	} `json:"discount"`
 	// Hover carries the sentence the desktop client shows on hover; for
 	// off-peak offers it is the only place the window is written down.
-	Hover    *struct {
+	Hover *struct {
 		TextZh string `json:"textZh"`
 	} `json:"hover"`
 	Schedule *promotionSchedule `json:"schedule"`

@@ -105,7 +105,9 @@ func TestCatalogProbeSendsIDEUserAgent(t *testing.T) {
 func TestPromotionIndexPicksHighestPriority(t *testing.T) {
 	promos := []cataloguePromotion{
 		{Enabled: true, Priority: 50, ModelIDs: []string{"glm-5.2"},
-			Badge:    &struct{ Label string `json:"label"` }{Label: "专属补贴"},
+			Badge: &struct {
+				Label string `json:"label"`
+			}{Label: "专属补贴"},
 			Discount: &struct {
 				DiscountedCredits string  `json:"discountedCredits"`
 				Factor            float64 `json:"factor"`
@@ -115,7 +117,9 @@ func TestPromotionIndexPicksHighestPriority(t *testing.T) {
 				End   string `json:"end"`
 			}{{Start: "08:00", End: "23:00"}}}},
 		{Enabled: true, Priority: 100, ModelIDs: []string{"glm-5.2"},
-			Badge:    &struct{ Label string `json:"label"` }{Label: "夜间折扣"},
+			Badge: &struct {
+				Label string `json:"label"`
+			}{Label: "夜间折扣"},
 			Discount: &struct {
 				DiscountedCredits string  `json:"discountedCredits"`
 				Factor            float64 `json:"factor"`
@@ -152,8 +156,12 @@ func TestPromotionIndexKeepsLabelOnlyOffers(t *testing.T) {
 		Enabled:  true,
 		Priority: 10,
 		ModelIDs: []string{"deepseek-v4-flash"},
-		Badge:    &struct{ Label string `json:"label"` }{Label: "错峰使用"},
-		Hover:    &struct{ TextZh string `json:"textZh"` }{TextZh: "北京时间工作日 00:00-09:00"},
+		Badge: &struct {
+			Label string `json:"label"`
+		}{Label: "错峰使用"},
+		Hover: &struct {
+			TextZh string `json:"textZh"`
+		}{TextZh: "北京时间工作日 00:00-09:00"},
 		Schedule: &promotionSchedule{Daily: []struct {
 			Start string `json:"start"`
 			End   string `json:"end"`
@@ -173,7 +181,9 @@ func TestPromotionIndexHonoursValidDates(t *testing.T) {
 	promos := []cataloguePromotion{{
 		Enabled:  true,
 		ModelIDs: []string{"m"},
-		Badge:    &struct{ Label string `json:"label"` }{Label: "限时免费"},
+		Badge: &struct {
+			Label string `json:"label"`
+		}{Label: "限时免费"},
 		Schedule: &promotionSchedule{ValidUntil: "2026-10-01T00:00:00+08:00"},
 	}}
 	if _, ok := promotionIndex(promos, time.Date(2026, 10, 23, 12, 0, 0, 0, promoZone))["m"]; ok {
