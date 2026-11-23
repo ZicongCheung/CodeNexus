@@ -48,8 +48,19 @@ type Config struct {
 
 // Client is the WorkBuddy / CodeBuddy upstream adapter.
 type Client struct {
-	cfg  Config
+	cfg Config
+	// http bounds a whole exchange. It serves the short calls — auth, the
+	// catalogue, billing, growth tasks — where one ceiling over the entire
+	// request is the right answer.
 	http *http.Client
+	// stream serves the chat turn itself. A streamed answer legitimately runs
+	// for minutes: a long generation on a slow model easily passes two, and
+	// http.Client.Timeout covers the body read, so a whole-request ceiling
+	// would cut a healthy answer mid-sentence and hand the caller a timeout
+	// for a turn that was still arriving. What is bounded here is only the
+	// wait for the answer to start; a stream that goes silent afterwards is
+	// the API layer's watchdog to abandon.
+	stream *http.Client
 }
 
 // New builds an adapter, applying defaults for zero-valued fields.
@@ -71,6 +82,17 @@ func New(cfg Config) *Client {
 		http: &http.Client{
 			Timeout:   time.Duration(cfg.TimeoutSeconds) * time.Second,
 			Transport: &http.Transport{Proxy: nil},
+		},
+		// The streaming turn carries no whole-request timeout; the first byte is
+		// what gets a bound, because "the upstream has not started answering" and
+		// "the upstream is still answering" are different failures and only the
+		// first one is worth retrying on another account.
+		stream: &http.Client{
+			Transport: &http.Transport{
+				Proxy:                 nil,
+				ResponseHeaderTimeout: time.Duration(cfg.TimeoutSeconds) * time.Second,
+				IdleConnTimeout:       90 * time.Second,
+			},
 		},
 	}
 }
@@ -264,7 +286,7 @@ func (c *Client) ChatStream(ctx context.Context, acc *account.Account, req *upst
 		return err
 	}
 	httpReq.Header.Set("Accept", "text/event-stream")
-	resp, err := c.http.Do(httpReq)
+	resp, err := c.stream.Do(httpReq)
 	if err != nil {
 		return upstream.Classify(err)
 	}

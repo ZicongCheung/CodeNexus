@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/ZicongCheung/CodeNexus/internal/account"
 	"github.com/ZicongCheung/CodeNexus/internal/upstream"
@@ -66,6 +67,58 @@ func TestChatStream(t *testing.T) {
 	}
 	if got != "hello" {
 		t.Fatalf("content = %q", got)
+	}
+}
+
+// A streamed answer that outlasts the configured request timeout must still
+// arrive. The timeout bounds how long the answer may take to start, not how
+// long it may run: a whole-request ceiling cut healthy answers off mid-answer
+// and surfaced as a timeout for a turn another account could not have served
+// any faster.
+func TestChatStreamOutlivesTheRequestTimeout(t *testing.T) {
+	const timeout = 1 // seconds
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"he\"}}]}\n\n"))
+		w.(http.Flusher).Flush()
+		// Stall well past the ceiling the adapter is configured with.
+		time.Sleep(3 * timeout * time.Second)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"llo\"},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	c := New(Config{BaseURL: srv.URL, TimeoutSeconds: timeout})
+	var got string
+	err := c.ChatStream(context.Background(), testAccount(), &upstream.ChatRequest{Model: "m"}, func(d upstream.StreamDelta) error {
+		got += d.Content
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	if got != "hello" {
+		t.Fatalf("content = %q", got)
+	}
+}
+
+// Dropping the whole-request ceiling must not drop the bound that matters: an
+// upstream that never starts answering has to be given up on, or a hung
+// connection would hold the account's slot forever instead of failing over.
+func TestChatStreamBoundsTheFirstByte(t *testing.T) {
+	const timeout = 1 // seconds
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release // never answer before the client gives up
+	}))
+	defer func() { close(release); srv.Close() }()
+
+	c := New(Config{BaseURL: srv.URL, TimeoutSeconds: timeout})
+	err := c.ChatStream(context.Background(), testAccount(), &upstream.ChatRequest{Model: "m"}, func(upstream.StreamDelta) error {
+		return nil
+	})
+	if err == nil {
+		t.Fatal("ChatStream: want a first-byte timeout, got nil")
 	}
 }
 
